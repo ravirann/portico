@@ -47,6 +47,20 @@ interface HarvestedResponse {
   contentType: string;
 }
 
+/**
+ * A request the agent caused — captured with its body so a mutation (POST/PUT/
+ * PATCH/DELETE) or a search (POST with a query body) can be frozen into a
+ * deterministic `api` step, not just harvested as a read.
+ */
+export interface CapturedRequest {
+  method: string;
+  url: string;
+  pathname: string;
+  resourceType: string;
+  /** Raw request body, if any (JSON string for most API calls). */
+  postData?: string;
+}
+
 export interface AuthorResult {
   flow: Flow;
   /** What the agent did, for the audit trail / review UI. */
@@ -57,6 +71,8 @@ export interface AuthorResult {
     agentMessage: string;
     actions: unknown[];
     dataEndpoints: string[];
+    /** Search/mutation requests captured with bodies (for write-flow authoring). */
+    writeRequests: CapturedRequest[];
   };
 }
 
@@ -157,14 +173,228 @@ function parameterizeUrl(finalUrl: string): { url: string; inputs: Record<string
  * auth/session, telemetry. Never the data a flow is authored to harvest.
  */
 const BOOT_NOISE_RE =
-  /\/(permissions|flags|userinfo|session|clinics|tickets|me|config|health|analytics|telemetry|events|log)\b/i;
+  /\/(permissions|flags|userinfo|session|clinics|tickets|me|config|health|analytics|telemetry|events|log|collect|faro|rum|metrics|beacon)\b/i;
+
+/** Collapse duplicate captured requests (agents retry) by method+path+body. */
+export function dedupeRequests(requests: CapturedRequest[]): CapturedRequest[] {
+  const seen = new Map<string, CapturedRequest>();
+  for (const r of requests) {
+    if (BOOT_NOISE_RE.test(r.pathname)) continue;
+    seen.set(`${r.method} ${r.pathname} ${r.postData ?? ""}`, r);
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Per-run VALUE tokens named in the goal — the things a reusable flow must
+ * parameterize. Digit runs (phone/ids ≥5 digits) are the reliable signal; a
+ * request carrying one of these is acting on the goal's specific record.
+ */
+export function goalTokens(goal: string): string[] {
+  return [...new Set((goal.match(/\d{5,}/g) ?? []))];
+}
+
+/** camelCase / kebab query key → snake_case input name (phoneNumber → phone_number). */
+function inputNameFor(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[-\s]+/g, "_").toLowerCase();
+}
+
+/** Peripheral third-party integrations customer-lens fans out to — chat, call
+ *  logs, workflow webhooks. Not the primary record a search/update acts on. */
+const INTEGRATION_NOISE_RE = /\/(chat|kaleyra|n8n|webhook|conversations|whatsapp|zoko|freshdesk)\b/i;
+
+/** A phone-shaped token (10–13 digits) maps to one canonical input, so the same
+ *  number in three different query params doesn't spawn three inputs. */
+function canonicalInputName(token: string, queryKey: string): string {
+  return /^\d{10,13}$/.test(token) ? "phone_number" : inputNameFor(queryKey);
+}
+
+/** Last path segment, singularized, as an output key (customers → customer). */
+function outputKeyFor(pathname: string): string {
+  const seg = pathname.split("/").filter(Boolean).pop() ?? "result";
+  return seg.replace(/s$/, "") || "result";
+}
+
+/** An `api`-tier step, when a step's body carries an `api` block. */
+interface ApiBlock {
+  url: string;
+  method: string;
+  body?: unknown;
+  bodyType?: "json";
+  responseType?: "json";
+}
+
+/**
+ * Turn a captured request into a deterministic `api` step IF it carries a
+ * goal value (a phone/id the flow must parameterize) — replacing that value in
+ * the URL query and JSON body with a `{{input}}` marker. Returns null for
+ * requests that carry no goal value (plain reads — covered by harvest).
+ */
+function apiStepFromRequest(
+  req: CapturedRequest,
+  tokens: string[],
+): { step: Step; inputs: Record<string, string>; isMutation: boolean } | null {
+  const inputs: Record<string, string> = {};
+  let matched = false;
+
+  let url: string;
+  try {
+    url = new URL(req.url).toString();
+  } catch {
+    return null;
+  }
+  const u = new URL(url);
+  for (const [k, v] of [...u.searchParams.entries()]) {
+    const tok = tokens.find((t) => v.includes(t));
+    if (!tok) continue;
+    const name = canonicalInputName(tok, k);
+    inputs[name] = `string — e.g. ${v}`;
+    u.searchParams.set(k, v.replace(tok, `{{${name}}}`));
+    matched = true;
+  }
+  const urlOut = u.toString().replace(/%7B%7B/gi, "{{").replace(/%7D%7D/gi, "}}");
+
+  // Parameterize goal values inside a JSON body too.
+  let body: unknown;
+  if (req.postData) {
+    try {
+      const parsed = JSON.parse(req.postData) as unknown;
+      const walk = (val: unknown): unknown => {
+        if (typeof val === "string") {
+          const tok = tokens.find((t) => val.includes(t));
+          if (tok) {
+            matched = true;
+            // Body values are usually the id/phone itself; name after the token's role.
+            const name = "phone_number";
+            inputs[name] = `string — e.g. ${val}`;
+            return val.replace(tok, `{{${name}}}`);
+          }
+          return val;
+        }
+        if (Array.isArray(val)) return val.map(walk);
+        if (val && typeof val === "object") {
+          return Object.fromEntries(Object.entries(val as Record<string, unknown>).map(([k, x]) => [k, walk(x)]));
+        }
+        return val;
+      };
+      body = walk(parsed);
+    } catch {
+      body = req.postData;
+    }
+  }
+
+  const isMutation = !["GET", "HEAD"].includes(req.method);
+  if (!matched && !isMutation) return null; // a plain read with no goal value — leave to harvest
+
+  const api: ApiBlock = { url: urlOut, method: req.method, responseType: "json" };
+  if (body !== undefined) {
+    api.body = body;
+    api.bodyType = "json";
+  }
+  const step = {
+    type: "read",
+    label: `${isMutation ? "Update via" : "Look up via"} ${outputKeyFor(req.pathname)} API`,
+    api,
+    extract: { key: outputKeyFor(req.pathname), schema: {} as Record<string, unknown> },
+  } as unknown as Step;
+  return { step, inputs, isMutation };
+}
 
 export function compileAgentRun(
   goal: string,
   finalUrl: string,
   responses: HarvestedResponse[],
   key: string,
+  requests: CapturedRequest[] = [],
 ): Flow {
+  // Preferred path: the goal names specific values (a phone/id) and the agent's
+  // actions carried them. A GET LOOKUP (search by phone) is frozen as a
+  // deep-link harvest — navigate the app page with the value as a query param
+  // and INTERCEPT the response the page makes. The page performs the
+  // AUTHENTICATED request itself, so there's no stale-token problem that a raw
+  // API-replay would hit. A MUTATION (update) becomes a deterministic `api`
+  // write step. Lookups run first so a write can reference what a read found.
+  const tokens = goalTokens(goal);
+  if (tokens.length > 0) {
+    const lookups: Array<{ pathname: string; paramKey: string; name: string; example: string }> = [];
+    const mutationSteps: Step[] = [];
+    const inputs: Record<string, string> = {};
+    const seenLookup = new Set<string>();
+    const seenMut = new Set<string>();
+
+    for (const r of dedupeRequests(requests)) {
+      if (INTEGRATION_NOISE_RE.test(r.pathname)) continue; // peripheral integration
+      const method = r.method.toUpperCase();
+      if (method === "GET" || method === "HEAD") {
+        let u: URL;
+        try {
+          u = new URL(r.url);
+        } catch {
+          continue;
+        }
+        let hit: { paramKey: string; name: string; example: string } | undefined;
+        for (const [k, v] of u.searchParams.entries()) {
+          const tok = tokens.find((t) => v.includes(t));
+          if (tok) {
+            hit = { paramKey: k, name: canonicalInputName(tok, k), example: v };
+            break;
+          }
+        }
+        if (!hit) continue;
+        const sig = `${r.pathname} ${hit.paramKey}`;
+        if (seenLookup.has(sig)) continue;
+        seenLookup.add(sig);
+        lookups.push({ pathname: r.pathname, ...hit });
+        inputs[hit.name] = `string — e.g. ${hit.example}`;
+      } else {
+        const built = apiStepFromRequest(r, tokens);
+        if (!built) continue;
+        const sig = `${method} ${r.pathname}`;
+        if (seenMut.has(sig)) continue;
+        seenMut.add(sig);
+        mutationSteps.push(built.step);
+        Object.assign(inputs, built.inputs);
+      }
+    }
+
+    if (lookups.length > 0 || mutationSteps.length > 0) {
+      const steps: Step[] = [];
+      for (const lk of lookups) {
+        steps.push({
+          type: "intercept",
+          label: `Capture ${outputKeyFor(lk.pathname)} lookup`,
+          intercept: { url_contains: idFreeMatch(lk.pathname), as: outputKeyFor(lk.pathname) },
+        });
+      }
+      if (lookups.length > 0) {
+        // Deep-link the app page with each lookup's query param → the page runs
+        // the authenticated search itself; we intercept the result.
+        const nav = new URL(finalUrl);
+        for (const lk of lookups) nav.searchParams.set(lk.paramKey, `{{${lk.name}}}`);
+        const navUrl = nav.toString().replace(/%7B%7B/gi, "{{").replace(/%7D%7D/gi, "}}");
+        steps.push({ type: "navigate", label: "Open the page (deep-linked search)", url: navUrl });
+        steps.push({
+          type: "wait",
+          label: `Wait for ${outputKeyFor(lookups[0]!.pathname)}`,
+          wait: { for: outputKeyFor(lookups[0]!.pathname), timeout_ms: 20000 },
+        });
+      }
+      steps.push(...mutationSteps);
+      return {
+        key,
+        version: 1,
+        description: `Agent-authored from the goal: ${goal}`,
+        inputs: Object.keys(inputs).length ? inputs : undefined,
+        // A read-only flow keeps the full guard; a captured mutation relaxes
+        // forbidden_actions but stays dry_run_only until a human confirms it.
+        guard: mutationSteps.length
+          ? { no_booking: true, dry_run_only: true }
+          : { no_booking: true, forbidden_actions: ["ReserveAppointment", "book", "confirm"], dry_run_only: true },
+        steps,
+      };
+    }
+  }
+
   const { url, inputs } = parameterizeUrl(finalUrl);
   // The id values the agent's navigation resolved to (e.g. 4299 from
   // ?claimId=4299). Endpoints carrying these ids are THIS claim's data — the
@@ -239,12 +469,31 @@ export function compileAgentRun(
  */
 export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
   const responses: HarvestedResponse[] = [];
+  const requests: CapturedRequest[] = [];
 
   // Independent Playwright CDP client on the SAME browser — observes every JSON
   // response the agent's actions trigger, without depending on Stagehand's page
   // event surface.
   const observer = await chromium.connectOverCDP(opts.cdpUrl);
   const observerCtx: BrowserContext = observer.contexts()[0] ?? (await observer.newContext());
+  // Capture search + mutation REQUESTS (with bodies) so a typed search or an
+  // update can be frozen into a deterministic `api` step — not just GET reads.
+  observerCtx.on("request", (req) => {
+    const method = req.method().toUpperCase();
+    const rt = req.resourceType();
+    if (rt !== "xhr" && rt !== "fetch") return;
+    // Capture everything API-ish: mutations (POST/PUT/PATCH/DELETE) become
+    // `api` write steps; a GET/POST "search" carries the query we parameterize.
+    // Boot noise is dropped at compile time (dedupeRequests / BOOT_NOISE_RE).
+    const url = req.url();
+    let postData: string | undefined;
+    try {
+      postData = req.postData() ?? undefined;
+    } catch {
+      postData = undefined;
+    }
+    requests.push({ method, url, pathname: pathnameOf(url), resourceType: rt, postData });
+  });
   observerCtx.on("response", (resp) => {
     const req = resp.request();
     const ct = resp.headers()["content-type"] ?? "";
@@ -286,7 +535,7 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
     // Let in-flight response-body reads (async) settle before we compile.
     await new Promise((r) => setTimeout(r, 1500));
 
-    const flow = compileAgentRun(opts.goal, finalUrl, responses, opts.key ?? "authored-flow");
+    const flow = compileAgentRun(opts.goal, finalUrl, responses, opts.key ?? "authored-flow", requests);
     return {
       flow,
       evidence: {
@@ -296,6 +545,7 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
         agentMessage: result.message,
         actions: result.actions ?? [],
         dataEndpoints: [...new Set(responses.map((r) => r.pathname))],
+        writeRequests: dedupeRequests(requests),
       },
     };
   } finally {

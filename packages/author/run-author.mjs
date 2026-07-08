@@ -56,5 +56,15 @@ const result = await authorFlow({
 console.error("\n=== agent evidence ===");
 console.error("success:", result.evidence.agentSuccess, "| final:", result.evidence.finalUrl);
 console.error("data endpoints seen:", result.evidence.dataEndpoints.join(", ") || "(none)");
+console.error("\n=== captured write/search requests (method path — body) ===");
+for (const r of result.evidence.writeRequests ?? []) {
+  console.error(`  ${r.method} ${r.pathname}  —  ${(r.postData ?? "").slice(0, 160)}`);
+}
+// Dump full evidence for inspection when PORTICO_AUTHOR_DUMP is set.
+if (process.env.PORTICO_AUTHOR_DUMP) {
+  require("fs").writeFileSync(process.env.PORTICO_AUTHOR_DUMP, JSON.stringify(result.evidence, null, 2));
+  console.error(`(evidence dumped to ${process.env.PORTICO_AUTHOR_DUMP})`);
+}
+
 console.error("\n=== compiled deterministic flow ===\n");
 console.log(toYaml(result.flow));
