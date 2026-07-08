@@ -28,6 +28,7 @@ export type {
   RunMode,
   RunStatus,
   RunView,
+  ValidationRecord,
   StepRecord,
   StepStatus,
   StepView,

@@ -376,3 +376,36 @@ test("listBrowserSessions orders active-first and filters by tenant", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("validations: recordValidation then latestValidation returns the newest, with reasons", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({ id: "f1", key: "k", version: 1, yaml: "key: k", status: "draft", source: "recorded", createdAt: "2026-07-08T10:00:00.000Z" });
+    assert.equal(store.latestValidation("f1"), undefined);
+
+    store.recordValidation({ id: "v1", flowId: "f1", passed: false, reasons: ["output 'x' missing"], runId: "run_1", createdAt: "2026-07-08T10:00:00.000Z" });
+    store.recordValidation({ id: "v2", flowId: "f1", passed: true, reasons: [], runId: "run_2", createdAt: "2026-07-08T10:05:00.000Z" });
+
+    const latest = store.latestValidation("f1")!;
+    assert.equal(latest.id, "v2");
+    assert.equal(latest.passed, true);
+    assert.equal(latest.runId, "run_2");
+    assert.deepEqual(latest.reasons, []);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listFlows returns recent flows newest-first across keys", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({ id: "a", key: "alpha", version: 1, yaml: "x", status: "draft", source: "recorded", createdAt: "2026-07-08T10:00:00.000Z" });
+    store.saveFlow({ id: "b", key: "beta", version: 1, yaml: "x", status: "confirmed", source: "llm", createdAt: "2026-07-08T11:00:00.000Z" });
+    const flows = store.listFlows(10).map((f) => f.id);
+    assert.deepEqual(flows, ["b", "a"]);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -20,6 +20,8 @@ export { resolveProfile, refreshProfile } from "./auth-profile.js";
 export { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 export { compileRecording } from "./compile-recording.js";
 export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";
+export { evaluateValidation, expectedOutputKeys } from "./validate-flow.js";
+export type { ValidationResult, RunResultLike } from "./validate-flow.js";
 
 import type { EngineAdapter } from "./types.js";
 import { LibrettoAdapter } from "./adapters/libretto.js";

@@ -97,6 +97,16 @@ export interface FlowRecord {
   createdAt: string;
 }
 
+/** A validation attempt on a flow draft (dry-run outcome that gates confirm). */
+export interface ValidationRecord {
+  id: string;
+  flowId: string;
+  passed: boolean;
+  reasons: string[];
+  runId?: string;
+  createdAt: string;
+}
+
 export type BrowserSessionStatus = "active" | "closed";
 
 /** A tracked CDP-attached browser session (self-serve portal session manager). */

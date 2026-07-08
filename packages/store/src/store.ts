@@ -26,6 +26,7 @@ import type {
   StepRecord,
   StepView,
   StoredAuditEvent,
+  ValidationRecord,
 } from "./types.js";
 
 export interface StoreOptions {
@@ -87,6 +88,15 @@ interface BrowserSessionRow {
   status: string;
   started_at: string;
   last_active_at: string;
+}
+
+interface ValidationRow {
+  id: string;
+  flow_id: string;
+  passed: number;
+  reasons_json: string | null;
+  run_id: string | null;
+  created_at: string;
 }
 
 export class Store {
@@ -328,6 +338,14 @@ export class Store {
     return rows.map((r) => this.hydrateFlow(r));
   }
 
+  /** Recent flows across all keys, newest first (for the drafts UI). */
+  listFlows(limit = 50): FlowRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM flows ORDER BY created_at DESC LIMIT ?")
+      .all(limit) as FlowRow[];
+    return rows.map((r) => this.hydrateFlow(r));
+  }
+
   /** Mark a flow version as confirmed. */
   confirmFlow(id: string): void {
     this.db.prepare("UPDATE flows SET status = 'confirmed' WHERE id = ?").run(id);
@@ -343,6 +361,38 @@ export class Store {
       .get({ key }) as FlowRow | undefined;
     if (!row) return undefined;
     return this.hydrateFlow(row);
+  }
+
+  // ---- validations (draft dry-run outcomes that gate confirm) ----------
+
+  /** Record a validation attempt (a dry-run outcome) for a flow draft. */
+  recordValidation(v: { id: string; flowId: string; passed: boolean; reasons: string[]; runId?: string; createdAt: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO validations (id, flow_id, passed, reasons_json, run_id, created_at)
+         VALUES (@id, @flowId, @passed, @reasons, @runId, @createdAt)`,
+      )
+      .run({ ...v, passed: v.passed ? 1 : 0, reasons: JSON.stringify(v.reasons ?? []), runId: v.runId ?? null });
+  }
+
+  /** The most recent validation for a flow, or undefined if never validated. */
+  latestValidation(flowId: string): ValidationRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM validations WHERE flow_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(flowId) as ValidationRow | undefined;
+    return row ? this.hydrateValidation(row) : undefined;
+  }
+
+  private hydrateValidation(row: ValidationRow): ValidationRecord {
+    const v: ValidationRecord = {
+      id: row.id,
+      flowId: row.flow_id,
+      passed: row.passed === 1,
+      reasons: row.reasons_json ? (JSON.parse(row.reasons_json) as string[]) : [],
+      createdAt: row.created_at,
+    };
+    if (row.run_id != null) v.runId = row.run_id;
+    return v;
   }
 
   private hydrateFlow(row: FlowRow): FlowRecord {

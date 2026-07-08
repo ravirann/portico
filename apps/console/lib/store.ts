@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import type { RunView } from "./types.js";
+import type { RunView, FlowView } from "./types.js";
 
 /** Durable run store, read via the CLI (which owns native SQLite) so nothing
  *  native enters the Next bundle. Runs are persisted by the CLI on every run,
@@ -33,4 +33,16 @@ export function listRuns(): RunView[] {
 export function getRun(id: string): RunView | undefined {
   const r = query(["get-run", id]);
   return r ? (r as RunView) : undefined;
+}
+
+/** Flow drafts/versions, read via the CLI (newest first), each with its latest
+ *  validation result attached (or null when never validated). */
+export function readFlows(): FlowView[] {
+  const r = query(["list-flows"]);
+  return Array.isArray(r) ? (r as FlowView[]) : [];
+}
+
+export function readFlow(id: string): FlowView | undefined {
+  const r = query(["get-flow", id]);
+  return r ? (r as FlowView) : undefined;
 }

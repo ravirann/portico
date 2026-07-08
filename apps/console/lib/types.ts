@@ -27,3 +27,27 @@ export interface RunView {
   failure?: { stepIndex: number; reason: string };
   rrwebRef?: string;
 }
+
+export type FlowStatus = "draft" | "confirmed";
+export type FlowSource = "recorded" | "manual" | "llm";
+
+export interface ValidationView {
+  id: string;
+  flowId: string;
+  passed: boolean;
+  reasons: string[];
+  runId?: string;
+  createdAt: string; // ISO
+}
+
+export interface FlowView {
+  id: string;
+  key: string;
+  version: number;
+  yaml: string;
+  status: FlowStatus;
+  source: FlowSource;
+  connector?: string;
+  createdAt: string; // ISO
+  validation: ValidationView | null;
+}

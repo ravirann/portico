@@ -96,6 +96,20 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_browser_sessions_tenant ON browser_sessions(tenant, status);
     `,
   },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE IF NOT EXISTS validations (
+        id          TEXT PRIMARY KEY,
+        flow_id     TEXT NOT NULL,
+        passed      INTEGER NOT NULL,
+        reasons_json TEXT,
+        run_id      TEXT,
+        created_at  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_validations_flow ON validations(flow_id, created_at DESC);
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

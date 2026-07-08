@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getEngine, compileRecording } from "@portico/engine";
+import { getEngine, compileRecording, evaluateValidation } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
@@ -92,6 +92,40 @@ async function main() {
     process.stdout.write(JSON.stringify(run ?? null));
     process.exit(0);
   }
+  if (cmd === "list-flows") {
+    const store = new Store();
+    const flows = store.listFlows(100).map((f) => ({ ...f, validation: store.latestValidation(f.id) ?? null }));
+    store.close();
+    process.stdout.write(JSON.stringify(flows));
+    process.exit(0);
+  }
+  if (cmd === "get-flow") {
+    const store = new Store();
+    const flow = flowPath ? store.getFlow(flowPath) : undefined;
+    const out = flow ? { ...flow, validation: store.latestValidation(flow.id) ?? null } : null;
+    store.close();
+    process.stdout.write(JSON.stringify(out));
+    process.exit(0);
+  }
+  // Promote a draft to confirmed — only if its latest validation passed.
+  if (cmd === "confirm") {
+    const store = new Store();
+    const rec = flowPath ? store.getFlow(flowPath) : undefined;
+    if (!rec) { store.close(); console.error(`no flow with id "${flowPath ?? ""}"`); process.exit(2); }
+    const v = store.latestValidation(rec.id);
+    if (!v || !v.passed) {
+      store.close();
+      const msg = `cannot confirm "${rec.key}" v${rec.version} — ${v ? "last validation FAILED" : "not validated yet"}. Run:  validate ${rec.id}`;
+      if (opts.json) process.stdout.write(JSON.stringify({ flowId: rec.id, confirmed: false, error: msg }));
+      else console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+    store.confirmFlow(rec.id);
+    store.close();
+    if (opts.json) process.stdout.write(JSON.stringify({ flowId: rec.id, key: rec.key, version: rec.version, confirmed: true }));
+    else console.log(`✔ confirmed "${rec.key}" v${rec.version} — validated and live-eligible.`);
+    process.exit(0);
+  }
 
   // Compile a recorded demonstration into a DRAFT flow (record-by-demonstration).
   // Deterministic baseline (an LLM refine pass layers on later). Persists the
@@ -131,12 +165,25 @@ async function main() {
     process.exit(0);
   }
 
-  if (cmd !== "run" || !flowPath) {
-    console.error("usage: portico <run|compile|list-runs|get-run> …");
+  if ((cmd !== "run" && cmd !== "validate") || !flowPath) {
+    console.error("usage: portico <run <flow.yaml> | validate <flow-id> | confirm <flow-id> | compile <recording.json> | list-flows | get-flow <id> | list-runs | get-run <id>>");
     process.exit(2);
   }
 
-  const flow = parseYaml(readFileSync(flowPath, "utf8")) as Flow;
+  // `validate <flow-id>` runs a STORED draft (loaded from the store); `run
+  // <flow.yaml>` runs a flow file. Both share the execution pipeline below.
+  let flowId: string | undefined;
+  let flow: Flow;
+  if (cmd === "validate") {
+    const s0 = new Store();
+    const rec = s0.getFlow(flowPath);
+    s0.close();
+    if (!rec) { console.error(`no flow with id "${flowPath}"`); process.exit(2); }
+    flowId = rec.id;
+    flow = parseYaml(rec.yaml) as Flow;
+  } else {
+    flow = parseYaml(readFileSync(flowPath, "utf8")) as Flow;
+  }
   const instance = opts.instance ? (parseYaml(readFileSync(opts.instance, "utf8")) as Record<string, any>) : {};
 
   const baseUrl: string = opts.baseUrl ?? instance.base_url ?? "";
@@ -209,6 +256,29 @@ async function main() {
     store.close();
   } catch (e) {
     if (!opts.json) console.error("[store] persist failed:", e instanceof Error ? e.message : e);
+  }
+
+  // `validate`: judge the run against the flow's expected outputs and record the
+  // verdict — a passing validation is what gates `confirm`.
+  if (cmd === "validate") {
+    const verdict = evaluateValidation(flow, { status: result.status, output: result.output, failure: result.failure });
+    try {
+      const store = new Store();
+      store.recordValidation({
+        id: "val_" + Math.random().toString(16).slice(2, 8),
+        flowId: flowId!, passed: verdict.passed, reasons: verdict.reasons, runId,
+        createdAt: new Date().toISOString(),
+      });
+      store.close();
+    } catch { /* best-effort */ }
+    if (opts.json) {
+      process.stdout.write(JSON.stringify({ flowId, passed: verdict.passed, reasons: verdict.reasons, runId }));
+    } else {
+      console.log(`\n${verdict.passed ? "✔ VALIDATION PASSED" : "✗ VALIDATION FAILED"}`);
+      for (const r of verdict.reasons) console.log(`  - ${r}`);
+      if (verdict.passed) console.log(`  → confirm it:  node --import tsx apps/cli/src/index.ts confirm ${flowId}`);
+    }
+    process.exit(verdict.passed ? 0 : 1);
   }
 
   if (opts.json) {

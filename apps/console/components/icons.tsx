@@ -11,6 +11,9 @@ export const IconRuns = (p: P) => (
 export const IconConnectors = (p: P) => (
   <svg {...base} className={p.className}><circle cx="4" cy="4" r="2" /><circle cx="12" cy="12" r="2" /><path d="M4 6v3a3 3 0 0 0 3 3h3" /></svg>
 );
+export const IconFlows = (p: P) => (
+  <svg {...base} className={p.className}><rect x="2" y="2.5" width="9" height="11" rx="1.5" /><path d="M13.5 5v8a1.5 1.5 0 0 1-1.5 1.5H5" opacity="0.55" /><path d="M4.5 6h4M4.5 8.5h4M4.5 11h2.5" /></svg>
+);
 export const IconShield = (p: P) => (
   <svg {...base} className={p.className}><path d="M8 2l5 2v4c0 3-2 5-5 6-3-1-5-3-5-6V4l5-2z" /></svg>
 );
