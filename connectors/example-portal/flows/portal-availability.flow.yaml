@@ -44,9 +44,9 @@ steps:
   # ── Session tokens. csrf is read from the page; BrowserId + nonce are minted
   #    client-side (matching the captured formats).
   - type: read
-    label: Read the anti-forgery token (the longest __RequestVerificationToken on the page)
+    label: Read the anti-forgery token from #__CSRFContainer
     read:
-      expression: "[...document.querySelectorAll('input[name=\"__RequestVerificationToken\"]')].map(e=>e.value).sort((a,b)=>b.length-a.length)[0] || ''"
+      expression: "document.querySelector('#__CSRFContainer input[name=\"__RequestVerificationToken\"]')?.value || [...document.querySelectorAll('input[name=\"__RequestVerificationToken\"]')].map(e=>e.value).sort((a,b)=>b.length-a.length)[0] || ''"
       as: csrf
   - type: read
     label: Mint a BrowserId (20 random chars + unix seconds)
@@ -54,9 +54,9 @@ steps:
       expression: "(function(){var c='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',s='';for(var i=0;i<20;i++)s+=c[Math.floor(Math.random()*62)];return s+Math.floor(Date.now()/1000);})()"
       as: browser_id
   - type: read
-    label: Mint / read the workflow nonce (32-hex)   # « VALIDATE » — if rejected, read the page's real nonce
+    label: Read the CSP nonce (Epic reuses it as the workflow nonce)
     read:
-      expression: "document.querySelector('input[name=\"nonce\" i]')?.value || (function(){var s='';for(var i=0;i<32;i++)s+=Math.floor(Math.random()*16).toString(16);return s;})()"
+      expression: "(document.querySelector('style[nonce]')||document.querySelector('script[nonce]')||document.querySelector('[nonce]'))?.nonce || ''"
       as: nonce
   - type: read
     label: Read the client time zone
