@@ -1,20 +1,22 @@
-# AVAILABILITY HARVEST — the robust "seconds-not-minutes" scheduling read.
+# AUTOMATED AVAILABILITY HARVEST — the "seconds-not-minutes" scheduling read.
 #
-# Instead of replaying Epic's anti-replay/anti-forgery-protected requests (which
-# fails — GetSchedulingWorkflowData's nonce is single-use), we work WITH the page:
-# it makes the GetSlots call itself (with valid tokens), and we PASSIVELY INTERCEPT
-# the JSON response. This is Libretto's recommended strategy for protected sites.
+# You log in once (Epic 2FA can't be scripted); the flow then DRIVES the wizard
+# itself (specialty → reason → location → continue) and passively intercepts the
+# page's own GetSlots response. The act selectors below are authored from a real
+# recorded click sequence (scripts/record-actions.mjs), not guesses.
 #
-# The moment the appointment times render, we've captured EVERY open slot as
-# structured data — no scraping — and we pick one by policy. DISCOVERY ONLY:
-# it reads availability and stops; it never reserves and never books.
+# DISCOVERY ONLY: it reads availability and stops. It never clicks a slot, never
+# reserves, never books.
 #
 # Flow of control:
-#   navigate → register interceptor → (you log in + select) → pick earliest slot
+#   navigate → intercept → (you log in) → act ×4 (auto-navigate) → wait → pick slot
 key: portal-availability
 version: 1
-description: Harvest MyChart open slots from the page's own GetSlots response, pick by policy. Never books.
+description: Auto-navigate MyChart scheduling and harvest open slots from its GetSlots response. Never books.
 inputs:
+  specialty: string           # e.g. "Primary Care"
+  reason: string              # e.g. "New Patient Adult Visit (18 and over)"
+  location: string            # e.g. "Southview"
   slot_preference: string?    # "earliest" (default) | "on-or-after:YYYY-MM-DD"
 
 guard:
@@ -27,19 +29,38 @@ steps:
     label: Open the scheduling page
     url: "{{base_url}}/MyChart/Scheduling"
 
-  # Register the passive listener BEFORE the selection that triggers GetSlots.
-  # It captures the latest GetSlots JSON the page fetches into `slots_raw`.
+  # Register the passive listener BEFORE the clicks that trigger GetSlots.
   - type: intercept
     label: Capture the page's GetSlots response
     intercept:
       url_contains: "/Scheduling/GetSlots"
       as: slots_raw
 
-  # You drive the selection — the page makes GetSlots with valid tokens for free.
+  # Only manual step: log in (+2FA). Epic redirects to "Schedule an Appointment".
   - type: human
-    label: "Log in (+2FA), then choose specialty → reason → location until appointment TIMES appear, then press Enter"
+    label: "Log in (+2FA). When you see the specialty list (\"Schedule an Appointment\"), press Enter — the flow drives the rest."
 
-  # Pick one slot by policy from the harvested availability. Never reserved/booked.
+  # --- Automated navigation. Selectors from the recorded click sequence; the
+  #     accessible names substring-match (Playwright auto-waits for each to render).
+  - type: act
+    label: Choose specialty
+    locator: { semantic: { role: button, name: "{{specialty}}", intent: "the specialty tile" } }
+  - type: act
+    label: Choose reason for visit
+    locator: { semantic: { role: button, name: "{{reason}}", intent: "the reason-for-visit option" } }
+  - type: act
+    label: Choose location
+    locator: { semantic: { role: button, name: "{{location}}", intent: "the clinic location option" } }
+  - type: act
+    label: Continue to available times
+    locator: { cached: "#scheduling-continue, [name='scheduling-continue'], [aria-label='scheduling-continue']" }
+
+  # The continue click fires GetSlots asynchronously — wait for the interceptor.
+  - type: wait
+    label: Wait for the slots to load
+    wait: { for: slots_raw, timeout_ms: 20000 }
+
+  # Pick one slot by policy. Never clicked/reserved/booked.
   - type: select
     label: Pick the slot matching slot_preference
     select:
@@ -48,5 +69,5 @@ steps:
       by: DisplayDateTimeUtc
       compare: date
       as: chosen_slot
-# Output = slots_raw (every open slot, as structured JSON) + chosen_slot (the pick).
-# No reserve step exists and ReserveAppointment is forbidden → nothing is booked.
+# Output = slots_raw (every open slot) + chosen_slot (the pick). No reserve step
+# exists and ReserveAppointment is forbidden → nothing is booked, by construction.

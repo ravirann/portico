@@ -19,6 +19,7 @@ export type StepType =
   | "read" // read a value out of the live page (session token / option list)
   | "select" // pick one item from a prior list by policy (e.g. earliest slot)
   | "intercept" // passively capture a JSON response the page itself makes
+  | "wait" // block until an intercepted/output value is populated
   | "subflow"; // reuse another flow (e.g. portal-login)
 
 /** A cached deterministic locator plus the semantic descriptor used to heal it. */
@@ -96,6 +97,11 @@ export interface Step {
    * the robust path for anti-replay/anti-forgery-protected endpoints.
    */
   intercept?: { url_contains: string; as: string };
+  /**
+   * For wait: block until `output[for]` is populated (e.g. by an interceptor
+   * after a click triggers the request), or fail after `timeout_ms`.
+   */
+  wait?: { for: string; timeout_ms?: number };
   /** For assert/guard: a named condition the engine knows how to check. */
   condition?: string;
   /** Retry/timeout policy overrides. */

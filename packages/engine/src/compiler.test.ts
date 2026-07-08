@@ -193,6 +193,24 @@ test("intercept captures the latest matching JSON response the page makes", asyn
   assert.deepEqual(out.slots_raw, { Solutions: [{ Slots: [{ TimeString: "1:30 PM" }] }] });
 });
 
+test("wait blocks until an output key is populated by the interceptor", async () => {
+  const flow: Flow = { key: "w", version: 1, steps: [{ type: "wait", label: "w", wait: { for: "slots_raw", timeout_ms: 3000 } }] };
+  const { plan } = compileFlow(flow, target);
+  assert.equal(plan[0]!.type, "wait");
+  const out: Record<string, unknown> = {};
+  const rt = { output: out } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+  setTimeout(() => { out.slots_raw = { ok: 1 }; }, 250); // interceptor fills it shortly after
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+});
+
+test("wait fails loud if the value never arrives", async () => {
+  const flow = { key: "w2", version: 1, steps: [{ type: "wait", wait: { for: "missing", timeout_ms: 300 } }] } as unknown as Flow;
+  const { plan } = compileFlow(flow, target);
+  const rt = { output: {} } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+  await assert.rejects(() => plan[0]!.run(rt), /not populated/);
+});
+
 test("resolveProfile normalizes the profile id and points at .libretto/profiles", () => {
   const p = resolveProfile("URMC MyChart!", { cwd: "/tmp/repo" });
   assert.equal(p.name, "urmc-mychart");

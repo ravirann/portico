@@ -207,6 +207,8 @@ function compileStep(step: Step, index: number, target: Target): CompiledStep {
       return { index, type: "select", label, run: (rt) => runSelect(rt, step) };
     case "intercept":
       return { index, type: "intercept", label, run: (rt) => runIntercept(rt, step) };
+    case "wait":
+      return { index, type: "wait", label, run: (rt) => runWait(rt, step) };
     case "subflow":
       return { index, type: "subflow", label, run: (rt) => runAuthSubflow(rt, step, target) };
     case "download":
@@ -407,6 +409,19 @@ async function runIntercept(rt: StepRuntime, step: Step): Promise<StepOutcome> {
     }
   });
   return { status: "ok", detail: `intercepting responses matching "${spec.url_contains}" → ${spec.as}` };
+}
+
+/** Block until an output key is populated (e.g. by an interceptor) or time out. */
+async function runWait(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+  const spec = step.wait;
+  if (!spec) throw new Error(`wait step "${step.label ?? "?"}" is missing its wait config`);
+  const timeout = spec.timeout_ms ?? 15000;
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (rt.output[spec.for] != null) return { status: "ok", detail: `${spec.for} ready in ${Date.now() - start}ms` };
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`wait: "${spec.for}" was not populated within ${timeout}ms`);
 }
 
 async function runAssert(rt: StepRuntime, step: Step): Promise<StepOutcome> {
