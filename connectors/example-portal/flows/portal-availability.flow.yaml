@@ -1,26 +1,31 @@
 # API-TIER AVAILABILITY READ — the promoted, "seconds-not-minutes" scheduling flow.
-# Reads open MyChart appointment slots by INTENT (specialty/reason/location), via
-# Epic's own JSON endpoints, then picks one by policy. DISCOVERY ONLY — it reads
-# availability and stops; it never reserves and never books.
+# Reads open MyChart appointment slots by INTENT (specialty/reason/location) via
+# Epic's own JSON endpoints, then picks one by policy. DISCOVERY ONLY — reads
+# availability and stops; never reserves, never books.
 #
-# Authored from a real network capture (scripts/record-network.mjs → analyze).
-# Endpoints, params, and response fields below are the actual ones MyChart uses.
+# Authored + grounded from a real network capture (record-network → analyze +
+# response forensics). The read chain and every id path below are the actual ones
+# MyChart uses:
+#   GetSchedulingWorkflowData  → Specialties[] {Name, Id(encrypted)}  (specialty→id)
+#   GetSpecialtyData(SpecialtyId) → ReasonsForVisit[], Locations[], ProviderDepartmentPairs[]
+#   GetDeferredSchedulingData  → ReasonForVisitLineId  (token GetSlots needs)
+#   GetSlots                   → Solutions[].Slots[] {DateString, TimeString, …}
+# BrowserId + nonce are client-minted (random+timestamp / 32-hex), so we generate
+# them in-page rather than read them.
 #
-# ── VALIDATION CHECKLIST (confirm on the first 1–2 live runs) ──────────────────
-#   [ ] read.csrf / read.browser_id expressions — where Epic exposes each token
-#   [ ] read.specialty_options selector — the specialty picker's option list
-#   [ ] GetSpecialtyData header name for the anti-forgery token
-#   [ ] GetSlots appointmentBuilder.SpecialtyId — short id vs encrypted form
-#   [ ] ReasonForVisitValue / provider-department pairing for multi-provider specialties
-# Each is tagged « VALIDATE » at its step. The engine capabilities (resolve→id,
-# read, select, form-api) are unit-tested; these are the site-specific unknowns.
+# ── VALIDATION CHECKLIST (first live run) ─────────────────────────────────────
+#   [ ] nonce: generated 32-hex is accepted by GetSchedulingWorkflowData; if it
+#       401/errors, read the real page nonce instead (« VALIDATE » at that step).
+#   [ ] GetSpecialtyData/GetSlots header name for the anti-forgery token.
+# The engine steps (read/resolve→id/select/form-api) are unit-tested; these two
+# are the only site-specific unknowns left.
 key: portal-availability
 version: 1
 description: Read MyChart open slots by intent via the API tier, pick by policy. Never books.
 inputs:
   specialty: string           # e.g. "Primary Care"
   reason: string              # e.g. "New Patient Adult Visit (18 and over)"
-  location: string            # e.g. "Southview" (resolved against real options)
+  location: string            # e.g. "Southview"
   slot_preference: string?    # "earliest" (default) | "on-or-after:YYYY-MM-DD"
 
 guard:
@@ -36,48 +41,60 @@ steps:
     label: Open the scheduling wizard (mints the session context)
     url: "{{base_url}}/MyChart/Scheduling"
 
-  # ── Lift the session tokens the API calls must echo. « VALIDATE » expressions.
+  # ── Session tokens. csrf is read from the page; BrowserId + nonce are minted
+  #    client-side (matching the captured formats).
   - type: read
     label: Read the anti-forgery token
     read:
       expression: "document.querySelector('input[name=\"__RequestVerificationToken\"]')?.value || ''"
       as: csrf
   - type: read
-    label: Read the workflow BrowserId
+    label: Mint a BrowserId (20 random chars + unix seconds)
     read:
-      expression: "window.__MyChartBrowserId || document.querySelector('[name=\"workflow.BrowserId\"]')?.value || ''"
+      expression: "(function(){var c='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',s='';for(var i=0;i<20;i++)s+=c[Math.floor(Math.random()*62)];return s+Math.floor(Date.now()/1000);})()"
       as: browser_id
+  - type: read
+    label: Mint / read the workflow nonce (32-hex)   # « VALIDATE » — if rejected, read the page's real nonce
+    read:
+      expression: "document.querySelector('input[name=\"nonce\" i]')?.value || (function(){var s='';for(var i=0;i<32;i++)s+=Math.floor(Math.random()*16).toString(16);return s;})()"
+      as: nonce
   - type: read
     label: Read the client time zone
     read:
       expression: "Intl.DateTimeFormat().resolvedOptions().timeZone"
       as: client_tz
 
-  # ── specialty → SpecialtyId, resolved against the wizard's own options. « VALIDATE » selector.
-  - type: read
-    label: List specialty options on the page
-    read:
-      expression: "[...document.querySelectorAll('[data-specialty-id]')].map(e=>({Title:e.textContent.trim(),Value:e.getAttribute('data-specialty-id')}))"
-      as: specialty_options
-  - type: resolve
-    label: specialty → SpecialtyId (refuse if ambiguous)
-    resolve: { input: "{{specialty}}", candidates: specialty_options, match_on: Title, value_field: Value, as: specialty_id }
+  # ── API TIER — the specialty list (with its encrypted id) comes from here.
+  - type: extract
+    label: Load scheduling workflow data (API)
+    api:
+      url: "{{base_url}}/MyChart/Scheduling/GetSchedulingWorkflowData"
+      method: POST
+      bodyType: form
+      headers: { verificationtoken: "{{csrf}}" }         # « VALIDATE » header name
+      body: { nonce: "{{nonce}}" }
+    extract:
+      key: workflow
+      schema: { type: object }
 
-  # ── API TIER: one call loads providers, departments, reasons, and pairs.
+  - type: resolve
+    label: specialty → SpecialtyId (encrypted; refuse if ambiguous)
+    resolve: { input: "{{specialty}}", candidates: "workflow.Specialties", match_on: Name, value_field: Id, as: specialty_id }
+
+  # ── Load that specialty's providers, reasons, locations, and provider/dept pairs.
   - type: extract
     label: Load specialty scheduling data (API)
     api:
       url: "{{base_url}}/MyChart/Scheduling/GetSpecialtyData"
       method: POST
       bodyType: form
-      headers: { verificationtoken: "{{csrf}}" }         # « VALIDATE » header name
+      headers: { verificationtoken: "{{csrf}}" }
       body: { SpecialtyId: "{{specialty_id}}" }
     extract:
       key: specialty_data
       schema: { type: object }
 
-  # ── Resolve reason + location to the ids GetSlots needs, from the REAL arrays
-  #    GetSpecialtyData returns. resolveIntent refuses rather than guess.
+  # ── Resolve reason + location to the ids GetSlots needs, from the real arrays.
   - type: resolve
     label: reason → VisitTypeId
     resolve: { input: "{{reason}}", candidates: "specialty_data.ReasonsForVisit", match_on: Title, value_field: DefaultVisitTypeId, as: visit_type_id }
@@ -91,7 +108,7 @@ steps:
     label: Provider-department pair for the visit          # « VALIDATE » filter by department for multi-provider specialties
     select: { from: "specialty_data.ProviderDepartmentPairs", policy: first, as: pair }
 
-  # ── Resolve the reason-for-visit line token (needed by GetSlots).
+  # ── The reason-for-visit line token GetSlots requires.
   - type: extract
     label: Load deferred scheduling data (API)
     api:
@@ -108,8 +125,8 @@ steps:
       key: deferred
       schema: { type: object }
 
-  # ── THE PROMOTED READ: all open slots in one sub-second call. Body params and
-  #    keys are the exact ones captured from the live GetSlots request.
+  # ── THE PROMOTED READ: all open slots in one sub-second call. Keys/params are
+  #    the exact ones captured from the live GetSlots request.
   - type: extract
     label: Read available slots (API tier)
     api:
@@ -133,7 +150,7 @@ steps:
         "appointmentBuilder.Appointments[0].SelectedTelehealthMode": "0"
         "appointmentBuilder.Appointments[0].CanSkipLicensureCheck": "false"
         appointmentBuilder.ReasonForVisitLine: "{{deferred.ReasonForVisitLineId}}"
-        appointmentBuilder.SpecialtyId: "{{specialty_id}}"        # « VALIDATE » encrypted vs short id
+        appointmentBuilder.SpecialtyId: "{{specialty_id}}"
         appointmentBuilder.ClientIANATimeZone: "{{client_tz}}"
         startDte: ""
         useSchedulingPreferences: "false"
@@ -150,5 +167,5 @@ steps:
       by: DisplayDateTimeUtc
       compare: date
       as: chosen_slot
-# Ends here. Output carries slots_raw (all availability) + chosen_slot. No reserve
-# step exists and ReserveAppointment is forbidden → nothing is booked, by construction.
+# Ends here. Output = slots_raw (all availability) + chosen_slot. No reserve step
+# exists and ReserveAppointment is forbidden → nothing is booked, by construction.
