@@ -59,9 +59,22 @@ node --import tsx apps/cli/src/index.ts run examples/smoke.flow.yaml \
 
 ```bash
 pnpm install
-pnpm test          # runs package tests (e.g. vault)
+npx playwright install chromium   # one-time, for the engine
+pnpm test          # package tests (e.g. vault)
 pnpm typecheck
 ```
+
+## Console
+
+A Next.js admin console: overview, runs with step-level timelines (self-heal +
+fail-safe), and connectors read from disk.
+
+```bash
+pnpm --filter @portico/console dev   # → http://localhost:4400
+```
+
+"Run smoke flow" executes the real engine (headless Chromium) and the completed
+run appears live.
 
 ## The two things to validate before wiring Libretto (ADR-0001)
 
