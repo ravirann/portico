@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { readFlows } from "@/lib/store";
 import { fmtRelative } from "@/lib/format";
 import type { FlowView } from "@/lib/types";
@@ -19,8 +20,10 @@ function validationBadge(v: FlowView["validation"]) {
   return { cls: "failed", label: "failed ✗" };
 }
 
-export default function FlowsPage() {
-  const flows = readFlows();
+export default async function FlowsPage() {
+  const scope = (await cookies()).get("portico-connector")?.value?.trim() || "";
+  const scoped = scope && scope !== "all" ? scope : "";
+  const flows = readFlows().filter((f) => (scoped ? f.connector === scoped : true));
   return (
     <>
       <div className="topbar">
@@ -28,10 +31,19 @@ export default function FlowsPage() {
       </div>
       <div className="content">
         <div className="page-head rise rise-1">
-          <h1 className="page-title">Flows</h1>
+          <h1 className="page-title">
+            Flows
+            {scoped && (
+              <span style={{ fontFamily: "var(--font-body)", fontWeight: 500, fontSize: 15, color: "var(--ink-3)" }}>
+                {" · scoped to "}
+                <span style={{ color: "var(--accent)", fontWeight: 600 }}>{scoped}</span>
+              </span>
+            )}
+          </h1>
           <p className="page-sub">
             Auto-generated flow drafts, one per recorded or authored workflow. Review the steps and
             validation status before you confirm a version for live execution.
+            {scoped && " Filtered by the connector switcher in the sidebar — pick “All connectors” to see everything."}
           </p>
         </div>
 

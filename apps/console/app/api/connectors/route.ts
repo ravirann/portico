@@ -4,25 +4,22 @@ import { runCli } from "@/lib/actions";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-interface VariableRow {
-  key: string;
-  value: string;
-}
 interface SaveConnectorBody {
   key?: string;
   name?: string;
   framework?: string;
   baseUrl?: string;
   auth?: string;
-  variables?: VariableRow[];
   llm?: { provider?: string; model?: string; apiKey?: string };
 }
 
 /**
- * Create/update a DB-backed connector. Saves the connector record, then upserts
- * each variable and any per-connector LLM override via scoped config-set calls
- * (scope = the connector key). Runs the calls in sequence and fails loud on the
- * first CLI error so the client never reports a partial save as success.
+ * Create/update a DB-backed connector. Saves the connector record plus any
+ * per-connector LLM override via scoped config-set calls (scope = the connector
+ * key). Connector variables are managed separately, per environment, through
+ * /api/connectors/variables (scope = `<key>:<env>`). Runs the calls in sequence
+ * and fails loud on the first CLI error so the client never reports a partial
+ * save as success.
  */
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as SaveConnectorBody;
@@ -41,16 +38,6 @@ export async function POST(req: Request) {
   const saved = await runCli(args);
   if (!saved.ok) {
     return NextResponse.json(saved.json ?? { error: saved.stderr || "save-connector failed" }, { status: 400 });
-  }
-
-  // Upsert variables (skip blank keys). Each is a scoped, non-secret config entry.
-  for (const v of body.variables ?? []) {
-    const vk = v.key?.trim();
-    if (!vk) continue;
-    const r = await runCli(["config-set", "--scope", key, "--category", "variable", "--key", vk, "--value", v.value ?? "", "--json"]);
-    if (!r.ok) {
-      return NextResponse.json(r.json ?? { error: `Failed to save variable "${vk}"` }, { status: 400 });
-    }
   }
 
   // Optional per-connector LLM override. Blank api key = keep existing (never overwrite).

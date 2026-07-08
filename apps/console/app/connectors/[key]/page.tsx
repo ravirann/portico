@@ -22,6 +22,16 @@ export default async function ConnectorEditPage({ params }: { params: Promise<{ 
     apiKeyConfigured: Boolean(byKey.api_key),
   };
 
+  // Default-environment variables, pre-loaded so the editor renders without a
+  // client fetch flash. Scope is `<key>:default`; secrets come back masked.
+  const varEntries = isNew ? [] : readConfig({ scope: `${key}:default`, category: "variable" });
+  const initialVars = varEntries.map((e) => ({
+    key: e.key,
+    value: e.secret ? "" : e.value,
+    secret: e.secret,
+    configured: e.secret,
+  }));
+
   return (
     <>
       <div className="topbar">
@@ -50,10 +60,10 @@ export default async function ConnectorEditPage({ params }: { params: Promise<{ 
                     framework: connector.framework,
                     baseUrl: connector.baseUrl,
                     auth: connector.auth,
-                    variables: connector.variables ?? {},
                   }
                 : undefined
             }
+            initialVars={initialVars}
             llm={llm}
           />
         </div>

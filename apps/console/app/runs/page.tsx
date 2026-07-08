@@ -1,12 +1,15 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { listRuns } from "@/lib/store";
 import { fmtDuration, fmtRelative, tierLabel } from "@/lib/format";
 import { RunButton } from "@/components/run-button";
 
 export const dynamic = "force-dynamic";
 
-export default function RunsPage() {
-  const runs = listRuns();
+export default async function RunsPage() {
+  const scope = (await cookies()).get("portico-connector")?.value?.trim() || "";
+  const scoped = scope && scope !== "all" ? scope : "";
+  const runs = listRuns().filter((r) => (scoped ? r.connector === scoped : true));
   return (
     <>
       <div className="topbar">
@@ -15,8 +18,19 @@ export default function RunsPage() {
       </div>
       <div className="content">
         <div className="page-head rise rise-1">
-          <h1 className="page-title">Runs</h1>
-          <p className="page-sub">Every execution, with step-level traces and a clear reason on failure. Click a run to inspect and resume.</p>
+          <h1 className="page-title">
+            Runs
+            {scoped && (
+              <span style={{ fontFamily: "var(--font-body)", fontWeight: 500, fontSize: 15, color: "var(--ink-3)" }}>
+                {" · scoped to "}
+                <span style={{ color: "var(--accent)", fontWeight: 600 }}>{scoped}</span>
+              </span>
+            )}
+          </h1>
+          <p className="page-sub">
+            Every execution, with step-level traces and a clear reason on failure. Click a run to inspect and resume.
+            {scoped && " Filtered by the connector switcher in the sidebar — pick “All connectors” to see everything."}
+          </p>
         </div>
 
         <div className="panel rise rise-2">

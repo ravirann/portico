@@ -54,6 +54,78 @@ const porticoHighlight = HighlightStyle.define([
   { tag: [t.meta, t.punctuation], color: "var(--ink-3)" },
 ]);
 
+/** On-brand dark editor chrome — deep warm-charcoal paper (matching the app's
+ *  dark --paper), light ink, evergreen selection + caret. Explicit oklch values
+ *  (not vars) so the surface stays correct even mid theme-transition. */
+const porticoDarkTheme = EditorView.theme(
+  {
+    "&": {
+      backgroundColor: "oklch(0.201 0.008 152)",
+      color: "oklch(0.93 0.008 95)",
+      fontSize: "12.5px",
+      border: "1px solid oklch(0.32 0.012 152)",
+      borderRadius: "var(--radius-sm)",
+    },
+    "&.cm-focused": { outline: "none", borderColor: "oklch(0.42 0.06 158)" },
+    ".cm-content": {
+      fontFamily: "var(--font-mono)",
+      caretColor: "oklch(0.74 0.11 158)",
+      padding: "12px 0",
+    },
+    ".cm-gutters": {
+      backgroundColor: "transparent",
+      color: "oklch(0.6 0.008 95)",
+      border: "none",
+      borderRight: "1px solid oklch(0.32 0.012 152)",
+      fontFamily: "var(--font-mono)",
+      fontSize: "11.5px",
+    },
+    ".cm-activeLine": { backgroundColor: "oklch(0.278 0.011 152 / 0.55)" },
+    ".cm-activeLineGutter": { backgroundColor: "transparent", color: "oklch(0.74 0.11 158)" },
+    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+      backgroundColor: "oklch(0.3 0.045 158)",
+    },
+    ".cm-cursor, .cm-dropCursor": { borderLeftColor: "oklch(0.74 0.11 158)" },
+    ".cm-lintRange-error": { backgroundImage: "none", borderBottom: "1.5px wavy oklch(0.72 0.15 27)" },
+  },
+  { dark: true },
+);
+
+/** Syntax colors tuned for legibility on the dark surface (brighter evergreen,
+ *  warm string amber, azure numbers) — same token families as the light set. */
+const porticoDarkHighlight = HighlightStyle.define([
+  { tag: [t.definition(t.propertyName), t.propertyName, t.atom], color: "oklch(0.8 0.12 158)", fontWeight: "600" },
+  { tag: [t.string, t.special(t.string)], color: "oklch(0.8 0.1 60)" },
+  { tag: [t.number, t.bool, t.null, t.keyword], color: "oklch(0.72 0.11 245)" },
+  { tag: [t.comment], color: "oklch(0.6 0.008 95)", fontStyle: "italic" },
+  { tag: [t.meta, t.punctuation], color: "oklch(0.6 0.008 95)" },
+]);
+
+/** Track the active theme: explicit data-theme wins; otherwise fall back to the
+ *  OS preference. Re-reads on data-theme mutations (ThemeToggle) and OS changes. */
+function useIsDark(): boolean {
+  const [isDark, setIsDark] = useState(false);
+  useEffect(() => {
+    const compute = () => {
+      const attr = document.documentElement.getAttribute("data-theme");
+      if (attr === "dark") return true;
+      if (attr === "light") return false;
+      return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    };
+    setIsDark(compute());
+    const obs = new MutationObserver(() => setIsDark(compute()));
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onMq = () => setIsDark(compute());
+    mq.addEventListener("change", onMq);
+    return () => {
+      obs.disconnect();
+      mq.removeEventListener("change", onMq);
+    };
+  }, []);
+  return isDark;
+}
+
 export interface YamlEditorProps {
   value: string;
   onChange: (value: string) => void;
@@ -67,6 +139,7 @@ export interface YamlEditorProps {
 
 export function YamlEditor({ value, onChange, onValidChange, mode = "plain", minHeight = "320px" }: YamlEditorProps) {
   const [errors, setErrors] = useState<string[]>([]);
+  const isDark = useIsDark();
   const onValidRef = useRef(onValidChange);
   onValidRef.current = onValidChange;
 
@@ -81,8 +154,8 @@ export function YamlEditor({ value, onChange, onValidChange, mode = "plain", min
   const extensions = useMemo(
     () => [
       yaml(),
-      porticoTheme,
-      syntaxHighlighting(porticoHighlight),
+      isDark ? porticoDarkTheme : porticoTheme,
+      syntaxHighlighting(isDark ? porticoDarkHighlight : porticoHighlight),
       lintGutter(),
       linter((view): Diagnostic[] => {
         const src = view.state.doc.toString();
@@ -96,7 +169,7 @@ export function YamlEditor({ value, onChange, onValidChange, mode = "plain", min
       }),
       EditorView.lineWrapping,
     ],
-    [mode],
+    [mode, isDark],
   );
 
   return (

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { IconConnectors, IconDash, IconFlows, IconRuns, IconSessions, IconSettings } from "./icons";
+import { ConnectorSwitcher } from "./connector-switcher";
 
 function ThemeToggle() {
   const [theme, setTheme] = useState<"light" | "dark">("light");
@@ -67,6 +68,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
             Portico<span className="dot">.</span>
           </span>
         </Link>
+
+        <ConnectorSwitcher />
 
         <div className="nav-label">Workspace</div>
         {NAV.map(({ href, label, Icon, exact }) => (
