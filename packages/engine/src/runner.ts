@@ -23,6 +23,7 @@ import { redact } from "@portico/vault";
 import type { Flow, Target } from "@portico/flow-spec";
 import type { EngineRunOptions, EngineRunResult, StepTrace } from "./types.js";
 import { compileFlow, emitWorkflowModule, type StepRuntime } from "./compiler.js";
+import { missingFlowInputs } from "./validate-flow.js";
 import { resolveHealModel } from "./model.js";
 import { resolveProfile } from "./auth-profile.js";
 import { createRecorder } from "./recording.js";
@@ -40,6 +41,25 @@ export async function runFlow(opts: EngineRunOptions): Promise<EngineRunResult> 
 
 async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult> {
   const { flow, target } = opts;
+
+  // Fail FAST on missing inputs — before any browser launches. A templated
+  // locator name that renders to "" either throws a cryptic locator error
+  // steps later or silently matches the wrong element; neither is acceptable.
+  const missing = missingFlowInputs(flow, opts.inputs);
+  if (missing.length > 0) {
+    const reason =
+      `run is missing required input(s): ${missing.join(", ")} — ` +
+      `pass ${missing.map((m) => `--input ${m}=…`).join(" ")} (or fill them in the console's Run form)`;
+    return {
+      status: "failed",
+      output: {},
+      traces: [
+        { index: 0, type: "inputs", label: "Validate run inputs", status: "failed", detail: reason, startedAt: now(), endedAt: now() },
+      ],
+      failure: { stepIndex: 0, reason, resumable: false },
+    };
+  }
+
   const secretValues = Object.values(opts.auth.secrets);
   const scrub = (s: string) => redact(s, secretValues);
 
@@ -127,12 +147,16 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
     const start = opts.resumeFrom ?? 0;
     for (let i = start; i < plan.length; i++) {
       const step = plan[i]!;
+      // Traces/screenshots key on the step's ORIGINAL flow index — the compiler
+      // may reorder the plan (intercepts are hoisted ahead of navigation), and
+      // the console maps traces back to the authored YAML by index.
+      const stepIndex = step.index;
       const startedAt = now();
       opts.signal?.throwIfAborted();
 
       const emit = (status: StepTrace["status"], detail?: string, extra?: Partial<StepTrace>): StepTrace => {
         const trace: StepTrace = {
-          index: i,
+          index: stepIndex,
           type: step.type,
           label: step.label,
           status,
@@ -151,32 +175,32 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
           // Attached (CDP) browser is already logged in → the login gate is
           // moot; skip it so CDP runs are fully unattended.
           if (cdpEndpoint) {
-            const shot = await recorder.screenshot(i);
+            const shot = await recorder.screenshot(stepIndex);
             emit("ok", "skipped — attached browser already authenticated (CDP)", { screenshotRef: shot });
             continue;
           }
           // Interactive HITL: if the caller can service the step (headed
           // login/2FA), await it and continue instead of pausing the run.
           if (opts.onHuman) {
-            await opts.onHuman({ index: i, label: step.label });
-            const shot = await recorder.screenshot(i);
+            await opts.onHuman({ index: stepIndex, label: step.label });
+            const shot = await recorder.screenshot(stepIndex);
             emit("ok", "human step completed interactively", { screenshotRef: shot });
             continue;
           }
         }
 
         const outcome = await step.run(rt);
-        const shot = await recorder.screenshot(i);
+        const shot = await recorder.screenshot(stepIndex);
 
         if (outcome.status === "paused") {
-          emit("paused", `HITL required at step ${i} (${step.label ?? step.type})`, { screenshotRef: shot });
+          emit("paused", `HITL required at step ${stepIndex} (${step.label ?? step.type})`, { screenshotRef: shot });
           const rrwebRef = await recorder.finalize("paused");
           return {
             status: "paused",
             output,
             traces,
             rrwebRef,
-            failure: { stepIndex: i, reason: `human step: ${step.label ?? step.type}`, resumable: true },
+            failure: { stepIndex: stepIndex, reason: `human step: ${step.label ?? step.type}`, resumable: true },
             sessionState: await context.storageState(),
             unvalidatedOutputKeys: [...unvalidated],
             authProfile: profileName,
@@ -190,7 +214,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
         });
       } catch (err) {
         const reason = scrub(err instanceof Error ? err.message : String(err));
-        const shot = await recorder.screenshot(i);
+        const shot = await recorder.screenshot(stepIndex);
         emit("failed", reason, { screenshotRef: shot });
         const rrwebRef = await recorder.finalize("failed");
         return {
@@ -198,7 +222,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
           output,
           traces,
           rrwebRef,
-          failure: { stepIndex: i, reason, resumable: true },
+          failure: { stepIndex: stepIndex, reason, resumable: true },
           unvalidatedOutputKeys: [...unvalidated],
           authProfile: profileName,
         };

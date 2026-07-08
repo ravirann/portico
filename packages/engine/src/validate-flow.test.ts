@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evaluateValidation, expectedOutputKeys } from "./validate-flow.js";
+import { evaluateValidation, expectedOutputKeys, missingFlowInputs } from "./validate-flow.js";
 import type { Flow } from "@portico/flow-spec";
 
 const flow: Flow = {
@@ -53,4 +53,41 @@ test("a flow with no data outputs cannot be validated green", () => {
   const r = evaluateValidation(noData, { status: "completed", output: {} });
   assert.equal(r.passed, false);
   assert.match(r.reasons[0]!, /no data outputs/);
+});
+
+// ---------------------------------------------------------------------------
+// missingFlowInputs — the pre-launch input gate
+// ---------------------------------------------------------------------------
+
+test("missingFlowInputs flags referenced-but-unprovided (and blank) declared inputs", () => {
+  const flow: Flow = {
+    key: "read-claims",
+    version: 4,
+    inputs: { claim_status: "string", customer_name: "string", unused_note: "string" },
+    steps: [
+      { type: "navigate", url: "https://pulse.example.com/claims" },
+      { type: "act", label: "filter", locator: { semantic: { role: "button", name: "{{claim_status}}", intent: "status chip" } } },
+      { type: "act", label: "row", locator: { semantic: { name: "{{customer_name}}", intent: "claim row" } } },
+    ],
+  };
+  // Nothing provided → both referenced inputs are missing; the unreferenced one is not.
+  assert.deepEqual(missingFlowInputs(flow, {}), ["claim_status", "customer_name"]);
+  // Blank counts as missing (the console form submits empty strings).
+  assert.deepEqual(missingFlowInputs(flow, { claim_status: "IN_PROGRESS", customer_name: "  " }), ["customer_name"]);
+  // Fully provided → clean.
+  assert.deepEqual(missingFlowInputs(flow, { claim_status: "IN_PROGRESS", customer_name: "Prasanna Kumar D E" }), []);
+});
+
+test("missingFlowInputs ignores output refs, secrets, and flows with no declared inputs", () => {
+  const flow: Flow = {
+    key: "f",
+    version: 1,
+    steps: [
+      { type: "act", label: "x", value: "{{secrets.password}}", locator: { semantic: { name: "{{location_resolved}}", intent: "i" } } },
+    ],
+  };
+  assert.deepEqual(missingFlowInputs(flow, {}), []); // no inputs declared at all
+  const declared: Flow = { ...flow, inputs: { location: "string" } };
+  // "location" is declared but never referenced; the {{location_resolved}} ref is a prior-step output.
+  assert.deepEqual(missingFlowInputs(declared, {}), []);
 });

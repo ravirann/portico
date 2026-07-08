@@ -2,13 +2,17 @@
  * LLM refine pass — author-tier only.
  *
  * `compileRecording` produces a deterministic draft flow: correct structure,
- * but its `act` locator names are whatever the raw click label happened to
- * be (often a whole tile's text, e.g. "Primary Care  Includes adult,
- * pediatric,…"). This module runs a model over that draft to trim each name
- * down to the shortest human-meaningful phrase that still identifies the
- * element — nothing else. It never changes step structure, never adds or
- * removes steps, and never touches `intent` (the full authoring label stays
- * intact for traceability).
+ * but its `act` locator names are whatever the raw click label happened to be
+ * (often a whole tile's text, e.g. "Primary Care  Includes adult,
+ * pediatric,…"), and a human demonstration is full of exploration noise (a
+ * panel opened and closed, a detail viewed and dismissed, back-navigation at
+ * the end). This module runs a model over the draft to do exactly two things:
+ *
+ *   1. RENAME — trim each act's accessible name to the shortest stable phrase
+ *      that still identifies the element (never touching `intent`).
+ *   2. DROP — remove act steps that are demonstration noise, not part of the
+ *      flow's goal. Hard-validated: ONLY `act` steps can be dropped, steps are
+ *      never added or reordered, and non-act indices in a drop list are ignored.
  *
  * This is strictly an AUTHOR-TIME convenience: it is never on the replay hot
  * path (see docs/ARCHITECTURE.md §4 — a promoted deterministic replay makes
@@ -61,6 +65,29 @@ export function applyNameRefinements(flow: Flow, refinements: NameRefinement[]):
   return { ...flow, steps };
 }
 
+/** The model's full proposal: renames plus act-step drops. */
+export interface FlowRefinements {
+  renames: NameRefinement[];
+  /** Indices (into flow.steps) of act steps to remove as demonstration noise. */
+  drops: number[];
+}
+
+/**
+ * PURE: apply renames + drops, returning a NEW flow. Drop validation is the
+ * safety contract: only `act` steps may be dropped — a proposed drop of a
+ * navigate/intercept/wait/extract/select step is silently ignored, as is any
+ * out-of-range index. Renames are applied first (they key on original
+ * indices), then the surviving steps keep their original relative order.
+ */
+export function applyRefinements(flow: Flow, refinements: FlowRefinements): Flow {
+  const renamed = applyNameRefinements(flow, refinements.renames);
+  const droppable = new Set(
+    refinements.drops.filter((i) => i >= 0 && i < renamed.steps.length && renamed.steps[i]!.type === "act"),
+  );
+  if (droppable.size === 0) return renamed;
+  return { ...renamed, steps: renamed.steps.filter((_, i) => !droppable.has(i)) };
+}
+
 /** One act step's context, as fed to the model for refinement. */
 interface ActStepContext {
   index: number;
@@ -88,34 +115,56 @@ function collectClickLabels(recording: Recording): string[] {
     .filter((label) => label.length > 0);
 }
 
-function buildPrompt(actSteps: ActStepContext[], clickLabels: string[]): string {
+function buildPrompt(flow: Flow, actSteps: ActStepContext[], clickLabels: string[], goal?: string): string {
+  const allStepLines = flow.steps
+    .map((s, i) => `- index ${i}: type=${s.type}${s.label ? ` label=${JSON.stringify(s.label)}` : ""}`)
+    .join("\n");
   const stepLines = actSteps
     .map((s) => `- index ${s.index}: current name = ${JSON.stringify(s.currentName ?? "")}, intent = ${JSON.stringify(s.intent)}`)
     .join("\n");
   const labelLines = clickLabels.map((l) => `- ${JSON.stringify(l)}`).join("\n");
 
   return [
-    "You are cleaning up locator names for a browser-automation flow.",
-    "Below is a list of 'act' steps (clicks) from a draft flow. Each has an",
-    "`intent` (the full, possibly noisy label captured at recording time) and",
-    "a `current name` (used to find the element by its accessible name).",
+    "You are cleaning up a browser-automation flow compiled from a HUMAN",
+    "demonstration. Human demonstrations contain exploration noise; the compiled",
+    "flow must contain only the steps that serve the goal.",
     "",
-    "For each step, propose the SHORTEST human-meaningful name that still",
-    "uniquely and unambiguously identifies the tile/button — it must be a",
-    "substring match of the visible label (the intent, or one of the recorded",
-    "click labels below). Do not invent new text, do not change which element",
-    "is targeted, and do not merge or drop steps. Only return a refinement for",
-    "a step if you can improve on its current name; otherwise omit that index.",
+    goal ? `The flow's goal: ${goal}` : "The flow's goal: reach the data page and harvest its data (see the flow description).",
+    flow.description ? `Flow description: ${flow.description}` : "",
     "",
-    "Act steps:",
+    "Full step list (for context — only 'act' steps may be renamed or dropped):",
+    allStepLines,
+    "",
+    "Act steps (clicks). Each has an `intent` (the full, possibly noisy label",
+    "captured at recording time) and a `current name` (used to find the element",
+    "by its accessible name at replay time):",
     stepLines,
     "",
     "Recorded click labels (for context on visible text):",
     labelLines,
     "",
-    "Respond with refinements only — never add, remove, or reorder steps, and",
-    "never add booking/confirm actions.",
-  ].join("\n");
+    "Return two things:",
+    "",
+    "1. `refinements` — for each act step whose name you can improve, the",
+    "   SHORTEST human-meaningful name that still uniquely identifies the",
+    "   element. It must be a substring of the visible label (the intent, or a",
+    "   recorded click label). NEVER include volatile text in a name: dates",
+    "   ('6 JULY 2026'), counts ('2 docs'), statuses that change over time —",
+    "   these break every future replay. Do not invent text. Omit steps whose",
+    "   current name is already good.",
+    "",
+    "2. `drops` — indices of act steps that are demonstration NOISE relative to",
+    "   the goal. Typical noise: a toggle/panel opened and then closed with",
+    "   nothing selected in between; a dropdown clicked twice (open+close); a",
+    "   detail dialog opened and then dismissed without extracting anything",
+    "   ('View Details' followed by 'Close'); trailing back-navigation after the",
+    "   goal was reached ('All Claims', 'Back'). When unsure, KEEP the step —",
+    "   a kept noise step is churn, a dropped real step breaks the flow.",
+    "",
+    "Never add, reorder, or merge steps, and never add booking/confirm actions.",
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
 }
 
 const refinementSchema = z.object({
@@ -125,27 +174,39 @@ const refinementSchema = z.object({
       name: z.string(),
     }),
   ),
+  drops: z.array(z.number()).describe("Indices of act steps that are demonstration noise"),
 });
 
 /**
- * Refine a draft flow using a model. Returns a cleaned COPY. If `model` is
- * undefined OR the model call throws, returns the draft unchanged
- * (deterministic fallback — refine must never break the pipeline).
+ * Refine a draft flow using a model: rename coarse act names and drop
+ * exploration-noise act steps (validated — see applyRefinements). Returns a
+ * cleaned COPY. If `model` is undefined OR the model call throws, returns the
+ * draft unchanged (deterministic fallback — refine must never break the
+ * pipeline). `opts.goal` (the author's one-line statement of what the flow is
+ * for) sharpens noise detection considerably — pass it when available.
  */
-export async function refineFlow(flow: Flow, recording: Recording, model?: LanguageModel): Promise<Flow> {
+export async function refineFlow(
+  flow: Flow,
+  recording: Recording,
+  model?: LanguageModel,
+  opts: { goal?: string } = {},
+): Promise<Flow> {
   if (!model) return flow;
 
   const actSteps = collectActSteps(flow);
   if (actSteps.length === 0) return flow;
 
   try {
-    const prompt = buildPrompt(actSteps, collectClickLabels(recording));
+    const prompt = buildPrompt(flow, actSteps, collectClickLabels(recording), opts.goal);
     const result = await generateObject({
       model,
       schema: refinementSchema,
       prompt,
     });
-    return applyNameRefinements(flow, result.object.refinements);
+    return applyRefinements(flow, {
+      renames: result.object.refinements,
+      drops: result.object.drops ?? [],
+    });
   } catch {
     return flow;
   }

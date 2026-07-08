@@ -11,19 +11,19 @@ export { LibrettoAdapter } from "./adapters/libretto.js";
 export { FallbackAdapter } from "./adapters/fallback.js";
 
 // Compiler + runner surface (used by generated workflow modules + tooling).
-export { compileFlow, compileToWorkflow, emitWorkflowModule } from "./compiler.js";
+export { compileFlow, compileToWorkflow, emitWorkflowModule, waitForDomQuiet } from "./compiler.js";
 export type { CompileResult, CompiledStep, StepRuntime } from "./compiler.js";
 export { runFlow, runnerMode } from "./runner.js";
 export { resolveHealModel, healModelConfigured } from "./model.js";
 export type { HealModel } from "./model.js";
 export { resolveProfile, refreshProfile } from "./auth-profile.js";
 export { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
-export { compileRecording } from "./compile-recording.js";
+export { compileRecording, collapseTogglePairs } from "./compile-recording.js";
 export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";
-export { evaluateValidation, expectedOutputKeys } from "./validate-flow.js";
+export { evaluateValidation, expectedOutputKeys, missingFlowInputs } from "./validate-flow.js";
 export type { ValidationResult, RunResultLike } from "./validate-flow.js";
-export { refineFlow, applyNameRefinements } from "./refine-flow.js";
-export type { NameRefinement } from "./refine-flow.js";
+export { refineFlow, applyNameRefinements, applyRefinements } from "./refine-flow.js";
+export type { NameRefinement, FlowRefinements } from "./refine-flow.js";
 export { sessionHealth, registerSession, keepAliveSession, endSession, listSessions } from "./session-manager.js";
 export type { SessionHealth, TrackedSession, SessionStore } from "./session-manager.js";
 

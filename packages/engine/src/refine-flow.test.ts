@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyNameRefinements, refineFlow } from "./refine-flow.js";
+import { applyNameRefinements, applyRefinements, refineFlow } from "./refine-flow.js";
 import type { Flow } from "@portico/flow-spec";
 import type { Recording } from "./compile-recording.js";
 
@@ -79,6 +79,26 @@ test("applyNameRefinements with an empty array returns an equivalent flow (names
   const refined = applyNameRefinements(flow, []);
   assert.deepEqual(refined, flow);
   assert.notEqual(refined, flow); // still a new object, per the "never mutates" contract
+});
+
+test("applyRefinements drops act steps by index, never anything else", () => {
+  const flow = draftFlow();
+  const refined = applyRefinements(flow, {
+    renames: [{ index: 1, name: "Primary Care" }],
+    // 0 = navigate, 3 = wait — both must be ignored; 2 = act "Next" — dropped;
+    // 99 = out of range — ignored.
+    drops: [0, 2, 3, 99],
+  });
+
+  assert.deepEqual(refined.steps.map((s) => s.type), ["navigate", "act", "wait"]);
+  assert.equal(refined.steps[1]?.locator?.semantic.name, "Primary Care"); // rename applied before the drop
+  assert.equal(flow.steps.length, 4); // input untouched
+});
+
+test("applyRefinements with no valid drops degrades to a pure rename", () => {
+  const flow = draftFlow();
+  const refined = applyRefinements(flow, { renames: [], drops: [0, 3] }); // both non-act
+  assert.deepEqual(refined.steps, flow.steps);
 });
 
 test("refineFlow with no model configured resolves to the same flow content (deterministic fallback)", async () => {

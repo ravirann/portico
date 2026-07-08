@@ -22,6 +22,39 @@ export interface ValidationResult {
 }
 
 /**
+ * Declared flow inputs that the flow's steps actually reference but the run
+ * did not provide (missing or blank). Checked BEFORE launching a browser: a
+ * templated locator name like "{{customer_name}}" that renders to "" either
+ * throws a cryptic "no usable semantic descriptor" five steps in, or — worse —
+ * silently degrades a role+name locator to "first button on the page".
+ * Declared-but-unreferenced inputs are ignored (harmless); referenced-but-
+ * undeclared {{refs}} are ignored too (they may be prior-step outputs).
+ */
+export function missingFlowInputs(flow: Flow, provided: Record<string, unknown>): string[] {
+  const declared = Object.keys(flow.inputs ?? {});
+  if (declared.length === 0) return [];
+
+  const referenced = new Set<string>();
+  const scan = (s?: string) => {
+    if (!s) return;
+    for (const m of s.matchAll(/\{\{\s*(\w+)[\w.]*\s*\}\}/g)) referenced.add(m[1]!);
+  };
+  for (const step of flow.steps) {
+    scan(step.url);
+    scan(step.value);
+    scan(step.locator?.semantic?.name);
+    scan(step.resolve?.input);
+    scan(step.select?.policy);
+  }
+
+  return declared.filter((name) => {
+    if (!referenced.has(name)) return false;
+    const v = provided[name];
+    return v == null || String(v).trim() === "";
+  });
+}
+
+/**
  * The output keys a flow is expected to populate — its *data products*: what an
  * intercept harvests, what a select picks, what an extract pulls. Resolve/read
  * intermediates are deliberately excluded (they're plumbing, not the result).

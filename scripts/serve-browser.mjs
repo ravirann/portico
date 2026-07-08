@@ -76,13 +76,17 @@ console.log("  3) In another terminal, run flows with:  --cdp http://localhost:"
 console.log("\n  (Ctrl-C here to close the browser.)\n");
 
 // Keep the tracked session (and the portal's own session) from idling out:
-// bump last-active in the store and give the portal tab a harmless nudge.
+// bump last-active in the store and make a credentialed same-origin request.
+// NEVER page.reload() here — runs attach to this same tab over CDP, and a
+// keep-alive reload landing mid-run blows away whatever the run (or a human)
+// was doing. A fetch refreshes the server-side session TTL without navigating,
+// so the DOM, SPA state, and any in-flight run are untouched.
 const keepAliveTimer = setInterval(async () => {
   try {
     if (store) store.touchBrowserSession(sessionId, new Date().toISOString());
-    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.evaluate("fetch(location.href, { credentials: 'include' }).catch(() => {})");
   } catch {
-    // Best-effort — a failed reload/touch shouldn't take the server down.
+    // Best-effort — a failed nudge/touch shouldn't take the server down.
   }
 }, 60_000);
 
