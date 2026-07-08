@@ -40,6 +40,7 @@ import { z } from "zod";
 import type { Flow, Step, Target } from "@portico/flow-spec";
 import { generateTotp } from "@portico/vault";
 import { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
+import { resolveIntent } from "./resolve-intent.js";
 import type { HealModel } from "./model.js";
 
 /** An API-tier marker a flow can attach to a step (extra flow-spec field). */
@@ -151,7 +152,7 @@ function buildWorkflow(
       secrets: {},
       heal: ctx.heal,
       profileLoaded: Boolean(ctx.profileName),
-      template: (s: string) => renderTemplate(s, { inputs, secrets: {}, target }),
+      template: (s: string) => renderTemplate(s, { inputs, output, secrets: {}, target }),
     };
     for (const step of plan) await step.run(rt);
     return output;
@@ -197,6 +198,8 @@ function compileStep(step: Step, index: number, target: Target): CompiledStep {
       return { index, type: "guard", label, run: async () => ({ status: "ok", detail: "policy asserted at compile time" }) };
     case "human":
       return { index, type: "human", label, run: async () => ({ status: "paused" }) };
+    case "resolve":
+      return { index, type: "resolve", label, run: (rt) => runResolve(rt, step) };
     case "subflow":
       return { index, type: "subflow", label, run: (rt) => runAuthSubflow(rt, step, target) };
     case "download":
@@ -286,6 +289,52 @@ async function runExtract(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   rt.output[key] = raw;
   rt.unvalidated.add(key);
   return { status: "ok", detail: "raw-DOM fallback (unvalidated — no model)" };
+}
+
+/**
+ * Canonicalize a fuzzy intent value against the portal's real options.
+ * "Southview" → "Southview Internal Medicine". Fails LOUD when ambiguous —
+ * refusing to guess is the whole point at scale (never book the wrong clinic).
+ * Candidates come from a prior extract (DOM options or an API list); the
+ * resolved canonical value is written to `output[as]` for downstream steps.
+ */
+async function runResolve(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+  const spec = step.resolve;
+  if (!spec) throw new Error(`resolve step "${step.label ?? "?"}" is missing its resolve config`);
+
+  const input = rt.template(spec.input);
+  const raw = rt.output[spec.candidates];
+  // Accept string[] (e.g. location names) or object[] (use .name/.label/.value).
+  const candidates = Array.isArray(raw)
+    ? raw
+        .map((c) =>
+          typeof c === "string"
+            ? c
+            : ((c as Record<string, unknown>)?.name ??
+                (c as Record<string, unknown>)?.label ??
+                (c as Record<string, unknown>)?.value) as string | undefined,
+        )
+        .filter((c): c is string => typeof c === "string" && c.length > 0)
+    : [];
+
+  const result = resolveIntent(input, candidates);
+  if (result.status === "resolved") {
+    rt.output[spec.as] = result.value;
+    return { status: "ok", detail: `resolved "${input}" → "${result.value}" (${result.matchedBy})` };
+  }
+  if (result.status === "ambiguous") {
+    // Ambiguity is a human/decision signal, never a silent pick.
+    if (spec.on_ambiguous === "human") {
+      return { status: "paused", detail: `"${input}" is ambiguous: ${result.matches.join(" | ")}` };
+    }
+    throw new Error(
+      `resolve: "${input}" is ambiguous — matched ${result.matches.length}: ${result.matches.join(", ")}. Refusing to guess.`,
+    );
+  }
+  throw new Error(
+    `resolve: "${input}" matched none of ${candidates.length} option(s)` +
+      (candidates.length ? `: ${candidates.slice(0, 8).join(", ")}${candidates.length > 8 ? ", …" : ""}` : "."),
+  );
 }
 
 async function runAssert(rt: StepRuntime, step: Step): Promise<StepOutcome> {
@@ -388,6 +437,14 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
  * selector (deterministic replay); falls back to the semantic descriptor
  * (accessible role + name, then label, then placeholder/text) so authored flows
  * work on standard forms — e.g. login fields — without a record-by-demo pass.
+ *
+ * Ambiguity contract (consistent across the NAMED branches): a role+name or
+ * name lookup that resolves to more than one element FAILS LOUD (Playwright
+ * strict mode) rather than silently clicking the first — so a value like
+ * "Southview" that matches two clinics stops the run instead of booking the
+ * wrong one. Canonicalize fuzzy intent with a `resolve` step BEFORE the `act`
+ * so the name is unambiguous. Only the UNNAMED role-only branch is first-match,
+ * since "any element of this role" is first-by-definition.
  */
 function resolveActLocator(rt: StepRuntime, step: Step): { locator: Locator; desc: string } {
   const cached = step.locator?.cached;
@@ -396,12 +453,14 @@ function resolveActLocator(rt: StepRuntime, step: Step): { locator: Locator; des
   const s = step.locator?.semantic;
   const desc = s?.intent ?? step.label ?? "element";
   if (s?.role && s.name) {
+    // Named: strict (no .first()) — ambiguity is a bug, not a coin-flip.
     return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name: s.name, exact: false }), desc };
   }
   if (s?.name) {
-    // Try label first (form fields), else visible text (buttons/links).
+    // Named (no role): label first (form fields), else visible text. Strict —
+    // no .first(), matching the role+name branch, so ambiguity fails loud.
     const byLabel = rt.page.getByLabel(s.name, { exact: false });
-    return { locator: byLabel.or(rt.page.getByText(s.name, { exact: false })).first(), desc };
+    return { locator: byLabel.or(rt.page.getByText(s.name, { exact: false })), desc };
   }
   if (s?.role) return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first(), desc };
 
@@ -413,14 +472,33 @@ function resolveActLocator(rt: StepRuntime, step: Step): { locator: Locator; des
 
 function renderTemplate(
   input: string,
-  ctx: { inputs: Record<string, unknown>; secrets: Record<string, string>; target: Target },
+  ctx: {
+    inputs: Record<string, unknown>;
+    output?: Record<string, unknown>;
+    secrets: Record<string, string>;
+    target: Target;
+  },
 ): string {
   return input.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, key: string) => {
     if (key === "base_url") return ctx.target.base_url;
     if (key.startsWith("secrets.")) return ctx.secrets[key.slice(8)] ?? "";
-    const v = ctx.inputs[key];
+    // Resolve dotted paths against inputs first, then step output (so a `resolve`
+    // step's `as` key and extracted objects are usable downstream, e.g.
+    // "{{location_resolved}}" or "{{selected.time}}").
+    const v = lookupPath(key, ctx.inputs, ctx.output ?? {});
     return v == null ? "" : String(v);
   });
+}
+
+/** Walk a dotted key ("selected.time") through inputs, falling back to output. */
+function lookupPath(key: string, inputs: Record<string, unknown>, output: Record<string, unknown>): unknown {
+  const [head, ...rest] = key.split(".");
+  let base: unknown = head! in inputs ? inputs[head!] : output[head!];
+  for (const seg of rest) {
+    if (base == null || typeof base !== "object") return undefined;
+    base = (base as Record<string, unknown>)[seg];
+  }
+  return base;
 }
 
 /** Credential names a flow needs — derived from its `{{secrets.x}}` references. */

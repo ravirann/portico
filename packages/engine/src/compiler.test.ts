@@ -95,6 +95,40 @@ test("healModelConfigured is honest about missing config", () => {
   assert.equal(healModelConfigured({ PORTICO_HEAL_PROVIDER: "nope", PORTICO_HEAL_API_KEY: "k" }), false);
 });
 
+test("compileFlow wires a resolve step: canonicalizes intent, fails loud on ambiguity", async () => {
+  const flow: Flow = {
+    key: "resolve-loc",
+    version: 1,
+    inputs: { location: "string" },
+    steps: [
+      {
+        type: "resolve",
+        label: "canonicalize location",
+        resolve: { input: "{{location}}", candidates: "locations", as: "location_canonical" },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0]!.type, "resolve");
+
+  // Minimal runtime — a resolve step touches only template + output, not the page.
+  const mkRt = (inputs: Record<string, unknown>, output: Record<string, unknown>) =>
+    ({
+      output,
+      template: (s: string) => s.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k: string) => String(inputs[k] ?? "")),
+    }) as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+
+  // "Southview" resolves to the single matching clinic → written to output.
+  const out1: Record<string, unknown> = { locations: ["Southview Internal Medicine", "Brighton Family Medicine"] };
+  await plan[0]!.run(mkRt({ location: "Southview" }, out1));
+  assert.equal(out1.location_canonical, "Southview Internal Medicine");
+
+  // "Southview" against two "Southview *" clinics → refuse (throw), never guess.
+  const out2: Record<string, unknown> = { locations: ["Southview Internal Medicine", "Southview Pediatrics"] };
+  await assert.rejects(() => plan[0]!.run(mkRt({ location: "Southview" }, out2)), /ambiguous/);
+});
+
 test("resolveProfile normalizes the profile id and points at .libretto/profiles", () => {
   const p = resolveProfile("URMC MyChart!", { cwd: "/tmp/repo" });
   assert.equal(p.name, "urmc-mychart");

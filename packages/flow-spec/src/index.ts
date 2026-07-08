@@ -15,6 +15,7 @@ export type StepType =
   | "download"
   | "upload"
   | "human" // HITL: pause, notify, resume (2FA / CAPTCHA / ambiguity)
+  | "resolve" // canonicalize a fuzzy intent input against real candidates
   | "subflow"; // reuse another flow (e.g. portal-login)
 
 /** A cached deterministic locator plus the semantic descriptor used to heal it. */
@@ -44,6 +45,21 @@ export interface Step {
   extract?: { key: string; schema: Record<string, unknown> };
   /** For subflow: the referenced flow key (e.g. "portal-login"). */
   use?: string;
+  /**
+   * For resolve: canonicalize a fuzzy intent value against the real options the
+   * portal offers, so "Southview" becomes exactly "Southview Internal Medicine"
+   * — and refuses (rather than guessing) when the input is ambiguous.
+   */
+  resolve?: {
+    /** Templated intent to resolve, e.g. "{{location}}". */
+    input: string;
+    /** Output key holding the candidate strings (from a prior extract). */
+    candidates: string;
+    /** Output key to write the resolved canonical value into. */
+    as: string;
+    /** What to do when the input matches >1 candidate. Default "fail" (fail loud). */
+    on_ambiguous?: "fail" | "human";
+  };
   /** For assert/guard: a named condition the engine knows how to check. */
   condition?: string;
   /** Retry/timeout policy overrides. */

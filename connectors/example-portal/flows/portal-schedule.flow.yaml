@@ -39,6 +39,27 @@ steps:
     label: Open the scheduling wizard
     url: "{{base_url}}/MyChart/Scheduling"
 
+  # ── INTENT RESOLUTION: task data is messy ("Southview", "primary care"), so
+  #    canonicalize each intent against the portal's REAL options before using it.
+  #    Candidates come from the picker's rendered options or a location-list API
+  #    (FILL from the Phase-1/2 capture). resolveIntent refuses (fails the run)
+  #    rather than guessing when the input is ambiguous — e.g. "Southview" when the
+  #    portal has both "Southview Internal Medicine" and "Southview Pediatrics".
+  - type: extract
+    label: List the location options the portal offers
+    locator: { semantic: { role: button, intent: "the selectable clinic/location options" } }
+    extract:
+      key: location_options            # e.g. ["Southview Internal Medicine", "Brighton Family Medicine", …]
+      schema: { type: array, items: { type: string } }
+  - type: resolve
+    label: Canonicalize the location (refuse if ambiguous)
+    resolve:
+      input: "{{location}}"            # e.g. "Southview"
+      candidates: location_options
+      as: location_canonical          # → exact portal string, used downstream
+      on_ambiguous: fail
+  # (Same pattern applies to specialty/reason — omitted here for brevity.)
+
   # ── API TIER: read real availability in one call. Runs via Libretto pageRequest
   #    inside the authenticated page context (session cookies + TLS reused), so it
   #    is sub-second and needs no DOM and no model. FILL url/method/body from the
