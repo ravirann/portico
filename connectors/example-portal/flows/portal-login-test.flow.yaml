@@ -1,0 +1,25 @@
+# Scripted-login test — logs in with credentials from the environment (via the
+# vault), then extracts the landing page title as proof. Best-effort: resolves
+# login fields by accessible label/role, so it works on standard forms without a
+# capture. If a field isn't found on your portal, run --headed to see where it
+# stops and adjust the login step.
+#
+#   node --import tsx apps/cli/src/index.ts run \
+#     connectors/example-portal/flows/portal-login-test.flow.yaml \
+#     --instance connectors/example-portal/instances/urmc.local.yaml \
+#     --headed --profile mychart-urmc
+key: portal-login-test
+version: 1
+description: Log in with env credentials and confirm we reached the landing page.
+guard: { dry_run_only: true }
+steps:
+  - type: navigate
+    label: Open the portal
+    url: "{{base_url}}"
+  - type: subflow
+    use: portal-login          # scripted login from vaulted credentials
+  - type: extract
+    label: Landing page title
+    extract:
+      key: page_title
+      schema: { type: string }

@@ -35,9 +35,10 @@ import {
   type RecoveryAction,
   type RequestConfig,
 } from "libretto";
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import { z } from "zod";
 import type { Flow, Step, Target } from "@portico/flow-spec";
+import { generateTotp } from "@portico/vault";
 import { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 import type { HealModel } from "./model.js";
 
@@ -227,12 +228,12 @@ async function runNavigate(rt: StepRuntime, step: Step, target: Target): Promise
 }
 
 async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
-  const sel = requireSelector(step);
+  const { locator, desc } = resolveActLocator(rt, step);
   const value = step.value != null ? rt.template(step.value) : undefined;
   const timeout = step.timeoutMs ?? 15000;
   const doIt = async () => {
-    if (value !== undefined) await rt.page.fill(sel, value, { timeout });
-    else await rt.page.click(sel, { timeout });
+    if (value !== undefined) await locator.fill(value, { timeout });
+    else await locator.click({ timeout });
   };
 
   // Deterministic hot path: single attempt, no model. If it fails AND a heal
@@ -247,7 +248,7 @@ async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
     return { status: "ok" };
   } catch {
     await attemptWithRecovery(rt.rawPage, doIt, undefined, rt.heal.languageModel);
-    return { status: "healed", detail: "recovered via Libretto popup/overlay recovery", healedFrom: sel, healedTo: sel };
+    return { status: "healed", detail: "recovered via Libretto popup/overlay recovery", healedFrom: desc, healedTo: desc };
   }
 }
 
@@ -340,35 +341,74 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
   const isLogin = (step.use ?? "").includes("login") || (target.auth ?? "").includes("login");
   if (!isLogin) throw new Error(`subflow '${step.use ?? "?"}' is not an auth subflow and is not wired`);
 
+  const page = rt.rawPage;
+  const onLoginPage = () => /log[\s-]?in|sign[\s-]?in|authenticate/i.test(page.url());
+
   const result = await librettoAuthenticate(
-    { session: rt.session, page: rt.rawPage },
+    { session: rt.session, page },
     {
-      isSignedIn: () => rt.profileLoaded,
-      signIn: async () => {
-        throw new Error(
-          `scripted login for '${step.use ?? target.auth}' is not authored — complete the ` +
-            `first login manually (headed) to seed the auth profile`,
-        );
+      // Signed in if a trusted profile was loaded, or we're no longer on a login URL.
+      isSignedIn: () => rt.profileLoaded || !onLoginPage(),
+      // Best-effort scripted login from vaulted credentials. Resolves fields by
+      // accessible label/role (works on standard forms without a capture). Fills
+      // an authenticator-app OTP if a totp_seed is provided; SMS 2FA still needs
+      // a manual tap (run headed) — after which the session persists to the profile.
+      signIn: async (_ctx, creds) => {
+        const username = String(creds.username ?? rt.secrets.username ?? "");
+        const password = String(creds.password ?? rt.secrets.password ?? "");
+        const totpSeed = String(creds.totp_seed ?? rt.secrets.totp_seed ?? "");
+        if (!username || !password) {
+          throw new Error("scripted login needs username + password — set PORTICO_SECRET_*_USERNAME/PASSWORD (.env)");
+        }
+        await page.getByLabel(/user|login|email/i).first().fill(username, { timeout: 15000 });
+        await page.getByLabel(/password/i).first().fill(password, { timeout: 15000 });
+        await page.getByRole("button", { name: /sign ?in|log ?in|continue/i }).first().click({ timeout: 15000 });
+        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        if (totpSeed) {
+          const otp = page.getByLabel(/code|otp|verification|token|passcode/i).first();
+          if (await otp.count().catch(() => 0)) {
+            await otp.fill(generateTotp(totpSeed), { timeout: 15000 });
+            await page.getByRole("button", { name: /verify|submit|continue|sign ?in/i }).first().click({ timeout: 15000 }).catch(() => {});
+            await page.waitForLoadState("domcontentloaded").catch(() => {});
+          }
+        }
       },
       credentials: rt.secrets,
     },
   );
-  return { status: "ok", detail: result.usedProfile ? "auth via saved profile" : "auth completed" };
+  return { status: "ok", detail: result.usedProfile ? "auth via saved profile" : "scripted login completed" };
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function requireSelector(step: Step): string {
-  const sel = step.locator?.cached;
-  if (!sel) {
-    throw new Error(
-      `act step "${step.label ?? "?"}" has no cached locator — record it first ` +
-        `(record-by-demo). Semantic intent: "${step.locator?.semantic.intent ?? "?"}".`,
-    );
+/**
+ * Resolve an `act` target to a Playwright Locator. Prefers a cached CSS/XPath
+ * selector (deterministic replay); falls back to the semantic descriptor
+ * (accessible role + name, then label, then placeholder/text) so authored flows
+ * work on standard forms — e.g. login fields — without a record-by-demo pass.
+ */
+function resolveActLocator(rt: StepRuntime, step: Step): { locator: Locator; desc: string } {
+  const cached = step.locator?.cached;
+  if (cached) return { locator: rt.page.locator(cached), desc: cached };
+
+  const s = step.locator?.semantic;
+  const desc = s?.intent ?? step.label ?? "element";
+  if (s?.role && s.name) {
+    return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name: s.name, exact: false }), desc };
   }
-  return sel;
+  if (s?.name) {
+    // Try label first (form fields), else visible text (buttons/links).
+    const byLabel = rt.page.getByLabel(s.name, { exact: false });
+    return { locator: byLabel.or(rt.page.getByText(s.name, { exact: false })).first(), desc };
+  }
+  if (s?.role) return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first(), desc };
+
+  throw new Error(
+    `act step "${step.label ?? "?"}" has no cached selector and no usable semantic ` +
+      `descriptor (need role and/or name). Intent: "${desc}".`,
+  );
 }
 
 function renderTemplate(

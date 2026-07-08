@@ -56,6 +56,14 @@ function parseArgs(argv: string[]) {
 }
 
 async function main() {
+  // Load a repo-root .env (credentials/secrets) if present; env vars set
+  // directly still work. Node 20.6+/24 ships process.loadEnvFile.
+  try {
+    (process as unknown as { loadEnvFile?: () => void }).loadEnvFile?.();
+  } catch {
+    /* no .env file — rely on process.env */
+  }
+
   const { cmd, flowPath, opts } = parseArgs(process.argv.slice(2));
 
   // Read commands — query the durable store as JSON (the console spawns these

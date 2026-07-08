@@ -9,6 +9,8 @@
  * same interface with envelope encryption.
  */
 
+import { authenticator } from "otplib";
+
 export interface SecretProvider {
   /** Resolve a secret by reference, e.g. "example/password". */
   get(ref: string): Promise<string>;
@@ -52,9 +54,12 @@ export function redact(text: string, secretValues: Iterable<string>): string {
 }
 
 /**
- * Generate a TOTP code from a vaulted seed, in-process, so 2FA never leaves the
- * sandbox. Pilot seam: wire `otplib` here during the auth build.
+ * Generate a TOTP code from a vaulted seed, in-process, so the 2FA seed never
+ * leaves the sandbox. Accepts a base32 authenticator secret (as shown by
+ * "can't scan the code?" during authenticator-app setup).
  */
-export function generateTotp(_seed: string): string {
-  throw new Error("generateTotp: wire otplib during the portal-login auth build.");
+export function generateTotp(seed: string): string {
+  const clean = seed.replace(/\s+/g, "").toUpperCase();
+  if (!clean) throw new Error("generateTotp: empty TOTP seed");
+  return authenticator.generate(clean);
 }
