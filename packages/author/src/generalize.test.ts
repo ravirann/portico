@@ -24,6 +24,7 @@ type Case = {
   bodies?: Record<string, string>;
   localStorage?: Record<string, string>;
   planParams?: Array<{ name: string; value: string; description: string }>;
+  intent?: "read" | "search" | "extract" | "update" | "navigate";
   assert: (flow: ReturnType<typeof compileAgentRun>) => void;
 };
 
@@ -119,6 +120,23 @@ const cases: Case[] = [
     },
   },
   {
+    name: "search SPA with POST query + non-numeric deep-link (Hacker News / Algolia shape)",
+    goal: "Search stories for playwright",
+    // The search is a POST (Algolia); the page deep-links the term as a query param.
+    finalUrl: "https://hn.algolia.com/?query=playwright&page=0",
+    requests: [{ method: "POST", url: "https://hn.example.com/1/indexes/Item/query", pathname: "/1/indexes/Item/query", resourceType: "fetch", postData: JSON.stringify({ query: "playwright" }) }],
+    responses: [{ url: "https://hn.example.com/1/indexes/Item/query", pathname: "/1/indexes/Item/query", bytes: 40000, contentType: "application/json" }],
+    planParams: [{ name: "search_term", value: "playwright", description: "term to search" }],
+    intent: "search",
+    assert: (f) => {
+      // Harvest path: the non-numeric search term is parameterized in the URL.
+      assert.ok(navUrl(f).includes("query={{search_term}}"), navUrl(f));
+      assert.ok(f.inputs && "search_term" in f.inputs);
+      // No write for a search intent, even though a POST was captured.
+      assert.equal(writeStep(f), undefined);
+    },
+  },
+  {
     name: "no goal values → falls back to the plain harvest path (claim-detail style)",
     goal: "Open the dashboard and read the summary",
     finalUrl: "https://app.example.com/dashboard",
@@ -142,6 +160,7 @@ for (const c of cases) {
       new Map(Object.entries(c.bodies ?? {})),
       c.localStorage ?? {},
       c.planParams ?? [],
+      c.intent ?? "update",
     );
     c.assert(flow);
   });

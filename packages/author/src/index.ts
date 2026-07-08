@@ -147,7 +147,10 @@ function isDataResponse(status: number, contentType: string, resourceType: strin
  * is a URL, not a fragile row-click" rule — learned from the URL, not guessed
  * from click text.
  */
-function parameterizeUrl(finalUrl: string): { url: string; inputs: Record<string, string> } {
+function parameterizeUrl(
+  finalUrl: string,
+  planParams: GoalParameter[] = [],
+): { url: string; inputs: Record<string, string> } {
   const inputs: Record<string, string> = {};
   let u: URL;
   try {
@@ -155,8 +158,18 @@ function parameterizeUrl(finalUrl: string): { url: string; inputs: Record<string
   } catch {
     return { url: finalUrl, inputs };
   }
+  const planByValue = planParams.filter((p) => p.value);
   for (const [k, v] of [...u.searchParams.entries()]) {
-    // A stable id-shaped param (all digits) is the per-run value; template it.
+    // A query value the rewriter named (e.g. a search term "playwright") is a
+    // per-run input regardless of type — this is what makes non-numeric
+    // deep-link searches reusable, not just id-shaped params.
+    const plan = planByValue.find((p) => v.includes(p.value));
+    if (plan) {
+      inputs[plan.name] = `string — e.g. ${v}`;
+      u.searchParams.set(k, v.replace(plan.value, `{{${plan.name}}}`));
+      continue;
+    }
+    // Else a stable id-shaped param (all digits) is the per-run value.
     if (/^\d+$/.test(v)) {
       const inputName = k.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase(); // claimId → claim_id
       inputs[inputName] = `string — e.g. ${v}`;
@@ -531,7 +544,7 @@ export function compileAgentRun(
     }
   }
 
-  const { url, inputs } = parameterizeUrl(finalUrl);
+  const { url, inputs } = parameterizeUrl(finalUrl, planParams);
   // The id values the agent's navigation resolved to (e.g. 4299 from
   // ?claimId=4299). Endpoints carrying these ids are THIS claim's data — the
   // strongest signal for "what the goal was actually about", and it ties the
