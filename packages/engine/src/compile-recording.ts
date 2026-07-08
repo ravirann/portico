@@ -18,13 +18,17 @@
  * `no_booking` so it can only ever read a portal, never act on it.
  *
  * Pipeline:
- *   1. navigate   — the recording's `baseUrl`.
- *   2. intercept  — the best-guess "data" endpoint from `rec.network`
- *                    (skipped entirely if no JSON candidate exists).
- *   3. act…       — one per meaningful click, login/auth and the final
- *                    booking/slot-picking click filtered out.
- *   4. wait       — only if step 2 emitted an intercept.
- *   5. select     — only if step 2 emitted an intercept AND its response
+ *   1. intercept  — the best-guess "data" endpoint from `rec.network`
+ *                    (skipped entirely if no JSON candidate exists). Emitted
+ *                    BEFORE navigate: SPAs fire their data request during the
+ *                    initial page load, and a listener registered after
+ *                    `navigate` returns races (and often loses) that response.
+ *   2. navigate   — the recording's `baseUrl`.
+ *   3. act…       — one per meaningful click; login/auth clicks, the final
+ *                    booking/slot-picking click, and no-op toggle pairs
+ *                    (open + close with nothing in between) filtered out.
+ *   4. wait       — only if step 1 emitted an intercept.
+ *   5. select     — only if step 1 emitted an intercept AND its response
  *                    body looks like it carries slot/time data.
  */
 
@@ -206,16 +210,33 @@ function labelOf(click: ClickEvent): string {
 }
 
 /**
+ * Volatile content inside a label: dates ("6 JULY 2026", "06/07/2026") and
+ * live counts ("2 docs", "3 items"). These change between the demonstration
+ * and every future replay, so an accessible-name match containing them is
+ * guaranteed to go stale — a row labelled "Documents Submitted 6 JULY 2026"
+ * must be matched by "Documents Submitted" alone.
+ */
+const VOLATILE_TEXT_RE =
+  /\b(\d{1,2}\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s+\d{4}|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d+\s+(?:docs?|files?|items?|results?|records?))\b/i;
+
+/**
  * Normalize a label into the act's semantic `name`: collapse all whitespace
- * runs (DOM innerText is full of newlines and double spaces) and cap at ~80
- * chars. Deliberately NOT truncated to a leading phrase — an earlier heuristic
- * cut at the first double-space/newline, which turned a row label like
- * "Prasanna  Kumar D E" into "Prasanna" and made the replay locator match the
- * wrong (or no) element. `name` must stay the full accessible label; only the
- * length cap guards against pathological tile paragraphs.
+ * runs (DOM innerText is full of newlines and double spaces), truncate at the
+ * first volatile token (dates/counts — see VOLATILE_TEXT_RE) when a stable
+ * multi-word prefix remains, and cap at ~80 chars. Deliberately NOT truncated
+ * to a leading phrase otherwise — an earlier heuristic cut at the first
+ * double-space/newline, which turned a row label like "Prasanna  Kumar D E"
+ * into "Prasanna" and made the replay locator match the wrong (or no) element.
  */
 function semanticName(label: string): string {
   let name = label.replace(/\s+/g, " ").trim();
+  const volatile = VOLATILE_TEXT_RE.exec(name);
+  if (volatile && volatile.index > 0) {
+    const prefix = name.slice(0, volatile.index).trim().replace(/[|•·:,–—-]+$/, "").trim();
+    // Only truncate when the stable prefix still identifies something — a
+    // label that IS a date (e.g. a calendar cell) must stay intact.
+    if (prefix.length >= 4) name = prefix;
+  }
   if (name.length > 80) name = name.slice(0, 80).trim();
   return name;
 }
@@ -371,17 +392,67 @@ function actStepFor(click: ClickEvent): Step {
 // Compiler entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Exploration-noise collapse
+// ---------------------------------------------------------------------------
+
+/**
+ * Names that read as UI-state toggles (filter panels, dropdowns, expanders).
+ * Only these are eligible for pair-collapse — a repeated click on "Next"
+ * (pagination) or "Load more" is intentional repetition, not noise.
+ */
+const TOGGLEY_NAME_RE = /\b(toggle|filters?|menu|dropdown|expand|collapse|show|hide|options?|types?|sort)\b/i;
+
+/** The click's collapse identity: role + normalized semantic name. */
+function clickIdentity(click: ClickEvent): string {
+  return `${roleFor(click) ?? ""}|${semanticName(labelOf(click)).toLowerCase()}`;
+}
+
+/**
+ * Drop no-op toggle pairs: two ADJACENT clicks on the same toggle-like element
+ * are an open+close with nothing done in between — pure exploration noise that
+ * replays as UI churn (or worse, leaves a panel in the wrong state relative to
+ * what a heal expects). Collapsing is state-preserving by definition for a true
+ * toggle: open+close ≡ never-opened. Runs to a fixpoint so pairs revealed by an
+ * inner collapse ("Toggle filters, All Types, All Types, Toggle filters") also
+ * fold away.
+ */
+export function collapseTogglePairs(clicks: ClickEvent[]): ClickEvent[] {
+  let current = clicks;
+  for (;;) {
+    const next: ClickEvent[] = [];
+    let collapsed = false;
+    for (let i = 0; i < current.length; i++) {
+      const a = current[i]!;
+      const b = current[i + 1];
+      if (
+        b &&
+        clickIdentity(a) === clickIdentity(b) &&
+        TOGGLEY_NAME_RE.test(semanticName(labelOf(a)))
+      ) {
+        i++; // skip both halves of the pair
+        collapsed = true;
+        continue;
+      }
+      next.push(a);
+    }
+    if (!collapsed) return next;
+    current = next;
+  }
+}
+
 /**
  * Deterministically compile a recorded demonstration into a harvest-style
- * Portico flow: navigate → intercept → act… → wait → select. Pure — same
+ * Portico flow: intercept → navigate → act… → wait → select. Pure — same
  * input always produces the same output, no I/O, no model call. This is the
  * pre-LLM baseline the author-time refinement pass starts from.
  */
 export function compileRecording(rec: Recording, opts: CompileRecordingOptions = {}): Flow {
   const steps: Step[] = [];
 
-  steps.push({ type: "navigate", label: "Open the page", url: rec.baseUrl });
-
+  // Intercept FIRST: the listener must exist before the page load that fires
+  // the data request (the engine also hoists intercepts defensively at run
+  // time, but the authored artifact should read in true execution order).
   const chosen = selectInterceptCandidate(rec.network, opts.interceptKeyword);
   if (chosen) {
     const pathname = pathnameOf(chosen.url);
@@ -392,13 +463,16 @@ export function compileRecording(rec: Recording, opts: CompileRecordingOptions =
     });
   }
 
+  steps.push({ type: "navigate", label: "Open the page", url: rec.baseUrl });
+
   const lastIndex = rec.clicks.length - 1;
-  rec.clicks.forEach((click, index) => {
-    if (isOnAuthPage(click) || isLoginClick(click)) return; // login/auth click, not part of the harvest path
-    if (index === lastIndex && isFinalActionClick(click)) return; // never replay the booking/slot click
-    if (!hasAnyLabel(click)) return; // nothing to locate it by
-    steps.push(actStepFor(click));
+  const meaningful = rec.clicks.filter((click, index) => {
+    if (isOnAuthPage(click) || isLoginClick(click)) return false; // login/auth click, not part of the harvest path
+    if (index === lastIndex && isFinalActionClick(click)) return false; // never replay the booking/slot click
+    if (!hasAnyLabel(click)) return false; // nothing to locate it by
+    return true;
   });
+  for (const click of collapseTogglePairs(meaningful)) steps.push(actStepFor(click));
 
   if (chosen) {
     steps.push({ type: "wait", label: "Wait for data", wait: { for: "data_raw", timeout_ms: 20000 } });

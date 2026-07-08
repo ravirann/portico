@@ -101,7 +101,14 @@ export function compileFlow(
   opts: { heal?: HealModel | null; profileName?: string } = {},
 ): CompileResult {
   assertPolicyAtCompileTime(flow);
-  const plan = flow.steps.map((step, index) => compileStep(step, index, target));
+  const compiled = flow.steps.map((step, index) => compileStep(step, index, target));
+  // Intercept steps are passive listener registrations — hoist them ahead of
+  // everything else so a response fired DURING the initial page load (SPAs
+  // fetch their data on mount) is never missed because the listener was
+  // registered after `navigate` returned. Earlier registration is strictly
+  // safer; "latest match wins" semantics are unchanged. Steps keep their
+  // original `index` for tracing.
+  const plan = [...compiled.filter((s) => s.type === "intercept"), ...compiled.filter((s) => s.type !== "intercept")];
   const credentialNames = deriveCredentialNames(flow);
   const wf = buildWorkflow(flow, target, plan, {
     heal: opts.heal ?? null,
@@ -233,43 +240,131 @@ function compileStep(step: Step, index: number, target: Target): CompiledStep {
   }
 }
 
+/**
+ * Wait until the DOM stops mutating for `quietMs` (or `timeout` elapses).
+ * This is the SPA readiness gate: `domcontentloaded` fires before client-side
+ * data fetching/hydration, and `networkidle` is an anti-pattern (analytics
+ * beacons/polling keep the network busy forever). "The DOM went quiet" is a
+ * framework-agnostic proxy for "the app finished rendering". Best-effort:
+ * a navigation racing the evaluate resolves rather than failing the step.
+ */
+export async function waitForDomQuiet(
+  page: Page,
+  opts: { quietMs?: number; timeoutMs?: number } = {},
+): Promise<void> {
+  const quietMs = Math.max(0, opts.quietMs ?? 400);
+  const timeoutMs = Math.max(quietMs, opts.timeoutMs ?? 8000);
+  // A string expression, not a typed closure: this runs in the BROWSER, and the
+  // engine package deliberately compiles without the DOM lib (it's Node code).
+  const src = `new Promise((resolve) => {
+    const quietMs = ${quietMs};
+    const timeoutMs = ${timeoutMs};
+    let quietTimer;
+    let hardStop;
+    const observer = new MutationObserver(() => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(done, quietMs);
+    });
+    function done() {
+      observer.disconnect();
+      clearTimeout(quietTimer);
+      clearTimeout(hardStop);
+      resolve(undefined);
+    }
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+    quietTimer = setTimeout(done, quietMs);
+    hardStop = setTimeout(done, timeoutMs);
+  })`;
+  try {
+    await page.evaluate(src);
+  } catch {
+    /* page navigated mid-evaluate — it's changing, the next step's own wait gates it */
+  }
+}
+
+/**
+ * Run `fn` honoring the step's `retry` policy ({max, backoffMs}). `max` is the
+ * number of RETRIES after the first attempt (flow-spec semantics); each retry
+ * backs off linearly. Retries are deterministic re-executions — no model.
+ */
+async function withStepRetry<T>(
+  step: Step,
+  defaults: { max: number; backoffMs: number },
+  fn: (attempt: number) => Promise<T>,
+): Promise<T> {
+  const max = step.retry?.max ?? defaults.max;
+  const backoffMs = step.retry?.backoffMs ?? defaults.backoffMs;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= max; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < max) await new Promise((r) => setTimeout(r, backoffMs * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 async function runNavigate(rt: StepRuntime, step: Step, target: Target): Promise<StepOutcome> {
   const url = rt.template(step.url ?? target.base_url);
-  await rt.page.goto(url, { waitUntil: "domcontentloaded", timeout: step.timeoutMs ?? 60000 });
+  await withStepRetry(step, { max: 1, backoffMs: 1000 }, async () => {
+    await rt.page.goto(url, { waitUntil: "domcontentloaded", timeout: step.timeoutMs ?? 60000 });
+  });
+  // SPA readiness: don't hand the next step a half-hydrated page.
+  await waitForDomQuiet(rt.rawPage, { quietMs: 500, timeoutMs: 8000 });
   return { status: "ok" };
 }
 
 async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
-  const { locator, desc, fallback } = resolveActLocator(rt, step);
   const value = step.value != null ? rt.template(step.value) : undefined;
   const timeout = step.timeoutMs ?? 15000;
   const attempt = (target: Locator, t: number) => async () => {
+    // Explicit visibility gate before interacting: Playwright's own auto-wait
+    // would also wait, but waiting here (a) fails with a clear "never became
+    // visible" instead of a generic click timeout, and (b) applies the strict
+    // ambiguity contract early — a role+name resolving to 2+ elements throws
+    // here, before anything is clicked.
+    await target.waitFor({ state: "visible", timeout: t });
     if (value !== undefined) await target.fill(value, { timeout: t });
     else await target.click({ timeout: t });
   };
   // Cached-first, semantic self-heal: when the step carries BOTH a cached
   // selector and a semantic descriptor, try the cached one briefly, then
   // re-find the element by meaning. Deterministic — no model call — so it is
-  // allowed on the promoted hot path.
-  const doIt = fallback
-    ? async () => {
-        try {
-          await attempt(locator, Math.min(timeout, 5000))();
-        } catch {
-          await attempt(fallback, timeout)();
-        }
-      }
-    : attempt(locator, timeout);
+  // allowed on the promoted hot path. Locators are re-resolved per retry so a
+  // re-render between attempts is picked up fresh.
+  const doIt = async () => {
+    const { locator, fallback } = resolveActLocator(rt, step);
+    if (!fallback) return attempt(locator, timeout)();
+    try {
+      await attempt(locator, Math.min(timeout, 5000))();
+    } catch {
+      await attempt(fallback, timeout)();
+    }
+  };
+  const settled = async () => {
+    await withStepRetry(step, { max: 2, backoffMs: 500 }, doIt);
+    // Clicks trigger SPA transitions (detail views, tab switches) — give the
+    // render a short quiet window so the next step doesn't race it.
+    if (value === undefined) await waitForDomQuiet(rt.rawPage, { quietMs: 300, timeoutMs: 3000 });
+  };
 
-  // Deterministic hot path: single attempt, no model. If it fails AND a heal
-  // model is configured, run `attemptWithRecovery` (popup/overlay recovery +
-  // one retry). No model ⇒ the failure propagates (deterministic).
+  const desc = step.locator?.semantic?.intent ?? step.label ?? "element";
+  // Deterministic hot path: bounded deterministic retries, no model. If those
+  // fail AND a heal model is configured, run `attemptWithRecovery` (popup/
+  // overlay recovery + one retry). No model ⇒ the failure propagates.
   if (!rt.heal) {
-    await doIt();
+    await settled();
     return { status: "ok" };
   }
   try {
-    await doIt();
+    await settled();
     return { status: "ok" };
   } catch {
     await attemptWithRecovery(rt.rawPage, doIt, undefined, rt.heal.languageModel);
@@ -284,8 +379,26 @@ async function runExtract(rt: StepRuntime, step: Step): Promise<StepOutcome> {
 
   // 1) Deterministic hot path: a cached locator → plain DOM read, validate, no model.
   if (cached) {
-    const texts = await rt.page.locator(cached).allInnerTexts();
-    const value: unknown = texts.length <= 1 ? texts[0] ?? "" : texts;
+    const timeout = step.timeoutMs ?? 10000;
+    const value = await withStepRetry(step, { max: 2, backoffMs: 500 }, async () => {
+      const loc = rt.page.locator(rt.template(cached));
+      // Extraction MUST wait for the element: SPAs render data async, and a
+      // waitless read returns "" — which then flows downstream as a silently
+      // wrong value. Empty results are a hard failure, never an "ok".
+      await loc.first().waitFor({ state: "visible", timeout });
+      const texts = await loc.allInnerTexts();
+      const v: unknown = texts.length <= 1 ? texts[0] ?? "" : texts;
+      const empty =
+        texts.length === 0 || (typeof v === "string" && v.trim() === "") ||
+        (Array.isArray(v) && v.every((t) => String(t).trim() === ""));
+      if (empty) {
+        throw new Error(
+          `extract "${key}": locator ${JSON.stringify(cached)} matched ${texts.length} element(s) but yielded no text — ` +
+            "refusing to store an empty extraction",
+        );
+      }
+      return v;
+    });
     const check = validateAgainst(schema, value);
     rt.output[key] = check.ok ? check.value : value;
     if (!check.ok) rt.unvalidated.add(key);
@@ -627,6 +740,17 @@ function buildSemanticLocator(rt: StepRuntime, s: NonNullable<Step["locator"]>["
   // The accessible name may be an input reference (e.g. "{{specialty}}") — render
   // it before matching, exactly like act values and api params.
   const name = s.name != null ? rt.template(s.name) : undefined;
+  // A templated name that rendered EMPTY means the run is missing an input.
+  // Fail loud with the input's name — falling through would degrade a
+  // role+name locator to role-only `.first()`, i.e. "click the first button
+  // on the page": a silent wrong-click, the worst possible failure mode.
+  if (s.name && /\{\{/.test(s.name) && name !== undefined && name.trim() === "") {
+    const refs = [...s.name.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map((m) => m[1]).join(", ");
+    throw new Error(
+      `locator name "${s.name}" rendered empty — the run did not provide input "${refs}". ` +
+        `Pass --input ${refs}=… (or fill it in the console's Run form).`,
+    );
+  }
   if (s.role && name) {
     // Named: strict (no .first()) — ambiguity is a bug, not a coin-flip.
     return rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name, exact: false });

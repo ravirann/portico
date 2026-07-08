@@ -202,7 +202,7 @@ test("act templates the locator's accessible name from inputs (not a literal {{.
   };
   const { plan } = compileFlow(flow, target);
   let seenName: string | undefined;
-  const fakeLocator = { click: async () => {} };
+  const fakeLocator = { waitFor: async () => {}, click: async () => {} };
   const page = { getByRole: (_role: string, opts: { name: string }) => { seenName = opts.name; return fakeLocator; } };
   const rt = {
     page,
@@ -340,8 +340,10 @@ test("act self-heals from a stale cached selector to the semantic descriptor (no
   const { plan } = compileFlow(flow, target);
   const clicked: string[] = [];
   const page = {
-    locator: (sel: string) => ({ click: async () => { throw new Error(`stale: ${sel}`); } }),
-    getByRole: (_role: string, opts: { name: string }) => ({ click: async () => { clicked.push(opts.name); } }),
+    // The stale cached selector fails at the visibility gate, exactly like a
+    // real Playwright locator whose element no longer exists.
+    locator: (sel: string) => ({ waitFor: async () => { throw new Error(`stale: ${sel}`); }, click: async () => { throw new Error(`stale: ${sel}`); } }),
+    getByRole: (_role: string, opts: { name: string }) => ({ waitFor: async () => {}, click: async () => { clicked.push(opts.name); } }),
   };
   const rt = {
     page,
@@ -393,4 +395,162 @@ test("the unwrapped scalar validates against the ORIGINAL declared schema", () =
   const check = validateAgainst(declared, unwrap({ value: "Example Domain" }));
   assert.equal(check.ok, true);
   assert.equal(check.value, "Example Domain");
+});
+
+// ---------------------------------------------------------------------------
+// Reliability: intercept hoisting, extraction waits, retry policy
+// ---------------------------------------------------------------------------
+
+test("compileFlow hoists intercept registration ahead of navigate in the plan", () => {
+  const flow: Flow = {
+    key: "hoist",
+    version: 1,
+    steps: [
+      { type: "navigate", url: "{{base_url}}/claims" },
+      { type: "intercept", label: "cap", intercept: { url_contains: "/api/claims", as: "data_raw" } },
+      { type: "wait", wait: { for: "data_raw", timeout_ms: 1000 } },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  // The listener must exist before the page load fires the data request —
+  // otherwise the SPA's on-mount fetch races (and often beats) registration.
+  assert.deepEqual(plan.map((s) => s.type), ["intercept", "navigate", "wait"]);
+  // Original flow indices are preserved for tracing back to the YAML.
+  assert.deepEqual(plan.map((s) => s.index), [1, 0, 2]);
+});
+
+test("extract waits for the element and retries an empty read until text arrives", async () => {
+  const flow: Flow = {
+    key: "ex",
+    version: 1,
+    steps: [
+      {
+        type: "extract",
+        label: "phone",
+        locator: { cached: "#phone", semantic: { intent: "the phone number" } },
+        extract: { key: "phone", schema: { type: "string" } },
+        retry: { max: 1, backoffMs: 1 },
+        timeoutMs: 100,
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  let reads = 0;
+  const page = {
+    locator: (_sel: string) => ({
+      first: () => ({ waitFor: async () => {} }),
+      // First read races the render and sees empty text; the retry sees data.
+      allInnerTexts: async () => (++reads === 1 ? [""] : ["+91 81830 54609"]),
+    }),
+  };
+  const output: Record<string, unknown> = {};
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output,
+    input: {},
+    secrets: {},
+    target,
+    unvalidated: new Set<string>(),
+    template: (s: string) => s,
+  } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.equal(output.phone, "+91 81830 54609");
+  assert.equal(reads, 2);
+});
+
+test("extract fails LOUD when the element never yields text (never a silent empty ok)", async () => {
+  const flow: Flow = {
+    key: "ex2",
+    version: 1,
+    steps: [
+      {
+        type: "extract",
+        label: "phone",
+        locator: { cached: "#phone", semantic: { intent: "the phone number" } },
+        extract: { key: "phone", schema: { type: "string" } },
+        retry: { max: 1, backoffMs: 1 },
+        timeoutMs: 50,
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  const page = {
+    locator: (_sel: string) => ({
+      first: () => ({ waitFor: async () => {} }),
+      allInnerTexts: async () => [],
+    }),
+  };
+  const output: Record<string, unknown> = {};
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output,
+    input: {},
+    secrets: {},
+    target,
+    unvalidated: new Set<string>(),
+    template: (s: string) => s,
+  } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+  await assert.rejects(() => plan[0]!.run(rt), /refusing to store an empty extraction/);
+  assert.equal(output.phone, undefined);
+});
+
+test("act honors the step's retry policy: transient failure, then success", async () => {
+  const flow: Flow = {
+    key: "retry",
+    version: 1,
+    steps: [
+      {
+        type: "act",
+        label: "open workflow tab",
+        retry: { max: 2, backoffMs: 1 },
+        locator: { semantic: { role: "button", name: "Workflow", intent: "the Workflow tab" } },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  let attempts = 0;
+  const page = {
+    getByRole: (_role: string, _opts: { name: string }) => ({
+      waitFor: async () => {},
+      click: async () => {
+        attempts++;
+        if (attempts < 2) throw new Error("element detached mid-click");
+      },
+    }),
+  };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    template: (s: string) => s,
+  } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.equal(attempts, 2);
+});
+
+test("a templated locator name that renders empty fails loud naming the missing input", () => {
+  const rt = {
+    page: {
+      getByRole: () => ({}),
+      getByLabel: () => ({ or: () => ({ first: () => ({}) }) }),
+      getByText: () => ({}),
+    },
+    template: (s: string) => s.replace(/\{\{\s*[\w.]+\s*\}\}/g, ""), // input not provided
+  } as unknown as StepRuntime;
+  const step = {
+    type: "act",
+    label: "Open the claim row",
+    locator: { semantic: { role: "button", name: "{{customer_name}}", intent: "the claim row" } },
+  } as Parameters<typeof resolveActLocator>[1];
+  assert.throws(() => resolveActLocator(rt, step), /did not provide input "customer_name"/);
 });

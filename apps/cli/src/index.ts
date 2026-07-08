@@ -51,6 +51,7 @@ interface CliOpts {
   port?: number;
   yamlFile?: string;
   session?: string;
+  goal?: string;
 }
 
 function parseArgs(argv: string[]) {
@@ -90,6 +91,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--port") opts.port = Number(rest[++i]);
     else if (a === "--yaml-file") opts.yamlFile = rest[++i];
     else if (a === "--session") opts.session = rest[++i];
+    else if (a === "--goal") opts.goal = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -508,7 +510,7 @@ async function main() {
       process.exit(1);
     }
     const emptyRec: Recording = { baseUrl: "", clicks: [], network: [] };
-    const refined = await refineFlow(draft, emptyRec, heal.languageModel);
+    const refined = await refineFlow(draft, emptyRec, heal.languageModel, { goal: opts.goal });
     const version = (store.listFlowVersions(rec.key)[0]?.version ?? 0) + 1;
     // Keep the YAML body's `version` in sync with the assigned draft version
     // (refineFlow carries over the source draft's stale version).

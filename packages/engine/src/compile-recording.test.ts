@@ -52,22 +52,27 @@ const recording: Recording = {
   ],
 };
 
-test("compiles a full recording into navigate/intercept/act…/wait/select", () => {
+test("compiles a full recording into intercept/navigate/act…/wait/select", () => {
   const flow = compileRecording(recording, { key: "mychart-slots" });
 
   assert.equal(flow.key, "mychart-slots");
   assert.equal(flow.version, 1);
+  // Intercept FIRST: the listener must exist before the page load that can
+  // fire the data request, or the capture races the navigation and loses.
   assert.equal(
     flow.steps.map((s) => s.type).join(","),
-    ["navigate", "intercept", "act", "act", "act", "act", "wait", "select"].join(","),
+    ["intercept", "navigate", "act", "act", "act", "act", "wait", "select"].join(","),
   );
 });
 
-test("navigate step opens the recording's baseUrl", () => {
+test("navigate step opens the recording's baseUrl (after the intercept registration)", () => {
   const flow = compileRecording(recording);
-  const nav = flow.steps[0]!;
-  assert.equal(nav.type, "navigate");
+  const nav = flow.steps.find((s) => s.type === "navigate")!;
   assert.equal(nav.url, recording.baseUrl);
+  assert.ok(
+    flow.steps.findIndex((s) => s.type === "intercept") < flow.steps.findIndex((s) => s.type === "navigate"),
+    "intercept must be registered before navigate",
+  );
 });
 
 test("intercept targets the GetSlots endpoint and stores it as data_raw", () => {
@@ -217,11 +222,11 @@ const claimsRecording: Recording = {
   ],
 };
 
-test("claims recording compiles to navigate/intercept/act×4/wait with the claims endpoint", () => {
+test("claims recording compiles to intercept/navigate/act×4/wait with the claims endpoint", () => {
   const flow = compileRecording(claimsRecording, { key: "claims-read" });
   assert.deepEqual(
     flow.steps.map((s) => s.type),
-    ["navigate", "intercept", "act", "act", "act", "act", "wait"],
+    ["intercept", "navigate", "act", "act", "act", "act", "wait"],
   );
   const intercept = flow.steps.find((s) => s.type === "intercept")!;
   assert.equal(intercept.intercept!.url_contains, "/api/proxy/v1/claims");
@@ -235,6 +240,72 @@ test("a role-less row click keeps its FULL name (not the first word)", () => {
   assert.equal(row.locator!.semantic.name, "Prasanna Kumar D E");
   assert.equal(row.locator!.semantic.intent, "Prasanna  Kumar D E");
   assert.equal(row.locator!.semantic.role, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Exploration-noise collapse + volatile-text truncation
+// ---------------------------------------------------------------------------
+
+test("no-op toggle pairs collapse away, including pairs revealed by an inner collapse", () => {
+  // The real pulse.clinikk.com noise pattern: filter panel opened, a dropdown
+  // opened+closed with nothing selected, panel closed again — then the real work.
+  const noisy: Recording = {
+    baseUrl: "https://pulse.example.com/claims",
+    clicks: [
+      { tag: "BUTTON", role: "button", text: "Toggle filters" },
+      { tag: "DIV", text: "All Types  Cashless OPD Reimbursement Hospital Reimbursement" },
+      { tag: "DIV", text: "All Types  Cashless OPD Reimbursement Hospital Reimbursement" },
+      { tag: "BUTTON", role: "button", text: "Toggle filters" },
+      { tag: "BUTTON", role: "button", text: "IN_PROGRESS" },
+      { tag: "DIV", text: "Prasanna Kumar D E" },
+      { tag: "BUTTON", role: "button", text: "Workflow" },
+    ],
+    network: [],
+  };
+  const flow = compileRecording(noisy);
+  const actNames = flow.steps.filter((s) => s.type === "act").map((s) => s.locator!.semantic.name);
+  assert.deepEqual(actNames, ["IN_PROGRESS", "Prasanna Kumar D E", "Workflow"]);
+});
+
+test("repeated clicks on non-toggle elements are kept (pagination is intentional)", () => {
+  const paging: Recording = {
+    baseUrl: "https://portal.example.org",
+    clicks: [
+      { tag: "BUTTON", role: "button", text: "Next page" },
+      { tag: "BUTTON", role: "button", text: "Next page" },
+    ],
+    network: [],
+  };
+  const flow = compileRecording(paging);
+  assert.equal(flow.steps.filter((s) => s.type === "act").length, 2);
+});
+
+test("volatile dates and counts are truncated out of semantic names", () => {
+  const rec: Recording = {
+    baseUrl: "https://pulse.example.com/claims",
+    clicks: [
+      { tag: "BUTTON", role: "button", text: "Claim Documents Submitted  6 JULY 2026  2 docs  DOCUMENTS VERIFIED" },
+      { tag: "BUTTON", role: "button", text: "Under Review 7 JULY 2026 gracy • 1 AI doc review MARK REVIEWED" },
+    ],
+    network: [],
+  };
+  const flow = compileRecording(rec);
+  const [a, b] = flow.steps.filter((s) => s.type === "act");
+  assert.equal(a!.locator!.semantic.name, "Claim Documents Submitted");
+  assert.equal(b!.locator!.semantic.name, "Under Review");
+  // Intent keeps the full recorded label for traceability.
+  assert.ok(a!.locator!.semantic.intent.includes("6 JULY 2026"));
+});
+
+test("a label that IS a date stays intact (calendar cells must not truncate to nothing)", () => {
+  const rec: Recording = {
+    baseUrl: "https://portal.example.org",
+    clicks: [{ tag: "BUTTON", role: "button", text: "6 JULY 2026" }],
+    network: [],
+  };
+  const flow = compileRecording(rec);
+  const act = flow.steps.find((s) => s.type === "act")!;
+  assert.equal(act.locator!.semantic.name, "6 JULY 2026");
 });
 
 test("instance-specific literals get a param_hint; UI vocabulary does not", () => {
