@@ -567,19 +567,22 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
  */
 function resolveActLocator(rt: StepRuntime, step: Step): { locator: Locator; desc: string } {
   const cached = step.locator?.cached;
-  if (cached) return { locator: rt.page.locator(cached), desc: cached };
+  if (cached) return { locator: rt.page.locator(rt.template(cached)), desc: cached };
 
   const s = step.locator?.semantic;
   const desc = s?.intent ?? step.label ?? "element";
-  if (s?.role && s.name) {
+  // The accessible name may be an input reference (e.g. "{{specialty}}") — render
+  // it before matching, exactly like act values and api params.
+  const name = s?.name != null ? rt.template(s.name) : undefined;
+  if (s?.role && name) {
     // Named: strict (no .first()) — ambiguity is a bug, not a coin-flip.
-    return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name: s.name, exact: false }), desc };
+    return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name, exact: false }), desc };
   }
-  if (s?.name) {
+  if (name) {
     // Named (no role): label first (form fields), else visible text. Strict —
     // no .first(), matching the role+name branch, so ambiguity fails loud.
-    const byLabel = rt.page.getByLabel(s.name, { exact: false });
-    return { locator: byLabel.or(rt.page.getByText(s.name, { exact: false })), desc };
+    const byLabel = rt.page.getByLabel(name, { exact: false });
+    return { locator: byLabel.or(rt.page.getByText(name, { exact: false })), desc };
   }
   if (s?.role) return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first(), desc };
 

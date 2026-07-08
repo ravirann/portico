@@ -193,6 +193,31 @@ test("intercept captures the latest matching JSON response the page makes", asyn
   assert.deepEqual(out.slots_raw, { Solutions: [{ Slots: [{ TimeString: "1:30 PM" }] }] });
 });
 
+test("act templates the locator's accessible name from inputs (not a literal {{...}})", async () => {
+  const flow: Flow = {
+    key: "a",
+    version: 1,
+    inputs: { specialty: "string" },
+    steps: [{ type: "act", label: "pick", locator: { semantic: { role: "button", name: "{{specialty}}", intent: "the specialty tile" } } }],
+  };
+  const { plan } = compileFlow(flow, target);
+  let seenName: string | undefined;
+  const fakeLocator = { click: async () => {} };
+  const page = { getByRole: (_role: string, opts: { name: string }) => { seenName = opts.name; return fakeLocator; } };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: { specialty: "Primary Care" },
+    secrets: {},
+    target,
+    template: (s: string) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (_m, k: string) => (({ specialty: "Primary Care" }) as Record<string, string>)[k] ?? ""),
+  } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+  await plan[0]!.run(rt);
+  assert.equal(seenName, "Primary Care"); // templated, not "{{specialty}}"
+});
+
 test("wait blocks until an output key is populated by the interceptor", async () => {
   const flow: Flow = { key: "w", version: 1, steps: [{ type: "wait", label: "w", wait: { for: "slots_raw", timeout_ms: 3000 } }] };
   const { plan } = compileFlow(flow, target);
