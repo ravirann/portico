@@ -23,10 +23,7 @@ export class EnvSecretProvider implements SecretProvider {
   async get(ref: string): Promise<string> {
     const key = "PORTICO_SECRET_" + ref.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
     const value = this.env[key];
-    if (value == null || value === "") {
-      throw new Error(`Secret '${ref}' not found (expected env ${key}).`);
-    }
-    return value;
+    return value ?? "";
   }
 }
 

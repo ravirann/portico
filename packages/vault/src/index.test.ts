@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EnvSecretProvider, redact, resolveSecrets } from "./index.js";
 
-test("EnvSecretProvider resolves refs from env and errors when missing", async () => {
+test("EnvSecretProvider resolves refs from env; missing → empty string", async () => {
   const p = new EnvSecretProvider({ PORTICO_SECRET_EXAMPLE_PASSWORD: "hunter2" });
   assert.equal(await p.get("example/password"), "hunter2");
-  await assert.rejects(() => p.get("example/missing"), /not found/);
+  // Missing secrets resolve to "" so optional creds (e.g. totp_seed) don't throw.
+  assert.equal(await p.get("example/missing"), "");
 });
 
 test("resolveSecrets maps a set of references", async () => {
