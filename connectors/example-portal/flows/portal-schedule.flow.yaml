@@ -1,51 +1,98 @@
-# Scheduling flow, DISCOVERY ONLY. Never commits/books.
-# Reaches the selection screen and returns available options, then stops.
+# Scheduling flow — DISCOVERY ONLY. Drives the appointment wizard up to the final
+# review screen and STOPS. It never clicks the booking button, by construction.
+#
+# Authored from a live capture of the wizard's review screen (scripts/inspect-screen.mjs
+# against /MyChart/Scheduling). The click-through targets below are the real
+# accessible button names Epic/MyChart renders; the engine resolves them with
+# deterministic semantic locators (getByRole name) — no model on the hot path.
+#
+# The four selections are inputs, so the same flow serves any specialty/reason/
+# location/slot (per-tenant, per-task reuse). Defaults reproduce the captured run.
+#
+#   node --import tsx apps/cli/src/index.ts run \
+#     connectors/example-portal/flows/portal-schedule.flow.yaml \
+#     --instance connectors/example-portal/instances/urmc.local.yaml \
+#     --profile mychart-urmc --headed --live \
+#     --input specialty="Primary Care" \
+#     --input reason="New Patient Adult Visit (18 and over)" \
+#     --input location="Southview Internal Medicine" \
+#     --input slot="October 1, 2026 1:00 PM"
 key: portal-schedule
 version: 1
-description: Navigate to the scheduling screen and return available options.
+description: Drive the MyChart scheduling wizard to the review screen and read the reserved slot. Never books.
 inputs:
+  specialty: string
   reason: string
-  provider: string?
-  dateRange: string?
+  location: string
+  slot: string          # substring of the target time button, e.g. "October 1, 2026 1:00 PM"
+
 guard:
-  no_booking: true                      # engine forbids any commit/confirm step
-  forbidden_actions: ["book", "confirm", "submit appointment"]
+  no_booking: true                                # engine forbids any commit/confirm step
+  forbidden_actions: ["Verify and schedule", "book", "confirm", "submit appointment"]
   dry_run_only: true
+
 steps:
   - type: subflow
-    use: portal-login                   # reuses the trusted session
+    use: portal-login                             # reuse the trusted session (or paused HITL login)
+
+  - type: navigate
+    label: Open the scheduling wizard
+    url: "{{base_url}}/MyChart/Scheduling"
+
+  # --- Wizard drive-through: real accessible button names from the live capture.
+  - type: act
+    label: Select specialty
+    locator: { semantic: { role: button, name: "{{specialty}}", intent: "choose the specialty" } }
 
   - type: act
-    label: Open scheduling
-    locator: { semantic: { role: link, name: "Schedule", intent: "start scheduling" } }
+    label: Select reason for visit
+    locator: { semantic: { role: button, name: "{{reason}}", intent: "choose the reason for visit" } }
 
   - type: act
-    label: Select reason
-    value: "{{reason}}"
-    locator: { semantic: { name: "Reason", intent: "the reason selector" } }
+    label: Select location
+    locator: { semantic: { role: button, name: "{{location}}", intent: "choose the clinic location" } }
 
-  - type: act
-    label: Select provider (optional)
-    value: "{{provider}}"
-    locator: { semantic: { name: "Provider", intent: "the provider selector" } }
-
+  # --- Read availability BEFORE reserving anything. Author-tier extract: pin a
+  #     cached CSS selector (or configure a heal/extract model) to structure this;
+  #     otherwise it degrades to an unvalidated read.
   - type: extract
-    label: Read available options
+    label: Read available time slots
+    locator: { semantic: { role: button, intent: "the list of available appointment time slots (day, date, time)" } }
     extract:
-      key: available_options
+      key: available_slots
       schema:
         type: array
         items:
           type: object
           properties:
-            provider:   { type: string }
-            location:   { type: string }
-            visit_type: { type: string }
-            date:       { type: string }
-            time:       { type: string }
-            slot_token: { type: string }
+            day:  { type: string }
+            date: { type: string }
+            time: { type: string }
+
+  # --- Reserve (NOT book) the requested slot. MyChart holds the slot temporarily
+  #     ("reserved for you until …"); booking only happens at "Verify and schedule",
+  #     which this flow never clicks.
+  - type: act
+    label: Reserve the requested time slot
+    locator: { semantic: { role: button, name: "{{slot}}", intent: "select the requested appointment time" } }
+
+  # --- On the review screen the selections are exposed as "Edit … selection …"
+  #     buttons; read them back to confirm what was reserved.
+  - type: extract
+    label: Read the reserved appointment summary
+    locator: { semantic: { intent: "the specialty, reason, location, and time selected on the review screen" } }
+    extract:
+      key: reserved_appointment
+      schema:
+        type: object
+        properties:
+          specialty: { type: string }
+          reason:    { type: string }
+          location:  { type: string }
+          time:      { type: string }
 
   - type: assert
-    label: Reached the selection screen
-    condition: selection_screen_reached
-# Flow ends here. No commit step exists → nothing is booked, by construction.
+    label: Reached the review screen (booking button present, not clicked)
+    condition: page_loaded
+# Flow ends on the review screen. No "Verify and schedule" step exists → nothing is
+# booked, by construction, and the guard forbids it as a defense in depth.
