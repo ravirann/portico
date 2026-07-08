@@ -31,7 +31,7 @@ export interface RunView {
 }
 
 export type FlowStatus = "draft" | "confirmed";
-export type FlowSource = "recorded" | "manual" | "llm";
+export type FlowSource = "recorded" | "manual" | "llm" | "authored";
 
 export interface ValidationView {
   id: string;

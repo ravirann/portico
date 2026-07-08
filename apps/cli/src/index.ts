@@ -52,6 +52,7 @@ interface CliOpts {
   yamlFile?: string;
   session?: string;
   goal?: string;
+  startUrl?: string;
 }
 
 function parseArgs(argv: string[]) {
@@ -92,6 +93,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--yaml-file") opts.yamlFile = rest[++i];
     else if (a === "--session") opts.session = rest[++i];
     else if (a === "--goal") opts.goal = rest[++i];
+    else if (a === "--start-url") opts.startUrl = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -487,6 +489,12 @@ async function main() {
     console.log(`✔ compiled recording ${rec.id} → draft "${rec.flowKey}" v${version} (${flow.steps.length} steps, ${clicks} clicks, ${requests} requests)`);
     process.exit(0);
   }
+
+  // NB: agent-authoring (Stagehand) lives in a standalone script,
+  // packages/author/author-cli.mjs, spawned directly by the console's
+  // /api/flows/author route — NOT wired here. That keeps Stagehand's heavy
+  // module graph (ai@5, browser drivers) out of this CLI, which the console
+  // spawns constantly for list-sessions/list-flows/etc.
 
   // LLM refine pass — clean a draft's coarse act names into a new (llm) draft.
   if (cmd === "refine") {

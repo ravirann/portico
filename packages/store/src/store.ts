@@ -350,7 +350,7 @@ export class Store {
     version: number;
     yaml: string;
     status: "draft" | "confirmed";
-    source: "recorded" | "manual" | "llm";
+    source: "recorded" | "manual" | "llm" | "authored";
     connector?: string;
     createdAt: string;
   }): void {

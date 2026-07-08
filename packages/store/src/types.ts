@@ -86,7 +86,7 @@ export interface AuditFilter {
 }
 
 export type FlowStatus = "draft" | "confirmed";
-export type FlowSource = "recorded" | "manual" | "llm";
+export type FlowSource = "recorded" | "manual" | "llm" | "authored";
 
 /** A single version of a recorded/authored flow (self-serve portal). */
 export interface FlowRecord {
