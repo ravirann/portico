@@ -1,14 +1,21 @@
-// Capture the real element labels of a live portal screen, to author flow steps.
-// Opens the portal (logged in via a saved --profile), lets you navigate to the
-// target screen, then dumps interactive elements (role · name) so we can author
-// precise semantic steps. Standalone (plain Node) so it never touches the CLI's
-// module graph.
+// Capture the real accessible elements of a live portal screen, to author flow
+// steps. Opens the portal (logged in via a saved --profile when the session is
+// still valid), lets you navigate to the target screen, then dumps the ARIA
+// tree (role + name) so we can author precise semantic steps. Standalone (plain
+// Node) so it never touches the CLI's module graph.
 //
 //   node scripts/inspect-screen.mjs --base-url https://mychart.urmc.rochester.edu --profile mychart-urmc
+//
+// Notes:
+//  - Uses Playwright's locator.ariaSnapshot() (page.accessibility was removed in
+//    Playwright 1.6x). The output is YAML: `- button "Schedule an appointment"`.
+//  - Portal sessions are short-lived. If the browser opens on a login page, just
+//    log in + navigate; on capture we write the FRESH session back to the profile
+//    so the next engine run starts already logged in.
 import { createRequire } from "module";
 import { createInterface } from "node:readline/promises";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const require = createRequire(resolve("packages/engine") + "/");
 const { launchBrowser } = require("libretto");
@@ -22,32 +29,44 @@ const baseUrl = arg("--base-url") ?? "";
 const profileArg = arg("--profile");
 const profileName = profileArg ? profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-") : undefined;
 const storageStatePath = profileName ? resolve(".libretto/profiles", `${profileName}.json`) : undefined;
+const hasProfile = Boolean(storageStatePath && existsSync(storageStatePath));
 
 const session = await launchBrowser({
   sessionName: `inspect-${Date.now()}`,
   headless: false,
   viewport: { width: 1440, height: 900 },
-  ...(storageStatePath && existsSync(storageStatePath) ? { storageStatePath } : {}),
+  ...(hasProfile ? { storageStatePath } : {}),
 });
 const page = session.page;
+console.log(hasProfile ? `↻ loaded profile ${profileName} (session may have expired — log in if prompted)` : "· no saved profile — log in when the page opens");
 if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 await rl.question("\n⏸  Navigate to the screen you want to automate, then press Enter to capture… ");
 rl.close();
 
-const snap = await page.accessibility.snapshot({ interestingOnly: true });
-const wanted = new Set(["button", "link", "textbox", "combobox", "checkbox", "radio", "menuitem", "tab", "option", "heading"]);
-const rows = [];
-const walk = (n) => {
-  if (!n) return;
-  if (n.role && wanted.has(n.role) && n.name) rows.push(`  ${n.role} · ${String(n.name).slice(0, 90)}`);
-  (n.children || []).forEach(walk);
-};
-walk(snap);
+// ARIA tree of the current screen — role + accessible name for every element,
+// which is exactly what our semantic locators (getByRole/getByLabel/getByText)
+// resolve against.
+const snapshot = await page.locator("body").ariaSnapshot();
 
 console.log(`\nURL: ${page.url()}`);
-console.log(`Interactive elements (${rows.length}):`);
-console.log(rows.join("\n"));
+console.log("─".repeat(72));
+console.log(snapshot);
+console.log("─".repeat(72));
+
+// Persist the (now fresh) session back to the profile so the next run is logged
+// in. This is the whole point of logging in during capture.
+if (storageStatePath) {
+  try {
+    mkdirSync(dirname(storageStatePath), { recursive: true });
+    const state = await session.context.storageState();
+    writeFileSync(storageStatePath, JSON.stringify(state, null, 2));
+    console.log(`\n✔ saved refreshed session → .libretto/profiles/${profileName}.json`);
+  } catch (e) {
+    console.log(`\n✗ could not save session: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 await session.close();
 process.exit(0);
