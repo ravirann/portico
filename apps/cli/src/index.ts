@@ -18,13 +18,15 @@ import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
 
 function parseArgs(argv: string[]) {
   const [cmd, flowPath, ...rest] = argv;
-  const opts: { baseUrl?: string; instance?: string; headless: boolean; inputs: Record<string, string> } = {
+  const opts: { baseUrl?: string; instance?: string; headless: boolean; json: boolean; inputs: Record<string, string> } = {
     headless: false,
+    json: false,
     inputs: {},
   };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--headless") opts.headless = true;
+    else if (a === "--json") opts.json = true;
     else if (a === "--base-url") opts.baseUrl = rest[++i];
     else if (a === "--instance") opts.instance = rest[++i];
     else if (a === "--input") {
@@ -61,11 +63,12 @@ async function main() {
     : {};
 
   const engine = getEngine("libretto");
-  console.log(`▶ running flow "${flow.key}" via ${engine.name} (headless=${opts.headless})`);
+  const log = (...a: unknown[]) => { if (!opts.json) console.log(...a); };
+  log(`▶ running flow "${flow.key}" via ${engine.name} (headless=${opts.headless})`);
 
   // Headed runs get an interactive HITL handler: pause for the human to log in
   // (and complete 2FA) in the browser window, then press Enter to continue.
-  const onHuman = opts.headless
+  const onHuman = opts.headless || opts.json
     ? undefined
     : async (step: { index: number; label?: string }) => {
         const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -73,6 +76,7 @@ async function main() {
         rl.close();
       };
 
+  const startedAt = Date.now();
   const result = await engine.run({
     target,
     flow,
@@ -80,12 +84,30 @@ async function main() {
     auth: { secrets },
     mode: "dry_run",
     onHuman,
-    onStep: (t) => console.log(`  [${t.index}] ${t.type}${t.label ? ` — ${t.label}` : ""}: ${t.status}${t.detail ? ` (${t.detail})` : ""}`),
+    onStep: (t) => log(`  [${t.index}] ${t.type}${t.label ? ` — ${t.label}` : ""}: ${t.status}${t.detail ? ` (${t.detail})` : ""}`),
   });
 
-  console.log(`\n${result.status.toUpperCase()}`);
-  if (Object.keys(result.output).length) console.log("output:", JSON.stringify(result.output, null, 2));
-  if (result.failure) console.log("failure:", result.failure);
+  if (opts.json) {
+    // Machine-readable run record (consumed by the console's run API).
+    process.stdout.write(JSON.stringify({
+      flow: flow.key,
+      engine: engine.name,
+      status: result.status,
+      durationMs: Date.now() - startedAt,
+      output: result.output,
+      failure: result.failure,
+      steps: result.traces.map((t) => ({
+        index: t.index, type: t.type, label: t.label,
+        status: t.status, detail: t.detail,
+        durationMs: Math.max(0, t.endedAt - t.startedAt),
+      })),
+    }));
+    process.exit(0);
+  }
+
+  log(`\n${result.status.toUpperCase()}`);
+  if (Object.keys(result.output).length) log("output:", JSON.stringify(result.output, null, 2));
+  if (result.failure) log("failure:", result.failure);
   process.exit(result.status === "completed" ? 0 : 1);
 }
 
