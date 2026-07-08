@@ -4,6 +4,7 @@ import { readFlows } from "@/lib/store";
 import { fmtRelative } from "@/lib/format";
 import { IconPlus } from "@/components/icons";
 import { FlowDeleteButton } from "@/components/flow-delete-button";
+import { RowLink } from "@/components/row-link";
 import type { FlowView } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -83,8 +84,8 @@ export default async function FlowsPage() {
                   const s = statusBadge(f.status);
                   const v = validationBadge(f.validation);
                   return (
-                    <tr key={f.id} className="rowlink">
-                      <td className="flowcell"><Link href={`/flows/${f.id}`}>{f.key}<small>{f.id}</small></Link></td>
+                    <RowLink key={f.id} href={`/flows/${f.id}`} className="rowlink">
+                      <td className="flowcell">{f.key}<small>{f.id}</small></td>
                       <td className="tnum mono" style={{ color: "var(--ink-2)" }}>v{f.version}</td>
                       <td><span className={`badge ${s.cls}`}><span className="d" />{s.label}</span></td>
                       <td><span className="chip">{f.source}</span></td>
@@ -94,7 +95,7 @@ export default async function FlowsPage() {
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                         <FlowDeleteButton flowId={f.id} flowKey={f.key} onDone="list" />
                       </td>
-                    </tr>
+                    </RowLink>
                   );
                 })}
               </tbody>
