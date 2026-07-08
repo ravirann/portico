@@ -20,6 +20,11 @@ export type { SessionCipher } from "./crypto.js";
 export type {
   AuditEvent,
   AuditFilter,
+  BrowserSessionRecord,
+  BrowserSessionStatus,
+  FlowRecord,
+  FlowSource,
+  FlowStatus,
   RunMode,
   RunStatus,
   RunView,

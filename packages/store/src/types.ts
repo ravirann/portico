@@ -81,3 +81,31 @@ export interface AuditFilter {
   action?: string;
   limit?: number;
 }
+
+export type FlowStatus = "draft" | "confirmed";
+export type FlowSource = "recorded" | "manual" | "llm";
+
+/** A single version of a recorded/authored flow (self-serve portal). */
+export interface FlowRecord {
+  id: string;
+  key: string;
+  version: number;
+  yaml: string;
+  status: FlowStatus;
+  source: FlowSource;
+  connector?: string;
+  createdAt: string;
+}
+
+export type BrowserSessionStatus = "active" | "closed";
+
+/** A tracked CDP-attached browser session (self-serve portal session manager). */
+export interface BrowserSessionRecord {
+  id: string;
+  tenant: string;
+  profile?: string;
+  cdpEndpoint?: string;
+  status: BrowserSessionStatus;
+  startedAt: string;
+  lastActiveAt: string;
+}

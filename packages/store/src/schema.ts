@@ -69,6 +69,33 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id);
     `,
   },
+  {
+    version: 2,
+    sql: `
+      CREATE TABLE IF NOT EXISTS flows (
+        id         TEXT PRIMARY KEY,
+        key        TEXT NOT NULL,
+        version    INTEGER NOT NULL,
+        yaml       TEXT NOT NULL,
+        status     TEXT NOT NULL,
+        source     TEXT NOT NULL,
+        connector  TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_flows_key ON flows(key, version DESC);
+
+      CREATE TABLE IF NOT EXISTS browser_sessions (
+        id             TEXT PRIMARY KEY,
+        tenant         TEXT NOT NULL,
+        profile        TEXT,
+        cdp_endpoint   TEXT,
+        status         TEXT NOT NULL,
+        started_at     TEXT NOT NULL,
+        last_active_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_browser_sessions_tenant ON browser_sessions(tenant, status);
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

@@ -18,6 +18,8 @@ export { resolveHealModel, healModelConfigured } from "./model.js";
 export type { HealModel } from "./model.js";
 export { resolveProfile, refreshProfile } from "./auth-profile.js";
 export { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
+export { compileRecording } from "./compile-recording.js";
+export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";
 
 import type { EngineAdapter } from "./types.js";
 import { LibrettoAdapter } from "./adapters/libretto.js";

@@ -177,3 +177,202 @@ test("saveArtifact returns a relative ref that getArtifactPath resolves", () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("saveFlow then getFlow round-trips all fields", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({
+      id: "flow-1",
+      key: "portal-availability",
+      version: 1,
+      yaml: "steps: []",
+      status: "draft",
+      source: "recorded",
+      connector: "example-portal",
+      createdAt: "2026-07-08T10:00:00.000Z",
+    });
+    const got = store.getFlow("flow-1");
+    assert.ok(got);
+    assert.equal(got.id, "flow-1");
+    assert.equal(got.key, "portal-availability");
+    assert.equal(got.version, 1);
+    assert.equal(got.yaml, "steps: []");
+    assert.equal(got.status, "draft");
+    assert.equal(got.source, "recorded");
+    assert.equal(got.connector, "example-portal");
+    assert.equal(got.createdAt, "2026-07-08T10:00:00.000Z");
+    assert.equal(store.getFlow("missing"), undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listFlowVersions returns versions newest-first for a key", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({
+      id: "flow-a-1",
+      key: "portal-availability",
+      version: 1,
+      yaml: "v1",
+      status: "confirmed",
+      source: "manual",
+      createdAt: "2026-07-08T10:00:00.000Z",
+    });
+    store.saveFlow({
+      id: "flow-a-2",
+      key: "portal-availability",
+      version: 2,
+      yaml: "v2",
+      status: "draft",
+      source: "llm",
+      createdAt: "2026-07-08T11:00:00.000Z",
+    });
+    store.saveFlow({
+      id: "flow-b-1",
+      key: "other-flow",
+      version: 1,
+      yaml: "v1",
+      status: "draft",
+      source: "manual",
+      createdAt: "2026-07-08T10:00:00.000Z",
+    });
+    const versions = store.listFlowVersions("portal-availability");
+    assert.deepEqual(
+      versions.map((f) => f.version),
+      [2, 1],
+    );
+    assert.equal(store.listFlowVersions("missing-key").length, 0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("confirmFlow flips status; latestConfirmedFlow ignores drafts and picks the highest version", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({
+      id: "flow-c-1",
+      key: "portal-checkout",
+      version: 1,
+      yaml: "v1",
+      status: "confirmed",
+      source: "manual",
+      createdAt: "2026-07-08T10:00:00.000Z",
+    });
+    store.saveFlow({
+      id: "flow-c-2",
+      key: "portal-checkout",
+      version: 2,
+      yaml: "v2",
+      status: "draft",
+      source: "llm",
+      createdAt: "2026-07-08T11:00:00.000Z",
+    });
+    // Only version 1 is confirmed so far.
+    assert.equal(store.latestConfirmedFlow("portal-checkout")?.version, 1);
+
+    store.confirmFlow("flow-c-2");
+    assert.equal(store.getFlow("flow-c-2")?.status, "confirmed");
+    assert.equal(store.latestConfirmedFlow("portal-checkout")?.version, 2);
+
+    assert.equal(store.latestConfirmedFlow("no-such-key"), undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createBrowserSession then getBrowserSession round-trips", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.createBrowserSession({
+      id: "bsess-1",
+      tenant: "tenant-x",
+      profile: "portal/user",
+      cdpEndpoint: "http://localhost:9222",
+      startedAt: "2026-07-08T10:00:00.000Z",
+    });
+    const got = store.getBrowserSession("bsess-1");
+    assert.ok(got);
+    assert.equal(got.id, "bsess-1");
+    assert.equal(got.tenant, "tenant-x");
+    assert.equal(got.profile, "portal/user");
+    assert.equal(got.cdpEndpoint, "http://localhost:9222");
+    assert.equal(got.status, "active");
+    assert.equal(got.startedAt, "2026-07-08T10:00:00.000Z");
+    assert.equal(got.lastActiveAt, "2026-07-08T10:00:00.000Z");
+    assert.equal(store.getBrowserSession("missing"), undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("touchBrowserSession updates last_active_at; closeBrowserSession sets status closed", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.createBrowserSession({
+      id: "bsess-2",
+      tenant: "tenant-x",
+      startedAt: "2026-07-08T10:00:00.000Z",
+    });
+    store.touchBrowserSession("bsess-2", "2026-07-08T10:05:00.000Z");
+    let got = store.getBrowserSession("bsess-2");
+    assert.equal(got?.lastActiveAt, "2026-07-08T10:05:00.000Z");
+    assert.equal(got?.status, "active");
+
+    // no-op on an unknown id
+    store.touchBrowserSession("missing", "2026-07-08T10:06:00.000Z");
+    assert.equal(store.getBrowserSession("missing"), undefined);
+
+    store.closeBrowserSession("bsess-2", "2026-07-08T10:10:00.000Z");
+    got = store.getBrowserSession("bsess-2");
+    assert.equal(got?.status, "closed");
+    assert.equal(got?.lastActiveAt, "2026-07-08T10:10:00.000Z");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listBrowserSessions orders active-first and filters by tenant", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.createBrowserSession({
+      id: "bsess-old-active",
+      tenant: "tenant-x",
+      startedAt: "2026-07-08T09:00:00.000Z",
+    });
+    store.createBrowserSession({
+      id: "bsess-closed",
+      tenant: "tenant-x",
+      startedAt: "2026-07-08T09:30:00.000Z",
+    });
+    store.closeBrowserSession("bsess-closed", "2026-07-08T09:45:00.000Z");
+    store.createBrowserSession({
+      id: "bsess-new-active",
+      tenant: "tenant-x",
+      startedAt: "2026-07-08T10:00:00.000Z",
+    });
+    store.createBrowserSession({
+      id: "bsess-other-tenant",
+      tenant: "tenant-y",
+      startedAt: "2026-07-08T11:00:00.000Z",
+    });
+
+    const all = store.listBrowserSessions("tenant-x").map((s) => s.id);
+    assert.deepEqual(all, ["bsess-new-active", "bsess-old-active", "bsess-closed"]);
+
+    const everyone = store.listBrowserSessions();
+    assert.equal(everyone.length, 4);
+
+    const other = store.listBrowserSessions("tenant-y").map((s) => s.id);
+    assert.deepEqual(other, ["bsess-other-tenant"]);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

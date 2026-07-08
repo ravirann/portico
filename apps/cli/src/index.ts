@@ -14,11 +14,12 @@
  * instances/urmc.local.yaml and set PORTICO_SECRET_EXAMPLE_* env vars (see @portico/vault).
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { parse as parseYaml } from "yaml";
-import { getEngine } from "@portico/engine";
-import type { RunMode } from "@portico/engine";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { getEngine, compileRecording } from "@portico/engine";
+import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
 import { Store } from "@portico/store";
@@ -31,6 +32,10 @@ interface CliOpts {
   live: boolean;
   profile?: string;
   cdp?: string;
+  key?: string;
+  intercept?: string;
+  out?: string;
+  connector?: string;
   inputs: Record<string, string>;
 }
 
@@ -49,6 +54,10 @@ function parseArgs(argv: string[]) {
     else if (a === "--instance") opts.instance = rest[++i];
     else if (a === "--profile") opts.profile = rest[++i];
     else if (a === "--cdp") opts.cdp = rest[++i];
+    else if (a === "--key") opts.key = rest[++i];
+    else if (a === "--intercept") opts.intercept = rest[++i];
+    else if (a === "--out") opts.out = rest[++i];
+    else if (a === "--connector") opts.connector = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -84,8 +93,46 @@ async function main() {
     process.exit(0);
   }
 
+  // Compile a recorded demonstration into a DRAFT flow (record-by-demonstration).
+  // Deterministic baseline (an LLM refine pass layers on later). Persists the
+  // draft to the store and writes the YAML for review before it's confirmed.
+  if (cmd === "compile") {
+    if (!flowPath) {
+      console.error("usage: portico compile <recording.json> [--key NAME] [--intercept KEYWORD] [--connector NAME] [--out FILE]");
+      process.exit(2);
+    }
+    const rec = JSON.parse(readFileSync(flowPath, "utf8")) as Recording;
+    const key = opts.key ?? "recorded-flow";
+    const flow = compileRecording(rec, { key, interceptKeyword: opts.intercept });
+    const yamlStr = stringifyYaml(flow);
+
+    const store = new Store();
+    const version = (store.listFlowVersions(key)[0]?.version ?? 0) + 1;
+    const id = `flow_${key}_v${version}_${Math.random().toString(16).slice(2, 8)}`;
+    store.saveFlow({
+      id, key, version, yaml: yamlStr, status: "draft", source: "recorded",
+      connector: opts.connector, createdAt: new Date().toISOString(),
+    });
+    store.close();
+
+    const outPath = opts.out ?? `connectors/${opts.connector ?? "generated"}/flows/${key}.draft.flow.yaml`;
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(outPath, yamlStr);
+
+    if (opts.json) {
+      process.stdout.write(JSON.stringify({ id, key, version, status: "draft", steps: flow.steps.length, out: outPath }));
+    } else {
+      console.log(`✔ compiled recording → draft flow "${key}" v${version} (${flow.steps.length} steps)`);
+      console.log(`  persisted draft id=${id}`);
+      console.log(`  wrote ${outPath}\n`);
+      console.log(yamlStr);
+      console.log("Review it, then validate + confirm before it goes live.");
+    }
+    process.exit(0);
+  }
+
   if (cmd !== "run" || !flowPath) {
-    console.error("usage: portico run <flow.yaml> [--base-url URL] [--instance file] [--headless] [--input k=v]");
+    console.error("usage: portico <run|compile|list-runs|get-run> …");
     process.exit(2);
   }
 

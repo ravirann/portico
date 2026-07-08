@@ -19,6 +19,8 @@ import { migrate } from "./schema.js";
 import type {
   AuditEvent,
   AuditFilter,
+  BrowserSessionRecord,
+  FlowRecord,
   RunStatus,
   RunView,
   StepRecord,
@@ -64,6 +66,27 @@ interface StepRow {
   healed_to: string | null;
   screenshot_ref: string | null;
   duration_ms: number;
+}
+
+interface FlowRow {
+  id: string;
+  key: string;
+  version: number;
+  yaml: string;
+  status: string;
+  source: string;
+  connector: string | null;
+  created_at: string;
+}
+
+interface BrowserSessionRow {
+  id: string;
+  tenant: string;
+  profile: string | null;
+  cdp_endpoint: string | null;
+  status: string;
+  started_at: string;
+  last_active_at: string;
 }
 
 export class Store {
@@ -258,6 +281,158 @@ export class Store {
       .get(tenant, credential) as { storage_state: string } | undefined;
     if (!row) return undefined;
     return this.cipher.decrypt(row.storage_state);
+  }
+
+  // ---- flows --------------------------------------------------------------
+
+  /** Insert a new flow version (self-serve portal). */
+  saveFlow(f: {
+    id: string;
+    key: string;
+    version: number;
+    yaml: string;
+    status: "draft" | "confirmed";
+    source: "recorded" | "manual" | "llm";
+    connector?: string;
+    createdAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO flows (id, key, version, yaml, status, source, connector, created_at)
+         VALUES (@id, @key, @version, @yaml, @status, @source, @connector, @created_at)`,
+      )
+      .run({
+        id: f.id,
+        key: f.key,
+        version: f.version,
+        yaml: f.yaml,
+        status: f.status,
+        source: f.source,
+        connector: f.connector ?? null,
+        created_at: f.createdAt,
+      });
+  }
+
+  /** Fetch a flow by id, or `undefined` if unknown. */
+  getFlow(id: string): FlowRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM flows WHERE id = ?").get(id) as FlowRow | undefined;
+    if (!row) return undefined;
+    return this.hydrateFlow(row);
+  }
+
+  /** All versions of a flow key, newest version first. */
+  listFlowVersions(key: string): FlowRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM flows WHERE key = ? ORDER BY version DESC")
+      .all(key) as FlowRow[];
+    return rows.map((r) => this.hydrateFlow(r));
+  }
+
+  /** Mark a flow version as confirmed. */
+  confirmFlow(id: string): void {
+    this.db.prepare("UPDATE flows SET status = 'confirmed' WHERE id = ?").run(id);
+  }
+
+  /** Highest-versioned confirmed flow for a key, or `undefined` if none is confirmed. */
+  latestConfirmedFlow(key: string): FlowRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM flows WHERE key = @key AND status = 'confirmed'
+         ORDER BY version DESC LIMIT 1`,
+      )
+      .get({ key }) as FlowRow | undefined;
+    if (!row) return undefined;
+    return this.hydrateFlow(row);
+  }
+
+  private hydrateFlow(row: FlowRow): FlowRecord {
+    const flow: FlowRecord = {
+      id: row.id,
+      key: row.key,
+      version: row.version,
+      yaml: row.yaml,
+      status: row.status as FlowRecord["status"],
+      source: row.source as FlowRecord["source"],
+      createdAt: row.created_at,
+    };
+    if (row.connector != null) flow.connector = row.connector;
+    return flow;
+  }
+
+  // ---- browser sessions -----------------------------------------------
+
+  /** Register a newly-opened browser session (CDP session manager). */
+  createBrowserSession(s: {
+    id: string;
+    tenant: string;
+    profile?: string;
+    cdpEndpoint?: string;
+    startedAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO browser_sessions
+           (id, tenant, profile, cdp_endpoint, status, started_at, last_active_at)
+         VALUES
+           (@id, @tenant, @profile, @cdp_endpoint, 'active', @started_at, @last_active_at)`,
+      )
+      .run({
+        id: s.id,
+        tenant: s.tenant,
+        profile: s.profile ?? null,
+        cdp_endpoint: s.cdpEndpoint ?? null,
+        started_at: s.startedAt,
+        last_active_at: s.startedAt,
+      });
+  }
+
+  /** Bump a browser session's last-active timestamp. No-op if the session is unknown. */
+  touchBrowserSession(id: string, at: string): void {
+    this.db.prepare("UPDATE browser_sessions SET last_active_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Mark a browser session closed. */
+  closeBrowserSession(id: string, at: string): void {
+    this.db
+      .prepare("UPDATE browser_sessions SET status = 'closed', last_active_at = ? WHERE id = ?")
+      .run(at, id);
+  }
+
+  /**
+   * Browser sessions, active sessions first then by most-recently-active;
+   * optionally filtered to a single tenant.
+   */
+  listBrowserSessions(tenant?: string): BrowserSessionRecord[] {
+    const clause = tenant != null ? "WHERE tenant = @tenant" : "";
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM browser_sessions ${clause}
+         ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, last_active_at DESC`,
+      )
+      .all(tenant != null ? { tenant } : {}) as BrowserSessionRow[];
+    return rows.map((r) => this.hydrateBrowserSession(r));
+  }
+
+  /** Fetch a browser session by id, or `undefined` if unknown. */
+  getBrowserSession(id: string): BrowserSessionRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM browser_sessions WHERE id = ?")
+      .get(id) as BrowserSessionRow | undefined;
+    if (!row) return undefined;
+    return this.hydrateBrowserSession(row);
+  }
+
+  private hydrateBrowserSession(row: BrowserSessionRow): BrowserSessionRecord {
+    const session: BrowserSessionRecord = {
+      id: row.id,
+      tenant: row.tenant,
+      status: row.status as BrowserSessionRecord["status"],
+      startedAt: row.started_at,
+      lastActiveAt: row.last_active_at,
+    };
+    if (row.profile != null) session.profile = row.profile;
+    if (row.cdp_endpoint != null) session.cdpEndpoint = row.cdp_endpoint;
+    return session;
   }
 
   // ---- audit (APPEND-ONLY) ---------------------------------------------
