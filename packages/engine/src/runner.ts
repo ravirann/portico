@@ -13,17 +13,18 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRecoveryPage, launchBrowser } from "libretto";
-import type { Page } from "playwright";
+import { chromium } from "playwright";
+import type { BrowserContext, Page } from "playwright";
 import { redact } from "@portico/vault";
 import type { Flow, Target } from "@portico/flow-spec";
 import type { EngineRunOptions, EngineRunResult, StepTrace } from "./types.js";
 import { compileFlow, emitWorkflowModule, type StepRuntime } from "./compiler.js";
 import { resolveHealModel } from "./model.js";
-import { refreshProfile, resolveProfile } from "./auth-profile.js";
+import { resolveProfile } from "./auth-profile.js";
 import { createRecorder } from "./recording.js";
 
 const now = () => Date.now();
@@ -54,13 +55,34 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
   const repoRoot = process.cwd();
   const artifactsDir = opts.artifactsDir ?? resolve(repoRoot, "data", "artifacts");
 
-  const session = await launchBrowser({
-    sessionName: runId,
-    headless: opts.headless ?? true,
-    viewport: { width: 1440, height: 900 },
-    storageStatePath,
-  });
-  const rawPage: Page = session.page;
+  // Auth persistence: a named --profile launches a PERSISTENT on-disk browser
+  // profile (userDataDir) so login survives across runs — and is SHARED with the
+  // record/inspect scripts, so one login serves them all. Storage-state snapshots
+  // (cookies + localStorage only) can't restore portals like Epic/MyChart that
+  // also keep sessionStorage / bind the session server-side. Profile-less runs
+  // use an ephemeral Libretto session (storage-state path still honored).
+  let context: BrowserContext;
+  let rawPage: Page;
+  let closeSession: () => Promise<void>;
+  if (profile) {
+    mkdirSync(profile.userDataDir, { recursive: true });
+    context = await chromium.launchPersistentContext(profile.userDataDir, {
+      headless: opts.headless ?? true,
+      viewport: { width: 1440, height: 900 },
+    });
+    rawPage = context.pages()[0] ?? (await context.newPage());
+    closeSession = () => context.close();
+  } else {
+    const session = await launchBrowser({
+      sessionName: runId,
+      headless: opts.headless ?? true,
+      viewport: { width: 1440, height: 900 },
+      storageStatePath,
+    });
+    context = session.context;
+    rawPage = session.page;
+    closeSession = () => session.close();
+  }
   const page: Page = heal ? createRecoveryPage(rawPage, { recoveryAction: heal.recoveryAction }) : rawPage;
 
   const recorder = createRecorder(rawPage, {
@@ -136,7 +158,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
             traces,
             rrwebRef,
             failure: { stepIndex: i, reason: `human step: ${step.label ?? step.type}`, resumable: true },
-            sessionState: await session.context.storageState(),
+            sessionState: await context.storageState(),
             unvalidatedOutputKeys: [...unvalidated],
             authProfile: profileName,
           };
@@ -164,19 +186,19 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
       }
     }
 
-    if (profile) await refreshProfile(profile, session.context); // persist login for next run
+    // Persistent contexts flush the profile to disk on close — no manual refresh.
     const rrwebRef = await recorder.finalize("completed");
     return {
       status: "completed",
       output,
       traces,
       rrwebRef,
-      sessionState: await session.context.storageState(),
+      sessionState: await context.storageState(),
       unvalidatedOutputKeys: [...unvalidated],
       authProfile: profileName,
     };
   } finally {
-    await session.close();
+    await closeSession();
   }
 }
 

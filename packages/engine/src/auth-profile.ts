@@ -39,10 +39,19 @@ function normalizeProfileName(name: string): string {
 
 export interface ResolvedProfile {
   name: string;
-  /** Absolute path to `.libretto/profiles/<name>.json`. */
+  /** Absolute path to `.libretto/profiles/<name>.json` (storage-state snapshot). */
   path: string;
   /** Path to hand to `launchBrowser({ storageStatePath })`, if it exists. */
   loadPath: string | undefined;
+  /**
+   * Absolute path to `.libretto/profiles/<name>.userdata/` — a PERSISTENT
+   * on-disk browser profile. Preferred over the storage-state snapshot because
+   * it keeps sessionStorage + cache + fingerprint, so login survives across
+   * runs on portals (like Epic/MyChart) that a cookie snapshot can't restore.
+   * Shared by the CLI runner and the record/inspect scripts, so one login
+   * serves them all.
+   */
+  userDataDir: string;
   refresh: boolean;
 }
 
@@ -56,11 +65,13 @@ export function resolveProfile(
   opts: { refresh?: boolean; cwd?: string } = {},
 ): ResolvedProfile {
   const name = normalizeProfileName(profileId);
-  const path = join(profilesDir(opts.cwd), `${name}.json`);
+  const dir = profilesDir(opts.cwd);
+  const path = join(dir, `${name}.json`);
   return {
     name,
     path,
     loadPath: existsSync(path) ? path : undefined,
+    userDataDir: join(dir, `${name}.userdata`),
     refresh: opts.refresh ?? true,
   };
 }

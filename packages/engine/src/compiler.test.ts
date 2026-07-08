@@ -133,6 +133,7 @@ test("resolveProfile normalizes the profile id and points at .libretto/profiles"
   const p = resolveProfile("URMC MyChart!", { cwd: "/tmp/repo" });
   assert.equal(p.name, "urmc-mychart");
   assert.equal(p.path, "/tmp/repo/.libretto/profiles/urmc-mychart.json");
+  assert.equal(p.userDataDir, "/tmp/repo/.libretto/profiles/urmc-mychart.userdata");
   assert.equal(p.loadPath, undefined); // does not exist
   assert.equal(p.refresh, true);
 });

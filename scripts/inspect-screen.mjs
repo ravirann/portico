@@ -9,16 +9,16 @@
 // Notes:
 //  - Uses Playwright's locator.ariaSnapshot() (page.accessibility was removed in
 //    Playwright 1.6x). The output is YAML: `- button "Schedule an appointment"`.
-//  - Portal sessions are short-lived. If the browser opens on a login page, just
-//    log in + navigate; on capture we write the FRESH session back to the profile
-//    so the next engine run starts already logged in.
+//  - Launches a PERSISTENT on-disk profile (.libretto/profiles/<name>.userdata/),
+//    SHARED with record-network.mjs and the CLI runner — so one login serves them
+//    all and survives across runs (a storage-state snapshot can't restore MyChart).
 import { createRequire } from "module";
 import { createInterface } from "node:readline/promises";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 
 const require = createRequire(resolve("packages/engine") + "/");
-const { launchBrowser } = require("libretto");
+const { chromium } = require("playwright");
 
 const args = process.argv.slice(2);
 const arg = (flag) => {
@@ -26,19 +26,17 @@ const arg = (flag) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const baseUrl = arg("--base-url") ?? "";
-const profileArg = arg("--profile");
-const profileName = profileArg ? profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-") : undefined;
-const storageStatePath = profileName ? resolve(".libretto/profiles", `${profileName}.json`) : undefined;
-const hasProfile = Boolean(storageStatePath && existsSync(storageStatePath));
+const profileArg = arg("--profile") ?? "default";
+const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
+const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
 
-const session = await launchBrowser({
-  sessionName: `inspect-${Date.now()}`,
+mkdirSync(userDataDir, { recursive: true });
+const context = await chromium.launchPersistentContext(userDataDir, {
   headless: false,
   viewport: { width: 1440, height: 900 },
-  ...(hasProfile ? { storageStatePath } : {}),
 });
-const page = session.page;
-console.log(hasProfile ? `↻ loaded profile ${profileName} (session may have expired — log in if prompted)` : "· no saved profile — log in when the page opens");
+const page = context.pages()[0] ?? (await context.newPage());
+console.log(`↻ persistent profile: .libretto/profiles/${profileName}.userdata (log in once if prompted — it persists)`);
 if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -55,18 +53,6 @@ console.log("─".repeat(72));
 console.log(snapshot);
 console.log("─".repeat(72));
 
-// Persist the (now fresh) session back to the profile so the next run is logged
-// in. This is the whole point of logging in during capture.
-if (storageStatePath) {
-  try {
-    mkdirSync(dirname(storageStatePath), { recursive: true });
-    const state = await session.context.storageState();
-    writeFileSync(storageStatePath, JSON.stringify(state, null, 2));
-    console.log(`\n✔ saved refreshed session → .libretto/profiles/${profileName}.json`);
-  } catch (e) {
-    console.log(`\n✗ could not save session: ${e instanceof Error ? e.message : e}`);
-  }
-}
-
-await session.close();
+// Persistent context flushes the profile to disk on close — no manual save.
+await context.close();
 process.exit(0);

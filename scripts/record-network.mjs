@@ -1,28 +1,28 @@
 // Record the network traffic of a live portal flow, so we can promote a DOM
-// flow to direct network requests (the "API tier"). This is Portico's in-process
-// equivalent of what `npx libretto run` captures automatically — Libretto's
-// network capture lives in its CLI daemon (cli/core/session-telemetry.js), NOT in
-// the launchBrowser/workflow library primitives we use, so we attach the same
-// listeners ourselves and write a Libretto-compatible network.jsonl.
+// flow to direct network requests (the "API tier"). Portico's in-process
+// equivalent of what `npx libretto run` captures — we attach the same listeners
+// ourselves and write a Libretto-compatible network.jsonl.
 //
 //   node scripts/record-network.mjs \
 //     --base-url https://mychart.urmc.rochester.edu \
 //     --profile mychart-urmc \
 //     --session conversion-flow
 //
-// Opens the portal (logged in via --profile when the session is still valid),
-// you drive the target flow by hand, then press Enter. Every XHR/fetch/document
-// request is logged to .libretto/sessions/<session>/network.jsonl (+ gzipped
-// bodies under raw-network/), exactly like Libretto's capture. Analyze it with
-// scripts/analyze-network.mjs to find the clean JSON endpoints to promote.
+// Auth persistence: we launch a PERSISTENT browser context (a real on-disk
+// profile at .libretto/profiles/<name>.userdata/) rather than a storage-state
+// snapshot. Storage-state only carries cookies + localStorage, which is NOT
+// enough to restore an Epic/MyChart session (it also keeps state in
+// sessionStorage and invalidates server-side on browser close). A persistent
+// context keeps the whole profile — cookies, sessionStorage, cache, fingerprint
+// — so you log in ONCE and later runs reuse it.
 import { createRequire } from "module";
 import { createInterface } from "node:readline/promises";
-import { existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 
 const require = createRequire(resolve("packages/engine") + "/");
-const { launchBrowser } = require("libretto");
+const { chromium } = require("playwright");
 
 const args = process.argv.slice(2);
 const arg = (flag, def) => {
@@ -30,11 +30,10 @@ const arg = (flag, def) => {
   return i >= 0 ? args[i + 1] : def;
 };
 const baseUrl = arg("--base-url", "");
-const profileArg = arg("--profile");
+const profileArg = arg("--profile", "default");
 const sessionName = arg("--session", "conversion-flow");
-const profileName = profileArg ? profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-") : undefined;
-const storageStatePath = profileName ? resolve(".libretto/profiles", `${profileName}.json`) : undefined;
-const hasProfile = Boolean(storageStatePath && existsSync(storageStatePath));
+const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
+const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
 
 // --- Capture policy: identical to Libretto's session-telemetry so the output is
 //     directly comparable. Log document/xhr/fetch (and any write method); drop
@@ -62,8 +61,7 @@ const sessionDir = resolve(".libretto/sessions", sessionName);
 const jsonlPath = join(sessionDir, "network.jsonl");
 const rawNetworkDir = join(sessionDir, "raw-network");
 mkdirSync(sessionDir, { recursive: true });
-// Truncate any prior capture for this session name.
-writeFileSync(jsonlPath, "");
+writeFileSync(jsonlPath, ""); // truncate any prior capture for this session name
 
 function saveSidecar(id, kind, contentType, body) {
   mkdirSync(rawNetworkDir, { recursive: true });
@@ -159,38 +157,29 @@ function attach(page, pageId) {
   });
 }
 
-const session = await launchBrowser({
-  sessionName: `record-${Date.now()}`,
+// Persistent context = a real on-disk browser profile. Login persists here
+// across runs (unlike a storage-state snapshot), which is what MyChart needs.
+mkdirSync(userDataDir, { recursive: true });
+const context = await chromium.launchPersistentContext(userDataDir, {
   headless: false,
   viewport: { width: 1440, height: 900 },
-  ...(hasProfile ? { storageStatePath } : {}),
 });
 
-// Capture the initial page and any popups/tabs the flow opens.
 let pageIndex = 0;
-attach(session.page, pageIndex);
-session.context.on("page", (p) => attach(p, ++pageIndex));
+const page = context.pages()[0] ?? (await context.newPage());
+attach(page, pageIndex);
+context.on("page", (p) => attach(p, ++pageIndex));
 
-console.log(hasProfile ? `↻ loaded profile ${profileName} (log in if the portal prompts)` : "· no saved profile — log in when the page opens");
+console.log(`↻ persistent profile: .libretto/profiles/${profileName}.userdata (login persists here across runs)`);
 console.log(`● recording network → .libretto/sessions/${sessionName}/network.jsonl`);
-if (baseUrl) await session.page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
-await rl.question("\n⏸  Drive the flow to completion (stop BEFORE booking), then press Enter to end the recording… ");
+await rl.question("\n⏸  If prompted, log in ONCE (it persists). Drive to the slot screen (stop BEFORE booking), then press Enter… ");
 rl.close();
 
-// Persist the refreshed session back to the profile (so a follow-up run is logged in).
-if (storageStatePath) {
-  try {
-    mkdirSync(dirname(storageStatePath), { recursive: true });
-    writeFileSync(storageStatePath, JSON.stringify(await session.context.storageState(), null, 2));
-    console.log(`✔ saved refreshed session → .libretto/profiles/${profileName}.json`);
-  } catch (e) {
-    console.log(`✗ could not save session: ${e instanceof Error ? e.message : e}`);
-  }
-}
-
-await session.close();
+// Persistent context flushes the profile to disk on close — no manual save.
+await context.close();
 console.log(`\n✔ captured ${logged} request(s) → .libretto/sessions/${sessionName}/network.jsonl`);
 console.log(`  next: node scripts/analyze-network.mjs --session ${sessionName}`);
 process.exit(0);
