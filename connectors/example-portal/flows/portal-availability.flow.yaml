@@ -76,6 +76,14 @@ steps:
       expression: "Intl.DateTimeFormat().resolvedOptions().timeZone"
       as: client_tz
 
+  # DIAGNOSTIC — fire the exact GetSchedulingWorkflowData fetch from the page and
+  # report status / redirect / content-type, so we can see WHY it returns HTML.
+  - type: read
+    label: DIAGNOSTIC — raw GetSchedulingWorkflowData response
+    read:
+      expression: "(function(){var els=[].slice.call(document.getElementsByName('__RequestVerificationToken'));var tok=els.map(function(e){return e.value}).sort(function(a,b){return b.length-a.length})[0]||'';var nn=(document.querySelector('style[nonce]')||document.querySelector('[nonce]')||{}).nonce||'';return fetch('/MyChart/Scheduling/GetSchedulingWorkflowData',{method:'POST',headers:{'__RequestVerificationToken':tok,'X-Requested-With':'XMLHttpRequest','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body:'nonce='+encodeURIComponent(nn),credentials:'include'}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,redirected:r.redirected,finalUrl:r.url,ctype:r.headers.get('content-type'),tokLen:tok.length,head:t.slice(0,160).replace(/\\s+/g,' ')})})})})()"
+      as: _apiprobe
+
   # ── API TIER — the specialty list (with its encrypted id) comes from here.
   - type: extract
     label: Load scheduling workflow data (API)
