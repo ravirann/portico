@@ -1,0 +1,13 @@
+{
+  "name": "@portico/cli",
+  "version": "0.0.0",
+  "type": "module",
+  "bin": { "portico": "./src/index.ts" },
+  "scripts": { "build": "tsc -b" },
+  "dependencies": {
+    "@portico/engine": "workspace:*",
+    "@portico/flow-spec": "workspace:*",
+    "@portico/vault": "workspace:*",
+    "yaml": "^2.6.1"
+  }
+}

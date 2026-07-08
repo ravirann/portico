@@ -1,0 +1,19 @@
+{
+  "name": "portico",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Open-source, self-hostable platform for reliable, deterministic browser automation of authenticated portals.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@9.0.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit",
+    "test": "node --import tsx --test packages/**/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

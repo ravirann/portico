@@ -1,0 +1,9 @@
+{
+  "name": "@portico/vault",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "build": "tsc -b", "test": "node --import tsx --test src/*.test.ts" }
+}

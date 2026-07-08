@@ -1,0 +1,15 @@
+# Smoke flow — proves the engine drives a real browser end-to-end, no portal
+# credentials needed. Navigates to a public page and extracts its title.
+#   portico run examples/smoke.flow.yaml --base-url https://example.com --headless
+key: smoke
+version: 1
+description: Launch a browser, navigate to a public page, extract its title.
+steps:
+  - type: navigate
+    label: Open the page
+    url: "{{base_url}}"
+  - type: extract
+    label: Read the page title
+    extract:
+      key: page_title
+      schema: { type: string }

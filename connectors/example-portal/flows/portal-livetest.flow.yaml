@@ -1,0 +1,26 @@
+# Minimal LIVE TEST — headed, manual login. No stored credentials or selectors
+# needed; proves the engine drives a real portal end-to-end. Pass the real portal
+# URL at runtime (it is not stored in the repo):
+#
+#   node --import tsx apps/cli/src/index.ts run \
+#     connectors/example-portal/flows/portal-livetest.flow.yaml \
+#     --base-url https://your-portal.example.com
+#
+# A headed browser opens on the login page. Sign in + 2FA, navigate to the target
+# screen yourself, return to the terminal and press Enter. The engine then
+# extracts what's on screen. Nothing is committed.
+key: portal-livetest
+version: 1
+description: Headed manual-login smoke test against a live portal.
+guard: { no_booking: true, dry_run_only: true }
+steps:
+  - type: navigate
+    label: Open the portal
+    url: "{{base_url}}"
+  - type: human
+    label: Log in (username + password + 2FA) and open the target screen
+  - type: extract
+    label: Read the current page title
+    extract:
+      key: page_title
+      schema: { type: string }

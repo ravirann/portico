@@ -1,0 +1,10 @@
+# Example connector — a template for automating an authenticated portal.
+# A specific deployment is an instance override under instances/ (which may be
+# kept local/gitignored; see instances/example.yaml).
+key: example-portal
+name: Example Portal
+framework: example-portal       # instances on the same framework share heals
+base_url: "{{instance.base_url}}"
+allowed_domains:                # hard network-egress boundary at run time
+  - "{{instance.host}}"
+auth: portal-login              # reusable, 2FA-aware auth subflow

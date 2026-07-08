@@ -1,0 +1,51 @@
+# Scheduling flow, DISCOVERY ONLY. Never commits/books.
+# Reaches the selection screen and returns available options, then stops.
+key: portal-schedule
+version: 1
+description: Navigate to the scheduling screen and return available options.
+inputs:
+  reason: string
+  provider: string?
+  dateRange: string?
+guard:
+  no_booking: true                      # engine forbids any commit/confirm step
+  forbidden_actions: ["book", "confirm", "submit appointment"]
+  dry_run_only: true
+steps:
+  - type: subflow
+    use: portal-login                   # reuses the trusted session
+
+  - type: act
+    label: Open scheduling
+    locator: { semantic: { role: link, name: "Schedule", intent: "start scheduling" } }
+
+  - type: act
+    label: Select reason
+    value: "{{reason}}"
+    locator: { semantic: { name: "Reason", intent: "the reason selector" } }
+
+  - type: act
+    label: Select provider (optional)
+    value: "{{provider}}"
+    locator: { semantic: { name: "Provider", intent: "the provider selector" } }
+
+  - type: extract
+    label: Read available options
+    extract:
+      key: available_options
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            provider:   { type: string }
+            location:   { type: string }
+            visit_type: { type: string }
+            date:       { type: string }
+            time:       { type: string }
+            slot_token: { type: string }
+
+  - type: assert
+    label: Reached the selection screen
+    condition: selection_screen_reached
+# Flow ends here. No commit step exists → nothing is booked, by construction.

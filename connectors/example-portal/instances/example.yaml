@@ -1,0 +1,10 @@
+# Example instance override. Copy to a gitignored *.local.yaml with your real
+# portal details; do NOT commit real hosts/credentials.
+instance: example
+base_url: https://portal.example.com
+host: portal.example.com
+secrets:                         # references resolved by @portico/vault at run time
+  username: example/username     # → env PORTICO_SECRET_EXAMPLE_USERNAME
+  password: example/password
+  # totp_seed: example/totp_seed  # set only if 2FA is an authenticator app
+two_factor: unknown              # authenticator-app | sms

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+# secrets / sessions / captures / real deployments — never commit
+vault-data/
+*.session.json
+captures/
+.libretto/
+*.local.yaml
+# artifacts
+traces/
+*.log
+.DS_Store
