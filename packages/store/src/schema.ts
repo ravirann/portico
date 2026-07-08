@@ -139,6 +139,35 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE browser_sessions ADD COLUMN pid INTEGER;
     `,
   },
+  {
+    version: 6,
+    sql: `
+      ALTER TABLE runs ADD COLUMN instance TEXT;
+      ALTER TABLE browser_sessions ADD COLUMN connector TEXT;
+    `,
+  },
+  {
+    version: 5,
+    sql: `
+      CREATE TABLE IF NOT EXISTS recordings (
+        id            TEXT PRIMARY KEY,
+        session_id    TEXT NOT NULL,
+        connector     TEXT,
+        flow_key      TEXT NOT NULL,
+        base_url      TEXT,
+        status        TEXT NOT NULL,
+        path          TEXT NOT NULL,
+        pid           INTEGER,
+        draft_flow_id TEXT,
+        clicks        INTEGER,
+        requests      INTEGER,
+        error         TEXT,
+        started_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id, started_at DESC);
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

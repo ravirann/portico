@@ -1,24 +1,30 @@
 import { NextResponse } from "next/server";
 import { runCli } from "@/lib/actions";
-import { readSessions } from "@/lib/store";
+import { readFlow } from "@/lib/store";
+import { pickLiveSession } from "@/lib/sessions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Validate a draft against a live browser session. We pick the first ACTIVE
-// session's CDP endpoint; if none exists (or it has no endpoint) we return a
+// Validate a draft against a live browser session. The session is picked
+// connector-aware (the flow's connector first, then unscoped, then any active)
+// and each candidate's CDP endpoint is probed — a stale "active" row would
+// otherwise doom the validation before it starts. If none answers we return a
 // clear error the UI shows instead of spawning a doomed validation.
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
-  const session = readSessions().find((s) => s.status === "active" && s.cdpEndpoint);
-  if (!session?.cdpEndpoint) {
-    return NextResponse.json(
-      { error: "Start a browser session first — no active session with a CDP endpoint." },
-      { status: 400 },
-    );
+  const flow = readFlow(id);
+  if (!flow) {
+    return NextResponse.json({ error: `No flow with id "${id}".` }, { status: 404 });
   }
 
-  const { ok, json } = await runCli(["validate", id, "--cdp", session.cdpEndpoint, "--json"]);
-  return NextResponse.json(json ?? { error: "No response from CLI" }, { status: ok ? 200 : 400 });
+  const picked = await pickLiveSession(flow.connector);
+  if ("error" in picked) {
+    return NextResponse.json({ error: picked.error }, { status: 400 });
+  }
+
+  const { ok, json } = await runCli(["validate", id, "--cdp", picked.cdpEndpoint, "--json"]);
+  const body = json ?? { error: "No response from CLI" };
+  return NextResponse.json({ ...body, sessionId: picked.session.id }, { status: ok ? 200 : 400 });
 }

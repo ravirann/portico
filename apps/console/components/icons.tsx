@@ -41,3 +41,9 @@ export const IconTrash = (p: P) => (
 export const IconEdit = (p: P) => (
   <svg {...base} className={p.className}><path d="M11 2.5l2.5 2.5M2.5 11L10 3.5 12.5 6 5 13.5H2.5V11z" /></svg>
 );
+export const IconHelp = (p: P) => (
+  <svg {...base} className={p.className}><circle cx="8" cy="8" r="6" /><path d="M6.1 6.1a1.9 1.9 0 0 1 3.7.6c0 1.3-1.9 1.7-1.9 3" /><path d="M8 11.5v.01" /></svg>
+);
+export const IconLayers = (p: P) => (
+  <svg {...base} className={p.className}><path d="M8 2 2 5l6 3 6-3-6-3z" /><path d="M2 8l6 3 6-3" opacity="0.55" /><path d="M2 11l6 3 6-3" opacity="0.35" /></svg>
+);

@@ -6,7 +6,9 @@ import { readFlow } from "@/lib/store";
 import { fmtRelative } from "@/lib/format";
 import type { FlowView } from "@/lib/types";
 import { FlowActions } from "@/components/flow-actions";
+import { RunFlowButton } from "@/components/run-flow-button";
 import { FlowYamlEditor } from "@/components/flow-yaml-editor";
+import { ReviewModal } from "@/components/review-modal";
 
 export const dynamic = "force-dynamic";
 
@@ -47,8 +49,27 @@ function parseFlow(yaml: string): Flow | null {
   }
 }
 
-export default async function FlowDetail({ params }: { params: Promise<{ id: string }> }) {
+/** Output keys a validation run must populate — from intercept/select/extract steps. */
+function expectedOutputs(flow: Flow | null): string[] {
+  if (!flow) return [];
+  const keys: string[] = [];
+  for (const s of flow.steps) {
+    if (s.intercept?.as) keys.push(s.intercept.as);
+    if (s.select?.as) keys.push(s.select.as);
+    if (s.type === "extract" && s.extract?.key) keys.push(s.extract.key);
+  }
+  return [...new Set(keys)];
+}
+
+export default async function FlowDetail({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ review?: string }>;
+}) {
   const { id } = await params;
+  const { review } = await searchParams;
   const flow = readFlow(id);
   if (!flow) notFound();
 
@@ -56,9 +77,37 @@ export default async function FlowDetail({ params }: { params: Promise<{ id: str
   const v = validationBadge(flow.validation);
   const parsed = parseFlow(flow.yaml);
   const inputs = parsed?.inputs ? Object.entries(parsed.inputs) : [];
+  const showReview = review === "1" && flow.status === "draft" && parsed != null;
 
   return (
     <>
+      {showReview && parsed && (
+        <ReviewModal
+          flowId={flow.id}
+          flowKey={flow.key}
+          connector={flow.connector}
+          yaml={flow.yaml}
+          steps={parsed.steps.map((step, index) => {
+            // Act steps clicking a literal (non-templated) element can be
+            // parameterized at review time; pass the locator's name/role and
+            // the compiler's instance-specific suggestion (param_hint).
+            const sem = step.type === "act" ? step.locator?.semantic : undefined;
+            const act =
+              sem?.name && !sem.name.includes("{{")
+                ? { name: sem.name, role: sem.role, suggest: sem.param_hint }
+                : undefined;
+            return {
+              index,
+              label: step.label ?? step.type,
+              type: step.type,
+              detail: stepDetail(step),
+              act,
+            };
+          })}
+          outputs={expectedOutputs(parsed)}
+          guarded={Boolean(parsed.guard?.no_booking)}
+        />
+      )}
       <div className="topbar">
         <div className="crumb"><Link href="/flows">Flows</Link> <span>/</span> <b className="mono">{flow.key} v{flow.version}</b></div>
         <span className={`badge ${s.cls}`}><span className="d" />{s.label}</span>
@@ -76,6 +125,9 @@ export default async function FlowDetail({ params }: { params: Promise<{ id: str
 
           <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
             {flow.status === "draft" && <FlowActions flowId={flow.id} />}
+            {flow.status === "confirmed" && (
+              <RunFlowButton flowId={flow.id} inputs={inputs.map(([name, hint]) => ({ name, hint: String(hint) }))} />
+            )}
             <FlowYamlEditor flowId={flow.id} flowKey={flow.key} connector={flow.connector} initialYaml={flow.yaml} />
           </div>
         </div>

@@ -47,6 +47,9 @@ export interface RunView {
   output?: Record<string, unknown>;
   failure?: { stepIndex: number; reason: string };
   rrwebRef?: string;
+  /** The instance (deployment) this run targeted, e.g. "urmc". `connector` is
+   *  the connector KEY; `instance` is the specific deployment within it. */
+  instance?: string;
 }
 
 /**
@@ -119,6 +122,8 @@ export interface BrowserSessionRecord {
   startedAt: string;
   lastActiveAt: string;
   pid?: number;
+  /** The connector KEY this session is for (scopes it in the console). */
+  connector?: string;
 }
 
 /** A configured connector (self-serve portal connector registry). */
@@ -131,6 +136,28 @@ export interface ConnectorRecord {
   auth?: string;
   variables: Record<string, string>;
   createdAt: string;
+  updatedAt: string;
+}
+
+export type RecordingStatus = "recording" | "stopped" | "compiled" | "error";
+
+/** A record-by-demonstration capture session: a detached recorder attached to a
+ *  browser session over CDP, writing a recording.json the compiler turns into a
+ *  draft flow. `draftFlowId` is set once the capture is compiled. */
+export interface RecordingRecord {
+  id: string;
+  sessionId: string;
+  connector?: string;
+  flowKey: string;
+  baseUrl?: string;
+  status: RecordingStatus;
+  path: string;
+  pid?: number;
+  draftFlowId?: string;
+  clicks?: number;
+  requests?: number;
+  error?: string;
+  startedAt: string;
   updatedAt: string;
 }
 

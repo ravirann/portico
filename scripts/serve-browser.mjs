@@ -23,6 +23,7 @@ const baseUrl = arg("--base-url", "");
 const profileArg = arg("--profile", "default");
 const port = Number(arg("--port", "9222"));
 const tenant = arg("--tenant", "default");
+const connector = arg("--connector", "");
 const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
 const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
 
@@ -62,6 +63,7 @@ if (store) {
     profile: profileName,
     cdpEndpoint,
     startedAt: new Date().toISOString(),
+    connector: connector || undefined,
   });
 }
 

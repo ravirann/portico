@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { IconPlay } from "./icons";
 
@@ -23,18 +23,42 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 6,
 };
 
+interface ConnectorOption {
+  key: string;
+  name: string;
+}
+
 /** Start a local browser session from the console. Launches a real browser
  *  window on THIS machine (the console is self-hosted), so the copy is explicit
- *  about that. */
-export function SessionStart() {
+ *  about that. A session is scoped to a connector so it shows under that
+ *  connector in the console (and is the one its flows record/validate against). */
+export function SessionStart({ connector: initialConnector }: { connector?: string }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [tenant, setTenant] = useState("");
   const [profile, setProfile] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [port, setPort] = useState("");
+  const [connector, setConnector] = useState(initialConnector ?? "");
+  const [connectors, setConnectors] = useState<ConnectorOption[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  // Populate the connector picker (same source as the sidebar switcher).
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/connectors/list")
+      .then((r) => (r.ok ? r.json() : { connectors: [] }))
+      .then((d: { connectors?: ConnectorOption[] }) => {
+        if (!cancelled) setConnectors(Array.isArray(d.connectors) ? d.connectors : []);
+      })
+      .catch(() => {
+        /* offline — the field still works, just without suggestions */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function start() {
     setBusy(true);
@@ -48,6 +72,7 @@ export function SessionStart() {
           profile: profile.trim() || undefined,
           baseUrl: baseUrl.trim() || undefined,
           port: port.trim() || undefined,
+          connector: connector.trim() || undefined,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -86,12 +111,22 @@ export function SessionStart() {
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         <div>
-          <label style={labelStyle}>Tenant</label>
-          <input style={fieldStyle} value={tenant} onChange={(e) => setTenant(e.target.value)} placeholder="you" />
+          <label style={labelStyle}>Connector</label>
+          <select style={fieldStyle} value={connector} onChange={(e) => setConnector(e.target.value)}>
+            <option value="">— unassigned —</option>
+            {connectors.map((c) => (
+              <option key={c.key} value={c.key}>{c.name} ({c.key})</option>
+            ))}
+          </select>
+          <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4 }}>Scopes this session to a connector.</div>
         </div>
         <div>
           <label style={labelStyle}>Profile</label>
           <input style={fieldStyle} className="mono" value={profile} onChange={(e) => setProfile(e.target.value)} placeholder="default" />
+        </div>
+        <div>
+          <label style={labelStyle}>Tenant</label>
+          <input style={fieldStyle} value={tenant} onChange={(e) => setTenant(e.target.value)} placeholder="you" />
         </div>
         <div>
           <label style={labelStyle}>Base URL</label>

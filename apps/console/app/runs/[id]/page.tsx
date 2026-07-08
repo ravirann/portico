@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getRun } from "@/lib/store";
+import { CopyJsonButton, JsonView } from "@/components/json-view";
 import { fmtDuration, fmtRelative, tierLabel } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -56,6 +57,8 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
             <div className="panel" style={{ padding: "18px 22px" }}>
               <div className="eyebrow" style={{ marginBottom: 12 }}>Run</div>
               <dl className="kv">
+                <dt>Connector</dt><dd>{run.connector}</dd>
+                {run.instance && (<><dt>Instance</dt><dd className="mono">{run.instance}</dd></>)}
                 <dt>Engine</dt><dd>{run.engine}</dd>
                 <dt>Tier</dt><dd><span className="chip">{tierLabel[run.tier]}</span></dd>
                 <dt>Mode</dt><dd>{run.mode}</dd>
@@ -66,8 +69,11 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
 
             {run.output && Object.keys(run.output).length > 0 && (
               <div className="panel" style={{ padding: "18px 22px" }}>
-                <div className="eyebrow" style={{ marginBottom: 12 }}>Structured output</div>
-                <pre className="code">{JSON.stringify(run.output, null, 2)}</pre>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <div className="eyebrow">Structured output</div>
+                  <CopyJsonButton data={run.output} />
+                </div>
+                <JsonView data={run.output} />
               </div>
             )}
 

@@ -6,13 +6,16 @@
   "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@9.0.0",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --noEmit",
     "test": "node --import tsx --test packages/**/*.test.ts"
   },
   "devDependencies": {
+    "@types/node": "^22.10.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

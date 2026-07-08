@@ -206,21 +206,83 @@ function labelOf(click: ClickEvent): string {
 }
 
 /**
- * Trim a (possibly long, multi-clause) label down to its leading
- * human-meaningful phrase: cut at the first double-space, " - ", or newline
- * — whichever comes first — then cap at ~40 chars. Turns a tile label like
- * "Primary Care  Includes adult, pediatric…" into "Primary Care".
+ * Normalize a label into the act's semantic `name`: collapse all whitespace
+ * runs (DOM innerText is full of newlines and double spaces) and cap at ~80
+ * chars. Deliberately NOT truncated to a leading phrase — an earlier heuristic
+ * cut at the first double-space/newline, which turned a row label like
+ * "Prasanna  Kumar D E" into "Prasanna" and made the replay locator match the
+ * wrong (or no) element. `name` must stay the full accessible label; only the
+ * length cap guards against pathological tile paragraphs.
  */
-function shortName(label: string): string {
-  const delimiters = [/ {2,}/, / - /, /\n/];
-  let cutAt = label.length;
-  for (const re of delimiters) {
-    const match = re.exec(label);
-    if (match && match.index < cutAt) cutAt = match.index;
+function semanticName(label: string): string {
+  let name = label.replace(/\s+/g, " ").trim();
+  if (name.length > 80) name = name.slice(0, 80).trim();
+  return name;
+}
+
+// ---------------------------------------------------------------------------
+// Demonstration-specific literal detection (→ param_hint)
+// ---------------------------------------------------------------------------
+
+/**
+ * Common UI-navigation vocabulary. A multi-word capitalized name made ONLY of
+ * these words (e.g. "New Patient Visit") is normal chrome, not a data value.
+ */
+const UI_NAV_WORDS = new Set([
+  "schedule", "appointment", "visit", "details", "continue", "claims",
+  "search", "new", "patient", "view", "open", "back", "next", "submit",
+]);
+
+const DIGITS_ONLY_RE = /^\d{5,}$/;
+/** Phone-shaped: optional +, then 7–15 digits with common separators. */
+const PHONE_RE = /^\+?[\d\s().-]{7,20}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** How many digits the string contains. */
+function digitCount(s: string): number {
+  return (s.match(/\d/g) ?? []).length;
+}
+
+/**
+ * A slug usable as a flow input name. Underscores, not hyphens: the engine's
+ * `{{...}}` template grammar only matches `[\w.]+`, so a hyphenated name would
+ * silently never substitute.
+ */
+function slugify(text: string): string {
+  const slug = text.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return slug.slice(0, 40).replace(/_+$/, "");
+}
+
+/**
+ * Conservative detector for act names that are values from THIS demonstration
+ * (a patient's name, a phone/claim number, an email) rather than stable UI
+ * vocabulary — the compiled flow would only ever replay for that one record.
+ * Returns a suggested input name (slug) when flagged, undefined otherwise.
+ * Tuned for false NEGATIVES: a missed flag is a minor annoyance at review
+ * time, a false positive nags the user about a real button.
+ */
+function paramHintFor(name: string): string | undefined {
+  const trimmed = name.trim();
+  if (!trimmed) return undefined;
+
+  if (EMAIL_RE.test(trimmed)) return "email";
+  if (DIGITS_ONLY_RE.test(trimmed) || (PHONE_RE.test(trimmed) && digitCount(trimmed) >= 7)) {
+    // 7–15 digits with phone punctuation reads as a phone number; anything
+    // else numeric (long ids, claim numbers) is a generic reference.
+    const digits = digitCount(trimmed);
+    return digits >= 7 && digits <= 15 ? "phone_number" : "reference_number";
   }
-  let short = label.slice(0, cutAt).trim();
-  if (short.length > 40) short = short.slice(0, 40).trim();
-  return short;
+
+  // Proper-noun heuristic: 2+ words, every word capitalized, and at least one
+  // word outside the UI-navigation stoplist ("Prasanna Kumar D E" flags,
+  // "New Patient" does not).
+  const words = trimmed.split(/\s+/);
+  if (words.length >= 2 && words.every((w) => /^[A-Z]/.test(w))) {
+    const outside = words.some((w) => !UI_NAV_WORDS.has(w.toLowerCase().replace(/[^a-z]/g, "")));
+    if (outside) return slugify(trimmed) || undefined;
+  }
+
+  return undefined;
 }
 
 /** "button" when the click's own role says so, or its tag is button-like (BUTTON/A). */
@@ -235,23 +297,73 @@ function cssForId(id: string): string {
   return /^[A-Za-z][\w-]*$/.test(id) ? `#${id}` : `[id='${id.replace(/'/g, "\\'")}']`;
 }
 
+/**
+ * Does this DOM id look human-authored (stable across deploys) rather than
+ * auto-generated? Auto-generated ids — framework prefixes (`radix-`, React's
+ * `:r…:` useId, `ember…`, `mui-…`), long digit runs, uuid-ish hex chunks —
+ * change on every render/deploy, so caching them guarantees a stale selector.
+ */
+function isStableId(id: string): boolean {
+  if (/^(radix-|:r|ember|mui-)/i.test(id)) return false;
+  if (/\d{4,}/.test(id)) return false; // long digit run — counter/timestamp
+  if (/[0-9a-f]{8,}/i.test(id)) return false; // uuid-ish hex chunk
+  return true;
+}
+
+/**
+ * The best structural hook the recorder captured for this click, as a cached
+ * CSS selector: data-testid first (explicitly authored for automation), then a
+ * stable-looking DOM id. Undefined when the element only has auto-generated
+ * identity — a semantic locator is more robust than a selector that will rot.
+ */
+function structuralHook(click: ClickEvent): string | undefined {
+  const testid = (click.testid ?? "").trim();
+  if (testid) return `[data-testid='${testid.replace(/'/g, "\\'")}']`;
+  const id = (click.id ?? "").trim();
+  if (id && isStableId(id)) return cssForId(id);
+  return undefined;
+}
+
+/**
+ * Tiered locator synthesis per click:
+ *   1. data-testid            → dual locator: cached [data-testid=…] + full semantic.
+ *   2. stable-looking DOM id  → dual locator: cached #id + full semantic.
+ *   3. no structural hook     → semantic role+name (full label).
+ *   4. instance-specific label (param_hint) → semantic ONLY, even when a
+ *      testid/id exists: hooks like data-testid="patient-row" are shared by
+ *      every row, so the (parameterizable) text is the real discriminator —
+ *      a cached hook would deterministically click the wrong row.
+ * Execution tries cached first and self-heals to the semantic descriptor
+ * (see compiler.ts resolveActLocator).
+ */
 function actStepFor(click: ClickEvent): Step {
   const visible = (click.ariaLabel ?? click.text ?? "").trim();
-  // No visible label, but a DOM id/name → target it precisely with a cached CSS
-  // selector. A semantic text match would fail here (the id/name is not visible
-  // on the page) — this is the fix for controls like an <input id="…-continue">.
-  if (!visible && (click.id || click.name)) {
-    const cached = click.id ? cssForId(click.id) : `[name='${click.name}']`;
-    const ref = click.id ?? click.name ?? "control";
+  // No visible label, but a DOM identity → target it precisely with a cached
+  // CSS selector. A semantic text match would fail here (the identity is not
+  // visible on the page) — e.g. an <input id="…-continue">. Auto-generated ids
+  // are still used here: with no label there is nothing better to locate by.
+  if (!visible && (click.testid || click.id || click.name)) {
+    const cached = structuralHook(click) ?? (click.id ? cssForId(click.id) : `[name='${click.name}']`);
+    const ref = click.testid ?? click.id ?? click.name ?? "control";
     return { type: "act", label: `Click "${ref}"`, locator: { cached, semantic: { intent: ref } } };
   }
   const label = visible || labelOf(click);
-  const name = shortName(label);
+  const name = semanticName(label);
   const role = roleFor(click);
+  const paramHint = paramHintFor(name);
+  const cached = paramHint ? undefined : structuralHook(click); // tier 4: text discriminates, not the hook
   return {
     type: "act",
     label: `Click "${name}"`,
-    locator: { semantic: { ...(role ? { role } : {}), name, intent: label } },
+    locator: {
+      ...(cached ? { cached } : {}),
+      semantic: {
+        ...(role ? { role } : {}),
+        name,
+        intent: label,
+        ...(paramHint ? { param_hint: paramHint } : {}),
+      },
+    },
   };
 }
 

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 232 56" width="232" height="56" role="img" aria-label="Portico">
+  <defs>
+    <linearGradient id="tileL" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A8FC4"></stop>
+      <stop offset="1" stop-color="#2C7CB0"></stop>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="8" width="40" height="40" rx="9" fill="url(#tileL)"></rect>
+  <g fill="#ffffff" transform="translate(0,8) scale(0.078125)">
+    <polygon points="256,110 358,198 154,198"></polygon>
+    <rect x="150" y="204" width="212" height="24" rx="7"></rect>
+    <rect x="184" y="238" width="32" height="132" rx="7"></rect>
+    <rect x="240" y="238" width="32" height="132" rx="7"></rect>
+    <rect x="296" y="238" width="32" height="132" rx="7"></rect>
+    <rect x="146" y="378" width="220" height="34" rx="11"></rect>
+  </g>
+  <text x="54" y="37" font-family="&#39;Public Sans&#39;, -apple-system, system-ui, sans-serif" font-size="27" font-weight="700" letter-spacing="-0.5" fill="#17242F">Portico<tspan fill="#2C7CB0">.</tspan></text>
+</svg>

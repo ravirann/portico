@@ -24,6 +24,7 @@ export interface TrackedSession {
   status: "active" | "closed";
   startedAt: string;
   lastActiveAt: string;
+  connector?: string;
 }
 
 /** The subset of `Store`'s browser-session methods this module needs. */
@@ -34,6 +35,7 @@ export interface SessionStore {
     profile?: string;
     cdpEndpoint?: string;
     startedAt: string;
+    connector?: string;
   }): void;
   touchBrowserSession(id: string, at: string): void;
   closeBrowserSession(id: string, at: string): void;
@@ -68,7 +70,7 @@ export function sessionHealth(
 /** Register a new tracked session; returns its id. */
 export function registerSession(
   store: SessionStore,
-  args: { id: string; tenant: string; profile?: string; cdpEndpoint?: string; at: string },
+  args: { id: string; tenant: string; profile?: string; cdpEndpoint?: string; at: string; connector?: string },
 ): string {
   store.createBrowserSession({
     id: args.id,
@@ -76,6 +78,7 @@ export function registerSession(
     profile: args.profile,
     cdpEndpoint: args.cdpEndpoint,
     startedAt: args.at,
+    connector: args.connector,
   });
   return args.id;
 }

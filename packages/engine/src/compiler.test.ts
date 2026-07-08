@@ -6,8 +6,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Flow, Target } from "@portico/flow-spec";
-import { compileFlow } from "./compiler.js";
-import { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
+import { compileFlow, resolveActLocator, type StepRuntime } from "./compiler.js";
+import { envelopeForExtraction, jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 import { healModelConfigured } from "./model.js";
 import { resolveProfile } from "./auth-profile.js";
 
@@ -243,4 +243,154 @@ test("resolveProfile normalizes the profile id and points at .libretto/profiles"
   assert.equal(p.userDataDir, "/tmp/repo/.libretto/profiles/urmc-mychart.userdata");
   assert.equal(p.loadPath, undefined); // does not exist
   assert.equal(p.refresh, true);
+});
+
+// ---------------------------------------------------------------------------
+// resolveActLocator — the act-target fallback chain
+// ---------------------------------------------------------------------------
+
+/** Stub page whose locators record the chain of calls that built them. */
+function stubLocatorPage() {
+  const make = (chain: string): Record<string, unknown> => ({
+    chain,
+    or: (other: { chain: string }) => make(`${chain}.or(${other.chain})`),
+    first: () => make(`${chain}.first()`),
+  });
+  return {
+    getByRole: (role: string, opts?: { name?: string }) => make(`role:${role}:${opts?.name ?? ""}`),
+    getByLabel: (text: string) => make(`label:${text}`),
+    getByText: (text: string) => make(`text:${text}`),
+    locator: (sel: string) => make(`css:${sel}`),
+  };
+}
+
+function locatorRt(inputs: Record<string, string> = {}) {
+  return {
+    page: stubLocatorPage(),
+    template: (s: string) => s.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k: string) => inputs[k] ?? ""),
+  } as unknown as StepRuntime;
+}
+
+const chainOf = (loc: unknown) => (loc as { chain: string }).chain;
+
+test("resolveActLocator: role+name stays strict (no .first())", () => {
+  const r = resolveActLocator(locatorRt(), {
+    type: "act",
+    locator: { semantic: { role: "button", name: "8183054609", intent: "the claim number" } },
+  });
+  assert.equal(chainOf(r.locator), "role:button:8183054609");
+  assert.equal(r.fallback, undefined);
+});
+
+test("resolveActLocator: a role-less name resolves to a robust first-match text locator", () => {
+  const r = resolveActLocator(locatorRt(), {
+    type: "act",
+    locator: { semantic: { name: "Prasanna Kumar D E", intent: "Prasanna Kumar D E" } },
+  });
+  // label-first for form fields, visible text otherwise; .first() because a
+  // role-less text match nests (row + inner span) and strict mode would fail.
+  assert.equal(chainOf(r.locator), "label:Prasanna Kumar D E.or(text:Prasanna Kumar D E).first()");
+});
+
+test("resolveActLocator: a role-less templated name is rendered before matching", () => {
+  const r = resolveActLocator(locatorRt({ patient: "Prasanna Kumar D E" }), {
+    type: "act",
+    locator: { semantic: { name: "{{patient}}", intent: "the patient row" } },
+  });
+  assert.equal(chainOf(r.locator), "label:Prasanna Kumar D E.or(text:Prasanna Kumar D E).first()");
+});
+
+test("resolveActLocator: cached + semantic → cached primary with the semantic locator as fallback", () => {
+  const r = resolveActLocator(locatorRt(), {
+    type: "act",
+    locator: { cached: "[data-testid='claims-tab']", semantic: { role: "button", name: "Claims", intent: "Claims tab" } },
+  });
+  assert.equal(chainOf(r.locator), "css:[data-testid='claims-tab']");
+  assert.equal(chainOf(r.fallback), "role:button:Claims");
+});
+
+test("resolveActLocator: cached with intent-only semantic has no fallback (nothing to re-find by)", () => {
+  const r = resolveActLocator(locatorRt(), {
+    type: "act",
+    locator: { cached: "#scheduling-continue", semantic: { intent: "scheduling-continue" } },
+  });
+  assert.equal(chainOf(r.locator), "css:#scheduling-continue");
+  assert.equal(r.fallback, undefined);
+});
+
+test("resolveActLocator: no cached, no role, no name → fails loud", () => {
+  assert.throws(
+    () => resolveActLocator(locatorRt(), { type: "act", label: "mystery", locator: { semantic: { intent: "?" } } }),
+    /no cached selector and no usable semantic/,
+  );
+});
+
+test("act self-heals from a stale cached selector to the semantic descriptor (no model)", async () => {
+  const flow: Flow = {
+    key: "heal-free",
+    version: 1,
+    steps: [
+      {
+        type: "act",
+        label: "open claims",
+        locator: { cached: "#gone-stale", semantic: { role: "button", name: "Claims", intent: "the Claims tab" } },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  const clicked: string[] = [];
+  const page = {
+    locator: (sel: string) => ({ click: async () => { throw new Error(`stale: ${sel}`); } }),
+    getByRole: (_role: string, opts: { name: string }) => ({ click: async () => { clicked.push(opts.name); } }),
+  };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null, // deterministic hot path — the fallback must not need a model
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    template: (s: string) => s,
+  } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.deepEqual(clicked, ["Claims"]); // cached failed → semantic clicked
+});
+
+// ---------------------------------------------------------------------------
+// Extract-schema envelope: scalar roots must be object-wrapped for the model
+// ---------------------------------------------------------------------------
+
+test("envelopeForExtraction wraps a scalar-root schema and unwraps the model result", () => {
+  const { schema, unwrap } = envelopeForExtraction({ type: "string" });
+  // OpenAI structured outputs require the ROOT schema to be type "object".
+  assert.deepEqual(schema, {
+    type: "object",
+    properties: { value: { type: "string" } },
+    required: ["value"],
+    additionalProperties: false,
+  });
+  assert.equal(unwrap({ value: "Example Domain" }), "Example Domain"); // flow output stays a plain string
+  assert.equal(unwrap("already-plain"), "already-plain"); // tolerant of an unenveloped result
+});
+
+test("envelopeForExtraction wraps array roots too, and passes object roots through untouched", () => {
+  const arr = envelopeForExtraction({ type: "array", items: { type: "string" } });
+  assert.equal((arr.schema as { type?: string }).type, "object");
+  assert.deepEqual(arr.unwrap({ value: ["a", "b"] }), ["a", "b"]);
+
+  const objSchema = { type: "object", properties: { title: { type: "string" } }, required: ["title"] };
+  const obj = envelopeForExtraction(objSchema);
+  assert.equal(obj.schema, objSchema); // identical reference — no rewrap
+  const result = { title: "x" };
+  assert.equal(obj.unwrap(result), result); // identity unwrap
+});
+
+test("the unwrapped scalar validates against the ORIGINAL declared schema", () => {
+  const declared = { type: "string" };
+  const { unwrap } = envelopeForExtraction(declared);
+  const check = validateAgainst(declared, unwrap({ value: "Example Domain" }));
+  assert.equal(check.ok, true);
+  assert.equal(check.value, "Example Domain");
 });

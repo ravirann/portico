@@ -46,6 +46,30 @@ export function jsonSchemaToZod(schema: unknown): z.ZodTypeAny {
   }
 }
 
+/**
+ * OpenAI structured outputs (response_format json_schema) require the ROOT
+ * schema to be `type: "object"` — a scalar/array root like `{ type: "string" }`
+ * is rejected by the provider. Wrap any non-object-root extract schema in a
+ * `{ value: <declared> }` envelope for the model call, and return the matching
+ * `unwrap` that lifts `.value` back out so the flow's output key still receives
+ * the plain scalar (never `{value: …}`). Object-root schemas pass through
+ * unchanged with an identity unwrap.
+ */
+export function envelopeForExtraction(schema: unknown): {
+  schema: JsonSchema;
+  unwrap: (value: unknown) => unknown;
+} {
+  const s = (schema && typeof schema === "object" ? schema : {}) as JsonSchema;
+  if (s.type === "object") return { schema: s, unwrap: (value) => value };
+  return {
+    schema: { type: "object", properties: { value: s }, required: ["value"], additionalProperties: false },
+    unwrap: (value) =>
+      value && typeof value === "object" && "value" in (value as Record<string, unknown>)
+        ? (value as Record<string, unknown>).value
+        : value,
+  };
+}
+
 export interface Validation {
   ok: boolean;
   value: unknown;

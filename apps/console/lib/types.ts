@@ -26,6 +26,8 @@ export interface RunView {
   output?: Record<string, unknown>;
   failure?: { stepIndex: number; reason: string };
   rrwebRef?: string;
+  /** Instance (deployment) the run targeted; `connector` is the connector key. */
+  instance?: string;
 }
 
 export type FlowStatus = "draft" | "confirmed";
@@ -90,4 +92,6 @@ export interface SessionView {
   startedAt: string; // ISO
   lastActiveAt: string; // ISO
   health: SessionHealth;
+  /** The connector KEY this session is for (scopes it in the console). */
+  connector?: string;
 }

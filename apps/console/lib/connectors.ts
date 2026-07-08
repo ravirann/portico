@@ -11,11 +11,21 @@ export interface FlowSummary {
   description?: string;
   noBooking: boolean;
 }
+/** One deployment of a connector (an instances/*.yaml override). Only the
+ *  non-sensitive fields are surfaced — never the secret references/values. */
+export interface InstanceSummary {
+  name: string;
+  baseUrl?: string;
+  host?: string;
+  twoFactor?: string;
+  local: boolean;
+}
 export interface ConnectorSummary {
   key: string;
   name: string;
   framework?: string;
   flows: FlowSummary[];
+  instances: InstanceSummary[];
 }
 
 export function listConnectors(): ConnectorSummary[] {
@@ -59,11 +69,34 @@ export function listConnectors(): ConnectorSummary[] {
     } catch {
       /* no flows dir */
     }
+
+    const instances: InstanceSummary[] = [];
+    try {
+      for (const f of readdirSync(join(base, "instances"))) {
+        if (!f.endsWith(".yaml")) continue;
+        try {
+          const inst: any = parseYaml(readFileSync(join(base, "instances", f), "utf8")) ?? {};
+          instances.push({
+            name: inst.instance ?? f.replace(/\.(local\.)?yaml$/, ""),
+            baseUrl: inst.base_url,
+            host: inst.host,
+            twoFactor: inst.two_factor,
+            local: f.endsWith(".local.yaml"),
+          });
+        } catch {
+          /* skip unparseable instance */
+        }
+      }
+    } catch {
+      /* no instances dir */
+    }
+
     return {
       key: target.key ?? dir,
       name: target.name ?? dir,
       framework: target.framework,
       flows,
+      instances,
     };
   });
 }

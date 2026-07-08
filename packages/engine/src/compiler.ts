@@ -39,7 +39,7 @@ import type { Locator, Page } from "playwright";
 import { z } from "zod";
 import type { Flow, Step, Target } from "@portico/flow-spec";
 import { generateTotp } from "@portico/vault";
-import { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
+import { envelopeForExtraction, jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 import { resolveIntent } from "./resolve-intent.js";
 import { pickByPolicy, type PickPolicy } from "./pick-slot.js";
 import type { HealModel } from "./model.js";
@@ -240,13 +240,26 @@ async function runNavigate(rt: StepRuntime, step: Step, target: Target): Promise
 }
 
 async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
-  const { locator, desc } = resolveActLocator(rt, step);
+  const { locator, desc, fallback } = resolveActLocator(rt, step);
   const value = step.value != null ? rt.template(step.value) : undefined;
   const timeout = step.timeoutMs ?? 15000;
-  const doIt = async () => {
-    if (value !== undefined) await locator.fill(value, { timeout });
-    else await locator.click({ timeout });
+  const attempt = (target: Locator, t: number) => async () => {
+    if (value !== undefined) await target.fill(value, { timeout: t });
+    else await target.click({ timeout: t });
   };
+  // Cached-first, semantic self-heal: when the step carries BOTH a cached
+  // selector and a semantic descriptor, try the cached one briefly, then
+  // re-find the element by meaning. Deterministic — no model call — so it is
+  // allowed on the promoted hot path.
+  const doIt = fallback
+    ? async () => {
+        try {
+          await attempt(locator, Math.min(timeout, 5000))();
+        } catch {
+          await attempt(fallback, timeout)();
+        }
+      }
+    : attempt(locator, timeout);
 
   // Deterministic hot path: single attempt, no model. If it fails AND a heal
   // model is configured, run `attemptWithRecovery` (popup/overlay recovery +
@@ -279,18 +292,30 @@ async function runExtract(rt: StepRuntime, step: Step): Promise<StepOutcome> {
     return { status: "ok", detail: check.ok ? "dom-extracted (validated)" : `dom-extracted (unvalidated: ${check.error})` };
   }
 
-  // 2) Author/heal tier: no cached locator but a model is configured → AI extract,
-  //    schema-validated by construction.
+  // 2) Author/heal tier: no cached locator but a model is configured → AI extract.
+  //    Structured-output providers (OpenAI response_format) reject scalar/array
+  //    ROOT schemas, so a non-object schema is wrapped in a {value} envelope for
+  //    the model call and unwrapped before the output assignment — the flow's
+  //    output key always receives the declared shape (page_title stays a plain
+  //    string, never {value: …}).
   if (rt.heal) {
-    const zschema = jsonSchemaToZod(schema);
-    const value = await extractFromPage({
+    const envelope = envelopeForExtraction(schema);
+    const zschema = jsonSchemaToZod(envelope.schema);
+    const raw = await extractFromPage({
       page: rt.rawPage,
       instruction: step.locator?.semantic.intent ?? step.label ?? `extract ${key}`,
       schema: zschema as z.ZodType,
       model: rt.heal.languageModel,
     });
-    rt.output[key] = value;
-    return { status: "ok", detail: "ai-extracted (extractFromPage, validated)" };
+    // Validate the UNWRAPPED value against the ORIGINAL declared schema.
+    const value = envelope.unwrap(raw);
+    const check = validateAgainst(schema, value);
+    rt.output[key] = check.ok ? check.value : value;
+    if (!check.ok) rt.unvalidated.add(key);
+    return {
+      status: "ok",
+      detail: check.ok ? "ai-extracted (extractFromPage, validated)" : `ai-extracted (unvalidated: ${check.error})`,
+    };
   }
 
   // 3) Keyless fallback: raw DOM. Marked UNVALIDATED — no structured guarantee.
@@ -557,39 +582,64 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
  * (accessible role + name, then label, then placeholder/text) so authored flows
  * work on standard forms — e.g. login fields — without a record-by-demo pass.
  *
- * Ambiguity contract (consistent across the NAMED branches): a role+name or
- * name lookup that resolves to more than one element FAILS LOUD (Playwright
- * strict mode) rather than silently clicking the first — so a value like
- * "Southview" that matches two clinics stops the run instead of booking the
- * wrong one. Canonicalize fuzzy intent with a `resolve` step BEFORE the `act`
- * so the name is unambiguous. Only the UNNAMED role-only branch is first-match,
- * since "any element of this role" is first-by-definition.
+ * Ambiguity contract: a role+name lookup that resolves to more than one
+ * element FAILS LOUD (Playwright strict mode) rather than silently clicking
+ * the first — so a value like "Southview" that matches two clinics stops the
+ * run instead of booking the wrong one. Canonicalize fuzzy intent with a
+ * `resolve` step BEFORE the `act` so the name is unambiguous.
+ *
+ * The NAME-ONLY branch (no role — e.g. a recorded click on a plain div/td row
+ * like a patient card) is deliberately `.first()`: text matching hits every
+ * nested container of the text (the row AND its inner span), so strict mode
+ * would reject virtually every real role-less target. Playwright returns
+ * matches in DOM order, so `.first()` is the outermost matching element.
+ * The unnamed role-only branch is also first-match, by definition.
+ *
+ * Cached + semantic on the same step is NOT either-or: the cached selector is
+ * the fast deterministic primary, and the semantic descriptor comes back as
+ * `fallback` — runAct retries with it when the cached selector has gone stale
+ * (still deterministic; no model involved).
+ *
+ * Exported for unit tests (see compiler.test.ts); not part of the public API.
  */
-function resolveActLocator(rt: StepRuntime, step: Step): { locator: Locator; desc: string } {
-  const cached = step.locator?.cached;
-  if (cached) return { locator: rt.page.locator(rt.template(cached)), desc: cached };
-
+export function resolveActLocator(
+  rt: StepRuntime,
+  step: Step,
+): { locator: Locator; desc: string; fallback?: Locator } {
   const s = step.locator?.semantic;
   const desc = s?.intent ?? step.label ?? "element";
-  // The accessible name may be an input reference (e.g. "{{specialty}}") — render
-  // it before matching, exactly like act values and api params.
-  const name = s?.name != null ? rt.template(s.name) : undefined;
-  if (s?.role && name) {
-    // Named: strict (no .first()) — ambiguity is a bug, not a coin-flip.
-    return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name, exact: false }), desc };
+  const semantic = s ? buildSemanticLocator(rt, s) : undefined;
+
+  const cached = step.locator?.cached;
+  if (cached) {
+    return { locator: rt.page.locator(rt.template(cached)), desc: cached, fallback: semantic };
   }
-  if (name) {
-    // Named (no role): label first (form fields), else visible text. Strict —
-    // no .first(), matching the role+name branch, so ambiguity fails loud.
-    const byLabel = rt.page.getByLabel(name, { exact: false });
-    return { locator: byLabel.or(rt.page.getByText(name, { exact: false })), desc };
-  }
-  if (s?.role) return { locator: rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first(), desc };
+  if (semantic) return { locator: semantic, desc };
 
   throw new Error(
     `act step "${step.label ?? "?"}" has no cached selector and no usable semantic ` +
       `descriptor (need role and/or name). Intent: "${desc}".`,
   );
+}
+
+/** The semantic (heal-path) locator chain; undefined when neither role nor name exists. */
+function buildSemanticLocator(rt: StepRuntime, s: NonNullable<Step["locator"]>["semantic"]): Locator | undefined {
+  // The accessible name may be an input reference (e.g. "{{specialty}}") — render
+  // it before matching, exactly like act values and api params.
+  const name = s.name != null ? rt.template(s.name) : undefined;
+  if (s.role && name) {
+    // Named: strict (no .first()) — ambiguity is a bug, not a coin-flip.
+    return rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name, exact: false });
+  }
+  if (name) {
+    // Named (no role): label first (form fields), else visible text — with
+    // `.first()`, because a role-less text match nests (row + inner span) and
+    // strict mode would fail loud on elements that are not actually ambiguous.
+    const byLabel = rt.page.getByLabel(name, { exact: false });
+    return byLabel.or(rt.page.getByText(name, { exact: false })).first();
+  }
+  if (s.role) return rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first();
+  return undefined;
 }
 
 function renderTemplate(

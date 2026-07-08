@@ -9,6 +9,7 @@ interface StartBody {
   profile?: string;
   baseUrl?: string;
   port?: string | number;
+  connector?: string;
 }
 
 /**
@@ -23,6 +24,7 @@ export async function POST(req: Request) {
   if (body.profile?.toString().trim()) args.push("--profile", body.profile.toString().trim());
   if (body.baseUrl?.toString().trim()) args.push("--base-url", body.baseUrl.toString().trim());
   if (body.port?.toString().trim()) args.push("--port", body.port.toString().trim());
+  if (body.connector?.toString().trim()) args.push("--connector", body.connector.toString().trim());
   args.push("--json");
 
   const { ok, json } = await runCli(args);

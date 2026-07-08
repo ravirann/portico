@@ -57,7 +57,12 @@ export default function ConnectorsPage() {
                     </div>
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
                       <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>updated {fmtRelative(c.updatedAt)}</span>
-                      <ConnectorActions id={c.id} editKey={c.key} name={c.name} />
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <Link href={`/flows/new?connector=${encodeURIComponent(c.key)}`} className="btn" style={{ padding: "6px 11px", fontSize: 12 }}>
+                          <IconPlus className="ico-sm" /> New flow
+                        </Link>
+                        <ConnectorActions id={c.id} editKey={c.key} name={c.name} />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -84,8 +89,36 @@ export default function ConnectorsPage() {
                         <span className="chip" style={{ color: "var(--ink-3)" }}>seed</span>
                       </div>
                     </div>
-                    <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.flows.length} flow{c.flows.length === 1 ? "" : "s"}</span>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+                      <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.flows.length} flow{c.flows.length === 1 ? "" : "s"}</span>
+                      <Link href={`/flows/new?connector=${encodeURIComponent(c.key)}`} className="btn" style={{ padding: "6px 11px", fontSize: 12 }}>
+                        <IconPlus className="ico-sm" /> New flow
+                      </Link>
+                    </div>
                   </div>
+
+                  {c.instances.length > 0 && (
+                    <div style={{ marginTop: 16 }}>
+                      <div className="eyebrow" style={{ marginBottom: 8 }}>Instances · deployments this connector runs against</div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {c.instances.map((inst) => (
+                          <div
+                            key={inst.name}
+                            title={inst.baseUrl ?? inst.host ?? ""}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 8, padding: "6px 11px",
+                              border: "1px solid var(--line)", borderRadius: "var(--radius-sm)", background: "var(--paper)",
+                            }}
+                          >
+                            <span className="mono" style={{ fontSize: 12.5, color: "var(--ink-2)", fontWeight: 600 }}>{inst.name}</span>
+                            {inst.host && <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>{inst.host}</span>}
+                            {inst.local && <span className="chip" style={{ fontSize: 10.5 }}>local</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {c.flows.length > 0 && (
                     <div style={{ marginTop: 16 }}>
                       {c.flows.map((f) => (

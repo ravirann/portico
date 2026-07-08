@@ -27,6 +27,8 @@ export type {
   FlowRecord,
   FlowSource,
   FlowStatus,
+  RecordingRecord,
+  RecordingStatus,
   RunMode,
   RunStatus,
   RunView,

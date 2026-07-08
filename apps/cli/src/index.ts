@@ -41,6 +41,7 @@ interface CliOpts {
   scope?: string;
   category?: string;
   secret: boolean;
+  allVersions: boolean;
   value?: string;
   pid?: number;
   name?: string;
@@ -49,6 +50,7 @@ interface CliOpts {
   tenant?: string;
   port?: number;
   yamlFile?: string;
+  session?: string;
 }
 
 function parseArgs(argv: string[]) {
@@ -60,7 +62,7 @@ function parseArgs(argv: string[]) {
   let flowPath: string | undefined;
   // Default headless: the engine drives a real browser and most runs are
   // unattended. --headed opts into a visible window (for manual login/HITL).
-  const opts: CliOpts = { headless: true, json: false, live: false, secret: false, inputs: {} };
+  const opts: CliOpts = { headless: true, json: false, live: false, secret: false, allVersions: false, inputs: {} };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--headless") opts.headless = true;
@@ -68,6 +70,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--live") opts.live = true;
     else if (a === "--json") opts.json = true;
     else if (a === "--secret") opts.secret = true;
+    else if (a === "--all-versions") opts.allVersions = true;
     else if (a === "--base-url") opts.baseUrl = rest[++i];
     else if (a === "--instance") opts.instance = rest[++i];
     else if (a === "--profile") opts.profile = rest[++i];
@@ -86,6 +89,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--tenant") opts.tenant = rest[++i];
     else if (a === "--port") opts.port = Number(rest[++i]);
     else if (a === "--yaml-file") opts.yamlFile = rest[++i];
+    else if (a === "--session") opts.session = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -94,6 +98,15 @@ function parseArgs(argv: string[]) {
     }
   }
   return { cmd, flowPath, opts };
+}
+
+/** Write a JSON payload to stdout and exit only after the pipe has flushed.
+ *  process.exit() right after write() truncates payloads bigger than the pipe
+ *  buffer (list-runs with embedded outputs is ~1MB) — the console then fails
+ *  to parse and silently renders empty lists. Call sites MUST `return emit(x)`
+ *  so main() falls through to nothing while the flush callback fires the exit. */
+function emit(value: unknown, code = 0): void {
+  process.stdout.write(JSON.stringify(value), () => process.exit(code));
 }
 
 async function main() {
@@ -111,46 +124,76 @@ async function main() {
   // so native SQLite stays in a plain Node process, out of the Next bundle).
   if (cmd === "list-runs") {
     const store = new Store();
-    process.stdout.write(JSON.stringify(store.listRuns(50)));
+    const runs = store.listRuns(50);
     store.close();
-    process.exit(0);
+    return emit(runs);
   }
   if (cmd === "get-run") {
     const store = new Store();
     const run = flowPath ? store.getRun(flowPath) : undefined;
     store.close();
-    process.stdout.write(JSON.stringify(run ?? null));
-    process.exit(0);
+    return emit(run ?? null);
   }
   if (cmd === "list-flows") {
     const store = new Store();
     const flows = store.listFlows(100).map((f) => ({ ...f, validation: store.latestValidation(f.id) ?? null }));
     store.close();
-    process.stdout.write(JSON.stringify(flows));
-    process.exit(0);
+    return emit(flows);
   }
   if (cmd === "get-flow") {
     const store = new Store();
     const flow = flowPath ? store.getFlow(flowPath) : undefined;
     const out = flow ? { ...flow, validation: store.latestValidation(flow.id) ?? null } : null;
     store.close();
-    process.stdout.write(JSON.stringify(out));
+    return emit(out);
+  }
+  // Delete a flow version (default) or every version of its key (--all-versions).
+  // Validations cascade in the store; the removal is recorded in the audit log.
+  if (cmd === "delete-flow") {
+    if (!flowPath) { console.error("usage: portico delete-flow <flowId> [--all-versions]"); process.exit(2); }
+    const store = new Store();
+    const rec = store.getFlow(flowPath);
+    if (!rec) {
+      store.close();
+      const msg = `no flow with id "${flowPath}"`;
+      if (opts.json) return emit({ error: msg }, 2);
+      console.error(`✗ ${msg}`);
+      process.exit(2);
+    }
+    if (opts.allVersions) {
+      const versions = store.deleteFlowKey(rec.key);
+      store.appendAudit({
+        ts: new Date().toISOString(), actor: "cli", action: "flow.deleted",
+        target: rec.key, detail: { versions },
+      });
+      store.close();
+      if (opts.json) return emit({ key: rec.key, versions, deleted: true });
+      console.log(`✔ deleted "${rec.key}" — all ${versions} version(s)`);
+    } else {
+      store.deleteFlow(rec.id);
+      store.appendAudit({
+        ts: new Date().toISOString(), actor: "cli", action: "flow.deleted",
+        target: rec.key, detail: { id: rec.id },
+      });
+      store.close();
+      if (opts.json) return emit({ id: rec.id, key: rec.key, version: rec.version, deleted: true });
+      console.log(`✔ deleted "${rec.key}" v${rec.version} (id=${rec.id})`);
+    }
     process.exit(0);
   }
   if (cmd === "list-sessions") {
     const store = new Store();
     const sessions = listSessions(store, Date.now());
     store.close();
-    process.stdout.write(JSON.stringify(sessions));
-    process.exit(0);
+    return emit(sessions);
   }
   if (cmd === "close-session") {
     if (!flowPath) { console.error("usage: portico close-session <id>"); process.exit(2); }
     const store = new Store();
     store.closeBrowserSession(flowPath, new Date().toISOString());
     store.close();
-    if (opts.json) process.stdout.write(JSON.stringify({ id: flowPath, closed: true }));
-    else console.log(`✔ closed session ${flowPath}`);
+    if (opts.json) return emit({ id: flowPath, closed: true });
+    console.log(`✔ closed session ${flowPath}`);
     process.exit(0);
   }
 
@@ -160,16 +203,14 @@ async function main() {
     const store = new Store();
     const connectors = store.listConnectors();
     store.close();
-    process.stdout.write(JSON.stringify(connectors));
-    process.exit(0);
+    return emit(connectors);
   }
   if (cmd === "get-connector") {
     if (!flowPath) { console.error("usage: portico get-connector <idOrKey>"); process.exit(2); }
     const store = new Store();
     const connector = store.getConnector(flowPath);
     store.close();
-    process.stdout.write(JSON.stringify(connector ?? null));
-    process.exit(0);
+    return emit(connector ?? null);
   }
   if (cmd === "save-connector") {
     if (!opts.key || !opts.name) {
@@ -193,16 +234,14 @@ async function main() {
     };
     store.saveConnector(record);
     store.close();
-    process.stdout.write(JSON.stringify(record));
-    process.exit(0);
+    return emit(record);
   }
   if (cmd === "delete-connector") {
     if (!flowPath) { console.error("usage: portico delete-connector <id>"); process.exit(2); }
     const store = new Store();
     store.deleteConnector(flowPath);
     store.close();
-    process.stdout.write(JSON.stringify({ id: flowPath, deleted: true }));
-    process.exit(0);
+    return emit({ id: flowPath, deleted: true });
   }
 
   // ---- app config (LLM settings + connector variables) -------------------
@@ -215,8 +254,7 @@ async function main() {
     // flag so the UI can show "configured ✓". Runtime readers use getConfigValue.
     const entries = store.getConfig(scope, category).map((e) => (e.secret ? { ...e, value: "" } : e));
     store.close();
-    process.stdout.write(JSON.stringify(entries));
-    process.exit(0);
+    return emit(entries);
   }
   if (cmd === "config-set") {
     if (!opts.scope || !opts.category || !opts.key || opts.value === undefined) {
@@ -232,8 +270,7 @@ async function main() {
       secret: opts.secret,
     });
     store.close();
-    process.stdout.write(JSON.stringify({ ok: true }));
-    process.exit(0);
+    return emit({ ok: true });
   }
   if (cmd === "config-delete") {
     if (!opts.scope || !opts.category || !opts.key) {
@@ -243,8 +280,8 @@ async function main() {
     const store = new Store();
     store.deleteConfig(opts.scope, opts.category as "llm" | "variable", opts.key);
     store.close();
-    if (opts.json) process.stdout.write(JSON.stringify({ ok: true }));
-    else console.log(`✔ deleted ${opts.scope}/${opts.category}/${opts.key}`);
+    if (opts.json) return emit({ ok: true });
+    console.log(`✔ deleted ${opts.scope}/${opts.category}/${opts.key}`);
     process.exit(0);
   }
 
@@ -256,6 +293,7 @@ async function main() {
     const scriptArgs = ["--port", String(port), "--tenant", tenant];
     if (opts.baseUrl) scriptArgs.push("--base-url", opts.baseUrl);
     if (opts.profile) scriptArgs.push("--profile", opts.profile);
+    if (opts.connector) scriptArgs.push("--connector", opts.connector);
 
     const child = spawn(process.execPath, ["scripts/serve-browser.mjs", ...scriptArgs], {
       detached: true,
@@ -277,10 +315,10 @@ async function main() {
       cdpEndpoint,
       startedAt: new Date().toISOString(),
       pid: child.pid,
+      connector: opts.connector,
     });
     store.close();
-    process.stdout.write(JSON.stringify({ id, pid: child.pid, cdpEndpoint }));
-    process.exit(0);
+    return emit({ id, pid: child.pid, cdpEndpoint, connector: opts.connector });
   }
   if (cmd === "session-kill") {
     if (!flowPath) { console.error("usage: portico session-kill <id>"); process.exit(2); }
@@ -295,7 +333,156 @@ async function main() {
     }
     store.closeBrowserSession(flowPath, new Date().toISOString());
     store.close();
-    process.stdout.write(JSON.stringify({ id: flowPath, killed: true }));
+    return emit({ id: flowPath, killed: true });
+  }
+
+  // ---- record-by-demonstration -----------------------------------------
+  // record-start attaches a detached recorder to an ACTIVE CDP session; the
+  // user demonstrates in that already-logged-in browser; record-stop kills the
+  // recorder, then compiles the capture into a draft flow (source "recorded").
+
+  if (cmd === "list-recordings") {
+    const store = new Store();
+    const recs = store.listRecordings(opts.session);
+    store.close();
+    return emit(recs);
+  }
+
+  if (cmd === "get-recording") {
+    if (!flowPath) { console.error("usage: portico get-recording <recordingId>"); process.exit(2); }
+    const store = new Store();
+    const rec = store.getRecording(flowPath);
+    store.close();
+    if (!rec) {
+      return emit({ error: `no recording with id "${flowPath}"` }, 2);
+    }
+    // Live capture stats straight from the recorder's incrementally-flushed
+    // recording.json: `attached` flips true once the recorder has written its
+    // first flush, and the counts grow as the user demonstrates. The console
+    // polls this for feedback while a capture is running.
+    let attached = false;
+    let liveClicks = 0;
+    let liveRequests = 0;
+    try {
+      const live = JSON.parse(readFileSync(rec.path, "utf8")) as Recording;
+      attached = true;
+      liveClicks = live.clicks?.length ?? 0;
+      liveRequests = live.network?.length ?? 0;
+    } catch {
+      /* recorder hasn't attached/flushed yet — report attached: false */
+    }
+    return emit({ ...rec, attached, liveClicks, liveRequests });
+  }
+
+  if (cmd === "record-start") {
+    if (!opts.session) {
+      console.error("usage: portico record-start --session <sessionId> [--key KEY] [--connector C] [--base-url URL]");
+      process.exit(2);
+    }
+    const store = new Store();
+    const session = store.getBrowserSession(opts.session);
+    if (!session || session.status !== "active" || !session.cdpEndpoint) {
+      store.close();
+      const msg = `session "${opts.session}" is not an active CDP session — start one first`;
+      if (opts.json) return emit({ error: msg }, 1);
+      console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+    // The session row can outlive its browser (user closed the window, machine
+    // rebooted). Probe the CDP endpoint BEFORE spawning a recorder that would
+    // otherwise attach to nothing and record forever with zero feedback.
+    try {
+      await fetch(session.cdpEndpoint + "/json/version", { signal: AbortSignal.timeout(2500) });
+    } catch {
+      store.closeBrowserSession(opts.session, new Date().toISOString());
+      store.close();
+      const msg = "session browser is unreachable — it may have been closed. Start a new session and try again.";
+      if (opts.json) return emit({ error: msg }, 1);
+      console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+    // One recorder per session: a second one would fight over the same click
+    // buffer and orphan the first recording's row.
+    const inProgress = store.listRecordings(opts.session).find((r) => r.status === "recording");
+    if (inProgress) {
+      store.close();
+      const msg = "a recording is already in progress on this session";
+      if (opts.json) return emit({ error: msg, recordingId: inProgress.id }, 1);
+      console.error(`✗ ${msg} (${inProgress.id})`);
+      process.exit(1);
+    }
+    const recId = "rec_" + Date.now().toString(16) + Math.random().toString(16).slice(2, 6);
+    const flowKey = opts.key ?? "recorded-flow";
+    const path = `.libretto/recordings/${recId}/recording.json`;
+    const scriptArgs = ["scripts/record-attach.mjs", "--cdp", session.cdpEndpoint, "--name", recId];
+    if (opts.baseUrl) scriptArgs.push("--base-url", opts.baseUrl);
+
+    const child = spawn(process.execPath, scriptArgs, { detached: true, stdio: "ignore" });
+    child.unref();
+
+    store.createRecording({
+      id: recId,
+      sessionId: opts.session,
+      connector: opts.connector,
+      flowKey,
+      baseUrl: opts.baseUrl,
+      path,
+      pid: child.pid,
+      startedAt: new Date().toISOString(),
+    });
+    store.close();
+    if (opts.json) return emit({ recordingId: recId, sessionId: opts.session, pid: child.pid, status: "recording" });
+    console.log(`● recording ${recId} — demonstrate in the session's browser, then: record-stop ${recId}`);
+    process.exit(0);
+  }
+
+  if (cmd === "record-stop") {
+    if (!flowPath) { console.error("usage: portico record-stop <recordingId> [--intercept KEYWORD]"); process.exit(2); }
+    const store = new Store();
+    const rec = store.getRecording(flowPath);
+    if (!rec) { store.close(); console.error(`no recording with id "${flowPath}"`); process.exit(2); }
+
+    // Signal the detached recorder to finalize, then wait for it to exit so its
+    // last flush of recording.json has landed before we read it.
+    if (rec.pid) {
+      try { process.kill(rec.pid, "SIGTERM"); } catch { /* already gone */ }
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        try { process.kill(rec.pid, 0); } catch { break; } // throws once the pid is gone
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+
+    let recording: Recording;
+    try {
+      recording = JSON.parse(readFileSync(rec.path, "utf8")) as Recording;
+    } catch (e) {
+      const msg = `no capture written (${e instanceof Error ? e.message : e}) — did the recorder attach?`;
+      store.updateRecording(rec.id, { status: "error", error: msg, pid: null });
+      store.close();
+      if (opts.json) return emit({ recordingId: rec.id, error: msg }, 1);
+      console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+
+    const flow = compileRecording(recording, { key: rec.flowKey, interceptKeyword: opts.intercept });
+    const version = (store.listFlowVersions(rec.flowKey)[0]?.version ?? 0) + 1;
+    // Keep the YAML body's `version` in sync with the assigned draft version
+    // (compileRecording always emits version: 1).
+    flow.version = version;
+    const yamlStr = stringifyYaml(flow);
+    const draftId = `flow_${rec.flowKey}_v${version}_${Math.random().toString(16).slice(2, 8)}`;
+    store.saveFlow({
+      id: draftId, key: rec.flowKey, version, yaml: yamlStr, status: "draft", source: "recorded",
+      connector: rec.connector, createdAt: new Date().toISOString(),
+    });
+    const clicks = recording.clicks?.length ?? 0;
+    const requests = recording.network?.length ?? 0;
+    store.updateRecording(rec.id, { status: "compiled", draftFlowId: draftId, clicks, requests, pid: null });
+    store.close();
+
+    if (opts.json) return emit({ recordingId: rec.id, draftId, key: rec.flowKey, version, steps: flow.steps.length, clicks, requests });
+    console.log(`✔ compiled recording ${rec.id} → draft "${rec.flowKey}" v${version} (${flow.steps.length} steps, ${clicks} clicks, ${requests} requests)`);
     process.exit(0);
   }
 
@@ -316,21 +503,24 @@ async function main() {
     if (!heal) {
       store.close();
       const msg = "no model configured — set PORTICO_HEAL_PROVIDER + PORTICO_HEAL_API_KEY to refine";
-      if (opts.json) process.stdout.write(JSON.stringify({ error: msg }));
-      else console.error(`✗ ${msg}`);
+      if (opts.json) return emit({ error: msg }, 1);
+      console.error(`✗ ${msg}`);
       process.exit(1);
     }
     const emptyRec: Recording = { baseUrl: "", clicks: [], network: [] };
     const refined = await refineFlow(draft, emptyRec, heal.languageModel);
     const version = (store.listFlowVersions(rec.key)[0]?.version ?? 0) + 1;
+    // Keep the YAML body's `version` in sync with the assigned draft version
+    // (refineFlow carries over the source draft's stale version).
+    refined.version = version;
     const id = `flow_${rec.key}_v${version}_${Math.random().toString(16).slice(2, 8)}`;
     store.saveFlow({
       id, key: rec.key, version, yaml: stringifyYaml(refined), status: "draft", source: "llm",
       connector: rec.connector, createdAt: new Date().toISOString(),
     });
     store.close();
-    if (opts.json) process.stdout.write(JSON.stringify({ id, key: rec.key, version, source: "llm", steps: refined.steps.length }));
-    else console.log(`✔ refined "${rec.key}" → new draft v${version} (id=${id}, ${refined.steps.length} steps)`);
+    if (opts.json) return emit({ id, key: rec.key, version, source: "llm", steps: refined.steps.length });
+    console.log(`✔ refined "${rec.key}" → new draft v${version} (id=${id}, ${refined.steps.length} steps)`);
     process.exit(0);
   }
 
@@ -340,29 +530,32 @@ async function main() {
       console.error("usage: portico save-flow --key <key> --yaml-file <path> [--connector C]");
       process.exit(2);
     }
-    let yamlText: string;
+    let parsed: Flow;
     try {
-      yamlText = readFileSync(opts.yamlFile, "utf8");
-      const parsed = parseYaml(yamlText) as Flow;
+      const yamlText = readFileSync(opts.yamlFile, "utf8");
+      parsed = parseYaml(yamlText) as Flow;
       if (!parsed || typeof parsed.key !== "string" || !Array.isArray(parsed.steps)) {
         throw new Error("a flow needs a string `key` and a `steps` array");
       }
     } catch (e) {
       const msg = `yaml invalid: ${e instanceof Error ? e.message : e}`;
-      if (opts.json) process.stdout.write(JSON.stringify({ error: msg }));
-      else console.error(`✗ ${msg}`);
+      if (opts.json) return emit({ error: msg }, 1);
+      console.error(`✗ ${msg}`);
       process.exit(1);
     }
     const store = new Store();
     const version = (store.listFlowVersions(opts.key)[0]?.version ?? 0) + 1;
+    // Keep the YAML body's `version` in sync with the assigned draft version —
+    // otherwise a v2 row's YAML still claims the version it was copied from.
+    parsed.version = version;
     const id = `flow_${opts.key}_v${version}_${Math.random().toString(16).slice(2, 8)}`;
     store.saveFlow({
-      id, key: opts.key, version, yaml: yamlText, status: "draft", source: "manual",
+      id, key: opts.key, version, yaml: stringifyYaml(parsed), status: "draft", source: "manual",
       connector: opts.connector, createdAt: new Date().toISOString(),
     });
     store.close();
-    if (opts.json) process.stdout.write(JSON.stringify({ id, key: opts.key, version }));
-    else console.log(`✔ saved "${opts.key}" v${version} (id=${id})`);
+    if (opts.json) return emit({ id, key: opts.key, version });
+    console.log(`✔ saved "${opts.key}" v${version} (id=${id})`);
     process.exit(0);
   }
 
@@ -375,14 +568,14 @@ async function main() {
     if (!v || !v.passed) {
       store.close();
       const msg = `cannot confirm "${rec.key}" v${rec.version} — ${v ? "last validation FAILED" : "not validated yet"}. Run:  validate ${rec.id}`;
-      if (opts.json) process.stdout.write(JSON.stringify({ flowId: rec.id, confirmed: false, error: msg }));
-      else console.error(`✗ ${msg}`);
+      if (opts.json) return emit({ flowId: rec.id, confirmed: false, error: msg }, 1);
+      console.error(`✗ ${msg}`);
       process.exit(1);
     }
     store.confirmFlow(rec.id);
     store.close();
-    if (opts.json) process.stdout.write(JSON.stringify({ flowId: rec.id, key: rec.key, version: rec.version, confirmed: true }));
-    else console.log(`✔ confirmed "${rec.key}" v${rec.version} — validated and live-eligible.`);
+    if (opts.json) return emit({ flowId: rec.id, key: rec.key, version: rec.version, confirmed: true });
+    console.log(`✔ confirmed "${rec.key}" v${rec.version} — validated and live-eligible.`);
     process.exit(0);
   }
 
@@ -397,10 +590,13 @@ async function main() {
     const rec = JSON.parse(readFileSync(flowPath, "utf8")) as Recording;
     const key = opts.key ?? "recorded-flow";
     const flow = compileRecording(rec, { key, interceptKeyword: opts.intercept });
-    const yamlStr = stringifyYaml(flow);
 
     const store = new Store();
     const version = (store.listFlowVersions(key)[0]?.version ?? 0) + 1;
+    // Keep the YAML body's `version` in sync with the assigned draft version
+    // (compileRecording always emits version: 1).
+    flow.version = version;
+    const yamlStr = stringifyYaml(flow);
     const id = `flow_${key}_v${version}_${Math.random().toString(16).slice(2, 8)}`;
     store.saveFlow({
       id, key, version, yaml: yamlStr, status: "draft", source: "recorded",
@@ -412,24 +608,22 @@ async function main() {
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, yamlStr);
 
-    if (opts.json) {
-      process.stdout.write(JSON.stringify({ id, key, version, status: "draft", steps: flow.steps.length, out: outPath }));
-    } else {
-      console.log(`✔ compiled recording → draft flow "${key}" v${version} (${flow.steps.length} steps)`);
-      console.log(`  persisted draft id=${id}`);
-      console.log(`  wrote ${outPath}\n`);
-      console.log(yamlStr);
-      console.log("Review it, then validate + confirm before it goes live.");
-    }
+    if (opts.json) return emit({ id, key, version, status: "draft", steps: flow.steps.length, out: outPath });
+    console.log(`✔ compiled recording → draft flow "${key}" v${version} (${flow.steps.length} steps)`);
+    console.log(`  persisted draft id=${id}`);
+    console.log(`  wrote ${outPath}\n`);
+    console.log(yamlStr);
+    console.log("Review it, then validate + confirm before it goes live.");
     process.exit(0);
   }
 
   if ((cmd !== "run" && cmd !== "validate") || !flowPath) {
     console.error(
       "usage: portico <run <flow.yaml> | validate <flow-id> | confirm <flow-id> | compile <recording.json> | " +
-        "list-flows | get-flow <id> | list-runs | get-run <id> | list-sessions | close-session <id> | " +
+        "list-flows | get-flow <id> | delete-flow <flowId> [--all-versions] | list-runs | get-run <id> | list-sessions | close-session <id> | " +
         "list-connectors | get-connector <idOrKey> | save-connector | delete-connector <id> | " +
-        "config-get | config-set | session-start | session-kill <id>>",
+        "config-get | config-set | session-start | session-kill <id> | " +
+        "record-start --session <id> | record-stop <recId> | get-recording <recId> | list-recordings>",
     );
     process.exit(2);
   }
@@ -438,6 +632,9 @@ async function main() {
   // <flow.yaml>` runs a flow file. Both share the execution pipeline below.
   let flowId: string | undefined;
   let flow: Flow;
+  // The connector KEY this run belongs to (for scoping the console). validate
+  // inherits it from the stored draft; run takes --connector or the flow's own.
+  let connectorKey: string | undefined;
   if (cmd === "validate") {
     const s0 = new Store();
     const rec = s0.getFlow(flowPath);
@@ -445,10 +642,13 @@ async function main() {
     if (!rec) { console.error(`no flow with id "${flowPath}"`); process.exit(2); }
     flowId = rec.id;
     flow = parseYaml(rec.yaml) as Flow;
+    connectorKey = rec.connector ?? opts.connector;
   } else {
     flow = parseYaml(readFileSync(flowPath, "utf8")) as Flow;
+    connectorKey = opts.connector ?? (flow as unknown as { connector?: string }).connector;
   }
   const instance = opts.instance ? (parseYaml(readFileSync(opts.instance, "utf8")) as Record<string, any>) : {};
+  const instanceName = (instance.instance as string | undefined) ?? undefined;
 
   const baseUrl: string = opts.baseUrl ?? instance.base_url ?? "";
   const host = instance.host ?? (baseUrl ? new URL(baseUrl).host : "");
@@ -471,7 +671,7 @@ async function main() {
   // which resolveHealModel reads inside the engine.
   try {
     const cfgStore = new Store();
-    const scope = opts.connector ?? (instance.instance as string | undefined) ?? "";
+    const scope = connectorKey ?? instanceName ?? "";
     const pick = (k: string) => cfgStore.getConfigValue(scope, "llm", k) || cfgStore.getConfigValue("global", "llm", k);
     const hp = pick("provider"), hm = pick("model"), hk = pick("api_key");
     cfgStore.close();
@@ -523,7 +723,8 @@ async function main() {
   try {
     const store = new Store();
     store.createRun({
-      id: runId, connector: instance.instance ?? "cli", flow: flow.key, engine: engine.name,
+      id: runId, connector: connectorKey ?? instanceName ?? "cli", instance: instanceName,
+      flow: flow.key, engine: engine.name,
       tier: "dom", status: result.status, mode,
       startedAt: new Date(startedAt).toISOString(), durationMs,
       steps, output: result.output, failure: result.failure, rrwebRef: result.rrwebRef,
@@ -550,19 +751,16 @@ async function main() {
       });
       store.close();
     } catch { /* best-effort */ }
-    if (opts.json) {
-      process.stdout.write(JSON.stringify({ flowId, passed: verdict.passed, reasons: verdict.reasons, runId }));
-    } else {
-      console.log(`\n${verdict.passed ? "✔ VALIDATION PASSED" : "✗ VALIDATION FAILED"}`);
-      for (const r of verdict.reasons) console.log(`  - ${r}`);
-      if (verdict.passed) console.log(`  → confirm it:  node --import tsx apps/cli/src/index.ts confirm ${flowId}`);
-    }
+    if (opts.json) return emit({ flowId, passed: verdict.passed, reasons: verdict.reasons, runId }, verdict.passed ? 0 : 1);
+    console.log(`\n${verdict.passed ? "✔ VALIDATION PASSED" : "✗ VALIDATION FAILED"}`);
+    for (const r of verdict.reasons) console.log(`  - ${r}`);
+    if (verdict.passed) console.log(`  → confirm it:  node --import tsx apps/cli/src/index.ts confirm ${flowId}`);
     process.exit(verdict.passed ? 0 : 1);
   }
 
   if (opts.json) {
     // Machine-readable run record (consumed by the console's run API).
-    process.stdout.write(JSON.stringify({
+    return emit({
       id: runId,
       flow: flow.key,
       engine: engine.name,
@@ -574,8 +772,7 @@ async function main() {
       authProfile: result.authProfile,
       failure: result.failure,
       steps,
-    }));
-    process.exit(0);
+    });
   }
 
   log(`\n${result.status.toUpperCase()}`);

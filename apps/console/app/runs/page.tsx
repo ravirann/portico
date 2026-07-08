@@ -1,8 +1,8 @@
-import Link from "next/link";
 import { cookies } from "next/headers";
 import { listRuns } from "@/lib/store";
 import { fmtDuration, fmtRelative, tierLabel } from "@/lib/format";
 import { RunButton } from "@/components/run-button";
+import { RowLink } from "@/components/row-link";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +33,14 @@ export default async function RunsPage() {
           </p>
         </div>
 
+        {runs.length === 0 ? (
+          <div className="panel empty rise rise-2">
+            <div className="empty-t">No runs{scoped ? ` for ${scoped}` : ""}</div>
+            {scoped
+              ? "This connector has no runs yet — validate or run one of its flows, or switch to All connectors."
+              : "Validate or run a flow to see executions here."}
+          </div>
+        ) : (
         <div className="panel rise rise-2">
           <table className="table">
             <thead>
@@ -42,8 +50,8 @@ export default async function RunsPage() {
             </thead>
             <tbody>
               {runs.map((r) => (
-                <tr key={r.id} className="rowlink">
-                  <td className="flowcell"><Link href={`/runs/${r.id}`}>{r.flow}<small>{r.connector} · {r.id}</small></Link></td>
+                <RowLink key={r.id} href={`/runs/${r.id}`} className="rowlink">
+                  <td className="flowcell">{r.flow}<small>{r.connector}{r.instance ? ` · ${r.instance}` : ""} · {r.id}</small></td>
                   <td style={{ color: "var(--ink-2)" }}>{r.engine}</td>
                   <td><span className="chip">{tierLabel[r.tier]}</span></td>
                   <td style={{ color: "var(--ink-3)", fontSize: 12.5 }}>{r.mode}</td>
@@ -51,11 +59,12 @@ export default async function RunsPage() {
                   <td className="tnum">{r.steps.length}</td>
                   <td className="tnum">{fmtDuration(r.durationMs)}</td>
                   <td style={{ textAlign: "right", color: "var(--ink-3)" }}>{fmtRelative(r.startedAt)}</td>
-                </tr>
+                </RowLink>
               ))}
             </tbody>
           </table>
         </div>
+        )}
       </div>
     </>
   );

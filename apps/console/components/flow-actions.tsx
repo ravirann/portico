@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { FlowDeleteButton } from "./flow-delete-button";
 
 type Action = "refine" | "validate" | "confirm";
 type Note = { kind: "ok" | "error"; text: string } | null;
@@ -12,6 +13,22 @@ export function FlowActions({ flowId }: { flowId: string }) {
   const router = useRouter();
   const [busy, setBusy] = useState<Action | null>(null);
   const [note, setNote] = useState<Note>(null);
+  // The page only hands us the id; resolve the human-readable key for the
+  // delete confirm label via the flow read API (falls back to the id).
+  const [flowKey, setFlowKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/flows/${flowId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((f: { key?: string } | null) => {
+        if (!cancelled && typeof f?.key === "string") setFlowKey(f.key);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [flowId]);
 
   async function run(action: Action) {
     setBusy(action);
@@ -58,6 +75,7 @@ export function FlowActions({ flowId }: { flowId: string }) {
         <button className="btn" onClick={() => run("refine")} disabled={busy !== null}>
           {busy === "refine" ? "Refining…" : "Refine"}
         </button>
+        <FlowDeleteButton flowId={flowId} flowKey={flowKey ?? flowId} onDone="detail" />
       </div>
 
       {note && (

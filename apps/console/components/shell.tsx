@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { IconConnectors, IconDash, IconFlows, IconRuns, IconSessions, IconSettings } from "./icons";
+import { IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings } from "./icons";
 import { ConnectorSwitcher } from "./connector-switcher";
 
 function ThemeToggle() {
@@ -52,6 +52,7 @@ const NAV = [
   { href: "/sessions", label: "Sessions", Icon: IconSessions },
   { href: "/connectors", label: "Connectors", Icon: IconConnectors },
   { href: "/settings", label: "Settings", Icon: IconSettings },
+  { href: "/help", label: "Help", Icon: IconHelp },
 ];
 
 export function Shell({ children }: { children: React.ReactNode }) {
@@ -62,11 +63,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <Link href="/" className="brand">
-          <span className="brand-mark" />
-          <span className="brand-name">
-            Portico<span className="dot">.</span>
-          </span>
+        <Link href="/" className="brand" aria-label="Portico">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img className="brand-logo light" src="/brand/portico-logo.svg" alt="Portico" />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img className="brand-logo dark" src="/brand/portico-logo-dark.svg" alt="Portico" />
         </Link>
 
         <ConnectorSwitcher />

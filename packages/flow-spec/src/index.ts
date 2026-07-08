@@ -32,6 +32,14 @@ export interface Locator {
     name?: string; // accessible name / visible text
     near?: string; // nearby anchoring text
     intent: string; // authoring intent, e.g. "the Schedule an appointment button"
+    /**
+     * Machine-readable hint that `name` looks like a demonstration-specific
+     * literal (a patient name, phone/claim number, email) rather than stable UI
+     * vocabulary. The value is a suggested input name (e.g. "prasanna_kumar_d_e")
+     * that review tooling can offer to parameterize into `{{<hint>}}`. Purely
+     * advisory — replay ignores it and still uses the literal `name`.
+     */
+    param_hint?: string;
   };
 }
 

@@ -84,18 +84,37 @@ test("login inputs and the final slot-time click are filtered out of the acts", 
   assert.equal(acts.length, 4);
 });
 
-test("first act is trimmed to its leading phrase, with the full label preserved as intent", () => {
+test("first act keeps the FULL label as name (whitespace-collapsed), with the raw label as intent", () => {
   const flow = compileRecording(recording);
   const acts = flow.steps.filter((s) => s.type === "act");
   const first = acts[0]!;
-  assert.equal(first.locator!.semantic.name, "Primary Care");
+  // The name must never be truncated to a leading phrase — a shortened name
+  // (e.g. "Prasanna" for "Prasanna Kumar D E") makes replay match the wrong row.
+  assert.equal(first.locator!.semantic.name, "Primary Care Includes adult, pediatric, and geriatric care");
   assert.equal(
     first.locator!.semantic.intent,
     "Primary Care  Includes adult, pediatric, and geriatric care",
   );
 });
 
-test("visit-reason act name starts with the full reason phrase, cut before ' - Primary Care'", () => {
+test("a multi-word label is preserved in full, capped at ~80 chars", () => {
+  const longTail = "x".repeat(100);
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [
+      { tag: "DIV", text: "Prasanna\n   Kumar  D E" }, // whitespace-mangled row label
+      { tag: "BUTTON", text: `Details ${longTail}` },
+    ],
+    network: [],
+  };
+  const flow = compileRecording(rec);
+  const acts = flow.steps.filter((s) => s.type === "act");
+  assert.equal(acts[0]!.locator!.semantic.name, "Prasanna Kumar D E"); // full name, collapsed
+  assert.ok(acts[1]!.locator!.semantic.name!.length <= 80);
+  assert.ok(acts[1]!.locator!.semantic.name!.startsWith("Details x"));
+});
+
+test("visit-reason act name starts with the full reason phrase", () => {
   const flow = compileRecording(recording);
   const acts = flow.steps.filter((s) => s.type === "act");
   const reason = acts[1]!;
@@ -171,4 +190,153 @@ test("a recording with no JSON data endpoint compiles to navigate + acts only", 
   const types = flow.steps.map((s: Step) => s.type);
 
   assert.deepEqual(types, ["navigate", "act"]);
+});
+
+// ---------------------------------------------------------------------------
+// Claims-lookup regression: the broken pulse.clinikk.com artifact
+// ---------------------------------------------------------------------------
+
+const claimsRecording: Recording = {
+  baseUrl: "https://pulse.example.com",
+  clicks: [
+    { tag: "BUTTON", role: "button", text: "Claims" },
+    { tag: "DIV", text: "Prasanna  Kumar D E" }, // role-less row, double-space label
+    { tag: "BUTTON", text: "Details" },
+    { tag: "BUTTON", role: "button", text: "8183054609" },
+  ],
+  network: [
+    {
+      method: "GET",
+      url: "https://pulse.example.com/api/proxy/v1/claims",
+      resourceType: "xhr",
+      status: 200,
+      contentType: "application/json",
+      responseBodyPreview: '{"claims":[{"id":"C-1","member":"Prasanna Kumar D E"}]}',
+      responseBodyBytes: 400,
+    },
+  ],
+};
+
+test("claims recording compiles to navigate/intercept/act×4/wait with the claims endpoint", () => {
+  const flow = compileRecording(claimsRecording, { key: "claims-read" });
+  assert.deepEqual(
+    flow.steps.map((s) => s.type),
+    ["navigate", "intercept", "act", "act", "act", "act", "wait"],
+  );
+  const intercept = flow.steps.find((s) => s.type === "intercept")!;
+  assert.equal(intercept.intercept!.url_contains, "/api/proxy/v1/claims");
+  assert.equal(intercept.intercept!.as, "data_raw");
+});
+
+test("a role-less row click keeps its FULL name (not the first word)", () => {
+  const flow = compileRecording(claimsRecording);
+  const acts = flow.steps.filter((s) => s.type === "act");
+  const row = acts[1]!;
+  assert.equal(row.locator!.semantic.name, "Prasanna Kumar D E");
+  assert.equal(row.locator!.semantic.intent, "Prasanna  Kumar D E");
+  assert.equal(row.locator!.semantic.role, undefined);
+});
+
+test("instance-specific literals get a param_hint; UI vocabulary does not", () => {
+  const flow = compileRecording(claimsRecording);
+  const acts = flow.steps.filter((s) => s.type === "act");
+  const hints = acts.map((a) => a.locator!.semantic.param_hint);
+  assert.equal(hints[0], undefined); // "Claims" — nav vocabulary
+  assert.equal(hints[1], "prasanna_kumar_d_e"); // person name → suggested input
+  assert.equal(hints[2], undefined); // "Details" — nav vocabulary
+  assert.equal(hints[3], "phone_number"); // 10-digit literal
+});
+
+test("param_hint slugs are template-safe (underscores, [\\w] only)", () => {
+  const flow = compileRecording(claimsRecording);
+  const acts = flow.steps.filter((s) => s.type === "act");
+  for (const hint of acts.map((a) => a.locator!.semantic.param_hint)) {
+    if (hint) assert.match(hint, /^[a-z0-9_]+$/); // must survive the {{[\w.]+}} template grammar
+  }
+});
+
+test("email-shaped and long-numeric literals are flagged; capitalized nav phrases are not", () => {
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [
+      { tag: "BUTTON", text: "someone@example.com" },
+      { tag: "BUTTON", text: "123456789012345678" }, // 18 digits — reference, not phone
+      { tag: "BUTTON", text: "New Patient" }, // all stoplist words → not flagged
+      { tag: "BUTTON", text: "Search Claims" }, // all stoplist words → not flagged
+    ],
+    network: [],
+  };
+  const flow = compileRecording(rec);
+  const acts = flow.steps.filter((s) => s.type === "act");
+  assert.equal(acts[0]!.locator!.semantic.param_hint, "email");
+  assert.equal(acts[1]!.locator!.semantic.param_hint, "reference_number");
+  assert.equal(acts[2]!.locator!.semantic.param_hint, undefined);
+  assert.equal(acts[3]!.locator!.semantic.param_hint, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Tiered locator synthesis: structural hooks (testid / stable id) + semantics
+// ---------------------------------------------------------------------------
+
+test("a click with data-testid emits a DUAL locator: cached testid + full semantic", () => {
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [{ tag: "BUTTON", text: "Claims", testid: "claims-tab" }],
+    network: [],
+  };
+  const act = compileRecording(rec).steps.find((s) => s.type === "act")!;
+  assert.equal(act.locator!.cached, "[data-testid='claims-tab']");
+  assert.equal(act.locator!.semantic.role, "button");
+  assert.equal(act.locator!.semantic.name, "Claims"); // semantic kept for self-heal
+});
+
+test("a stable human-named id becomes a cached #id alongside the semantic locator", () => {
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [{ tag: "BUTTON", text: "Details", id: "claims-details" }],
+    network: [],
+  };
+  const act = compileRecording(rec).steps.find((s) => s.type === "act")!;
+  assert.equal(act.locator!.cached, "#claims-details");
+  assert.equal(act.locator!.semantic.name, "Details");
+});
+
+test("auto-generated ids are never cached (framework prefixes, digit runs, hex chunks)", () => {
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [
+      { tag: "BUTTON", text: "Details", id: "radix-:r3:" },
+      { tag: "BUTTON", text: "Details", id: "btn-84f2a9c1" },
+      { tag: "BUTTON", text: "Details", id: "tab-20260708" },
+    ],
+    network: [],
+  };
+  for (const act of compileRecording(rec).steps.filter((s) => s.type === "act")) {
+    assert.equal(act.locator!.cached, undefined);
+    assert.equal(act.locator!.semantic.name, "Details"); // semantic path instead
+  }
+});
+
+test("instance-specific label + SHARED structural hook → parameterizable semantic wins, hook dropped", () => {
+  // data-testid="patient-row" is on EVERY row — caching it would deterministically
+  // click the wrong patient. The (parameterizable) text is the discriminator.
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [{ tag: "DIV", text: "Prasanna Kumar D E", testid: "patient-row" }],
+    network: [],
+  };
+  const act = compileRecording(rec).steps.find((s) => s.type === "act")!;
+  assert.equal(act.locator!.cached, undefined);
+  assert.equal(act.locator!.semantic.name, "Prasanna Kumar D E");
+  assert.equal(act.locator!.semantic.param_hint, "prasanna_kumar_d_e");
+});
+
+test("a label-less control still prefers testid over id for its cached selector", () => {
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [{ tag: "INPUT", testid: "continue-btn", id: "radix-:r9:" }],
+    network: [],
+  };
+  const act = compileRecording(rec).steps.find((s) => s.type === "act")!;
+  assert.equal(act.locator!.cached, "[data-testid='continue-btn']");
 });

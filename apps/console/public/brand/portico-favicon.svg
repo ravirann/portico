@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Portico">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A8FC4"></stop>
+      <stop offset="1" stop-color="#2C7CB0"></stop>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="114" fill="url(#tile)"></rect>
+  <g fill="#ffffff">
+    <polygon points="256,110 358,198 154,198"></polygon>
+    <rect x="150" y="204" width="212" height="24" rx="7"></rect>
+    <rect x="184" y="238" width="32" height="132" rx="7"></rect>
+    <rect x="240" y="238" width="32" height="132" rx="7"></rect>
+    <rect x="296" y="238" width="32" height="132" rx="7"></rect>
+    <rect x="146" y="378" width="220" height="34" rx="11"></rect>
+  </g>
+</svg>

@@ -286,6 +286,52 @@ test("confirmFlow flips status; latestConfirmedFlow ignores drafts and picks the
   }
 });
 
+test("deleteFlow removes one version (and its validations) but leaves siblings", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({ id: "del-1", key: "del-key", version: 1, yaml: "v1", status: "draft", source: "manual", createdAt: "2026-07-08T10:00:00.000Z" });
+    store.saveFlow({ id: "del-2", key: "del-key", version: 2, yaml: "v2", status: "draft", source: "llm", createdAt: "2026-07-08T11:00:00.000Z" });
+    store.recordValidation({ id: "del-v1", flowId: "del-1", passed: true, reasons: [], createdAt: "2026-07-08T10:30:00.000Z" });
+
+    store.deleteFlow("del-1");
+    assert.equal(store.getFlow("del-1"), undefined);
+    assert.equal(store.latestValidation("del-1"), undefined);
+    // sibling version untouched
+    assert.equal(store.getFlow("del-2")?.version, 2);
+    assert.deepEqual(store.listFlowVersions("del-key").map((f) => f.id), ["del-2"]);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("deleteFlowKey removes all versions and cascades validations; returns count", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({ id: "dk-1", key: "dk-key", version: 1, yaml: "v1", status: "confirmed", source: "manual", createdAt: "2026-07-08T10:00:00.000Z" });
+    store.saveFlow({ id: "dk-2", key: "dk-key", version: 2, yaml: "v2", status: "draft", source: "llm", createdAt: "2026-07-08T11:00:00.000Z" });
+    store.saveFlow({ id: "other-1", key: "other-key", version: 1, yaml: "v1", status: "draft", source: "manual", createdAt: "2026-07-08T10:00:00.000Z" });
+    store.recordValidation({ id: "dk-v1", flowId: "dk-1", passed: false, reasons: ["nope"], createdAt: "2026-07-08T10:30:00.000Z" });
+    store.recordValidation({ id: "dk-v2", flowId: "dk-2", passed: true, reasons: [], createdAt: "2026-07-08T11:30:00.000Z" });
+
+    const deleted = store.deleteFlowKey("dk-key");
+    assert.equal(deleted, 2);
+    assert.equal(store.getFlow("dk-1"), undefined);
+    assert.equal(store.getFlow("dk-2"), undefined);
+    assert.equal(store.listFlowVersions("dk-key").length, 0);
+    // validations cascaded
+    assert.equal(store.latestValidation("dk-1"), undefined);
+    assert.equal(store.latestValidation("dk-2"), undefined);
+    // unrelated key untouched
+    assert.equal(store.getFlow("other-1")?.key, "other-key");
+    // deleting a missing key reports zero rows
+    assert.equal(store.deleteFlowKey("no-such-key"), 0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("createBrowserSession then getBrowserSession round-trips", () => {
   const { store, dir } = freshStore();
   try {

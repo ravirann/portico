@@ -37,6 +37,9 @@ export default function Dashboard() {
             Portico turns a recorded click-through into a validated, self-hosted automation — harvesting the
             portal&rsquo;s own data instead of scraping it, with no model on the hot path. Even portals you don&rsquo;t control.
           </p>
+          <p style={{ marginTop: 14, fontSize: 13 }}>
+            <Link href="/help" style={{ color: "var(--accent)", fontWeight: 600 }}>New here? See how Portico works →</Link>
+          </p>
         </div>
 
         <div className="metrics rise rise-2">

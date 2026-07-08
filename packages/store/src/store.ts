@@ -23,6 +23,8 @@ import type {
   ConfigEntry,
   ConnectorRecord,
   FlowRecord,
+  RecordingRecord,
+  RecordingStatus,
   RunStatus,
   RunView,
   StepRecord,
@@ -57,6 +59,7 @@ interface RunRow {
   failure_json: string | null;
   rrweb_ref: string | null;
   created_at: string;
+  instance: string | null;
 }
 
 interface StepRow {
@@ -91,6 +94,7 @@ interface BrowserSessionRow {
   started_at: string;
   last_active_at: string;
   pid: number | null;
+  connector: string | null;
 }
 
 interface ConnectorRow {
@@ -124,6 +128,23 @@ interface ValidationRow {
   created_at: string;
 }
 
+interface RecordingRow {
+  id: string;
+  session_id: string;
+  connector: string | null;
+  flow_key: string;
+  base_url: string | null;
+  status: string;
+  path: string;
+  pid: number | null;
+  draft_flow_id: string | null;
+  clicks: number | null;
+  requests: number | null;
+  error: string | null;
+  started_at: string;
+  updated_at: string;
+}
+
 export class Store {
   private readonly db: Database.Database;
   private readonly cipher: SessionCipher;
@@ -153,15 +174,16 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO runs
-             (id, connector, flow, engine, tier, status, mode,
+             (id, connector, instance, flow, engine, tier, status, mode,
               started_at, duration_ms, output_json, failure_json, rrweb_ref, created_at)
            VALUES
-             (@id, @connector, @flow, @engine, @tier, @status, @mode,
+             (@id, @connector, @instance, @flow, @engine, @tier, @status, @mode,
               @started_at, @duration_ms, @output_json, @failure_json, @rrweb_ref, @created_at)`,
         )
         .run({
           id: r.id,
           connector: r.connector,
+          instance: r.instance ?? null,
           flow: r.flow,
           engine: r.engine,
           tier: r.tier,
@@ -283,6 +305,7 @@ export class Store {
     if (row.output_json) run.output = JSON.parse(row.output_json);
     if (row.failure_json) run.failure = JSON.parse(row.failure_json);
     if (row.rrweb_ref) run.rrwebRef = row.rrweb_ref;
+    if (row.instance) run.instance = row.instance;
     return run;
   }
 
@@ -376,6 +399,28 @@ export class Store {
     this.db.prepare("UPDATE flows SET status = 'confirmed' WHERE id = ?").run(id);
   }
 
+  /** Delete ONE flow version and its validations. No-op if the id is unknown. */
+  deleteFlow(id: string): void {
+    const del = this.db.transaction((flowId: string) => {
+      this.db.prepare("DELETE FROM validations WHERE flow_id = ?").run(flowId);
+      this.db.prepare("DELETE FROM flows WHERE id = ?").run(flowId);
+    });
+    del(id);
+  }
+
+  /** Delete ALL versions of a flow key plus their validations. Returns the
+   *  number of flow rows deleted. */
+  deleteFlowKey(key: string): number {
+    const del = this.db.transaction((flowKey: string): number => {
+      this.db
+        .prepare("DELETE FROM validations WHERE flow_id IN (SELECT id FROM flows WHERE key = ?)")
+        .run(flowKey);
+      const info = this.db.prepare("DELETE FROM flows WHERE key = ?").run(flowKey);
+      return info.changes;
+    });
+    return del(key);
+  }
+
   /** Highest-versioned confirmed flow for a key, or `undefined` if none is confirmed. */
   latestConfirmedFlow(key: string): FlowRecord | undefined {
     const row = this.db
@@ -444,13 +489,14 @@ export class Store {
     cdpEndpoint?: string;
     startedAt: string;
     pid?: number;
+    connector?: string;
   }): void {
     this.db
       .prepare(
         `INSERT INTO browser_sessions
-           (id, tenant, profile, cdp_endpoint, status, started_at, last_active_at, pid)
+           (id, tenant, profile, cdp_endpoint, status, started_at, last_active_at, pid, connector)
          VALUES
-           (@id, @tenant, @profile, @cdp_endpoint, 'active', @started_at, @last_active_at, @pid)`,
+           (@id, @tenant, @profile, @cdp_endpoint, 'active', @started_at, @last_active_at, @pid, @connector)`,
       )
       .run({
         id: s.id,
@@ -460,6 +506,7 @@ export class Store {
         started_at: s.startedAt,
         last_active_at: s.startedAt,
         pid: s.pid ?? null,
+        connector: s.connector ?? null,
       });
   }
 
@@ -515,6 +562,7 @@ export class Store {
     if (row.profile != null) session.profile = row.profile;
     if (row.cdp_endpoint != null) session.cdpEndpoint = row.cdp_endpoint;
     if (row.pid != null) session.pid = row.pid;
+    if (row.connector != null) session.connector = row.connector;
     return session;
   }
 
@@ -591,6 +639,113 @@ export class Store {
     if (row.base_url != null) connector.baseUrl = row.base_url;
     if (row.auth != null) connector.auth = row.auth;
     return connector;
+  }
+
+  // ---- recordings (record-by-demonstration capture sessions) ------------
+
+  /** Register a new capture session (a recorder attached to a browser session). */
+  createRecording(r: {
+    id: string;
+    sessionId: string;
+    connector?: string;
+    flowKey: string;
+    baseUrl?: string;
+    path: string;
+    pid?: number;
+    startedAt: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO recordings
+           (id, session_id, connector, flow_key, base_url, status, path, pid, started_at, updated_at)
+         VALUES
+           (@id, @session_id, @connector, @flow_key, @base_url, 'recording', @path, @pid, @started_at, @updated_at)`,
+      )
+      .run({
+        id: r.id,
+        session_id: r.sessionId,
+        connector: r.connector ?? null,
+        flow_key: r.flowKey,
+        base_url: r.baseUrl ?? null,
+        path: r.path,
+        pid: r.pid ?? null,
+        started_at: r.startedAt,
+        updated_at: now,
+      });
+  }
+
+  /** Fetch a recording by id, or `undefined` if unknown. */
+  getRecording(id: string): RecordingRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM recordings WHERE id = ?").get(id) as RecordingRow | undefined;
+    if (!row) return undefined;
+    return this.hydrateRecording(row);
+  }
+
+  /** Recordings, newest first; optionally filtered to one browser session. */
+  listRecordings(sessionId?: string): RecordingRecord[] {
+    const clause = sessionId != null ? "WHERE session_id = @sessionId" : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM recordings ${clause} ORDER BY started_at DESC`)
+      .all(sessionId != null ? { sessionId } : {}) as RecordingRow[];
+    return rows.map((r) => this.hydrateRecording(r));
+  }
+
+  /** Patch a recording's mutable fields (status/outcome). Unset fields are kept. */
+  updateRecording(
+    id: string,
+    patch: {
+      status?: RecordingStatus;
+      draftFlowId?: string;
+      clicks?: number;
+      requests?: number;
+      error?: string;
+      pid?: number | null;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE recordings SET
+           status        = COALESCE(@status, status),
+           draft_flow_id = COALESCE(@draft_flow_id, draft_flow_id),
+           clicks        = COALESCE(@clicks, clicks),
+           requests      = COALESCE(@requests, requests),
+           error         = COALESCE(@error, error),
+           pid           = CASE WHEN @pid_set = 1 THEN @pid ELSE pid END,
+           updated_at    = @updated_at
+         WHERE id = @id`,
+      )
+      .run({
+        id,
+        status: patch.status ?? null,
+        draft_flow_id: patch.draftFlowId ?? null,
+        clicks: patch.clicks ?? null,
+        requests: patch.requests ?? null,
+        error: patch.error ?? null,
+        pid_set: patch.pid !== undefined ? 1 : 0,
+        pid: patch.pid ?? null,
+        updated_at: new Date().toISOString(),
+      });
+  }
+
+  private hydrateRecording(row: RecordingRow): RecordingRecord {
+    const rec: RecordingRecord = {
+      id: row.id,
+      sessionId: row.session_id,
+      flowKey: row.flow_key,
+      status: row.status as RecordingStatus,
+      path: row.path,
+      startedAt: row.started_at,
+      updatedAt: row.updated_at,
+    };
+    if (row.connector != null) rec.connector = row.connector;
+    if (row.base_url != null) rec.baseUrl = row.base_url;
+    if (row.pid != null) rec.pid = row.pid;
+    if (row.draft_flow_id != null) rec.draftFlowId = row.draft_flow_id;
+    if (row.clicks != null) rec.clicks = row.clicks;
+    if (row.requests != null) rec.requests = row.requests;
+    if (row.error != null) rec.error = row.error;
+    return rec;
   }
 
   // ---- app config (LLM settings + connector variables) ------------------
