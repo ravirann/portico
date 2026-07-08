@@ -1,0 +1,104 @@
+/**
+ * Unit tests for the flow-spec → Libretto compiler and its pure helpers.
+ * No browser / no model — these assert the deterministic, keyless contract.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { Flow, Target } from "@portico/flow-spec";
+import { compileFlow } from "./compiler.js";
+import { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
+import { healModelConfigured } from "./model.js";
+import { resolveProfile } from "./auth-profile.js";
+
+const target: Target = {
+  key: "t",
+  name: "t",
+  base_url: "https://example.com",
+  allowed_domains: ["example.com"],
+  auth: "portal-login",
+};
+
+test("jsonSchemaToZod handles the common subset", () => {
+  assert.equal(jsonSchemaToZod({ type: "string" }).safeParse("x").success, true);
+  assert.equal(jsonSchemaToZod({ type: "number" }).safeParse(3).success, true);
+  assert.equal(jsonSchemaToZod({ type: "number" }).safeParse("x").success, false);
+  const obj = jsonSchemaToZod({
+    type: "object",
+    properties: { a: { type: "string" } },
+    required: ["a"],
+  });
+  assert.equal(obj.safeParse({ a: "hi" }).success, true);
+  assert.equal(obj.safeParse({}).success, false);
+});
+
+test("validateAgainst never throws and reports failure", () => {
+  const ok = validateAgainst({ type: "string" }, "x");
+  assert.equal(ok.ok, true);
+  const bad = validateAgainst({ type: "number" }, "x");
+  assert.equal(bad.ok, false);
+  assert.ok(bad.error);
+});
+
+test("compileFlow builds a canonical workflow carrying schemas + credentials + profile", () => {
+  const flow: Flow = {
+    key: "login-and-read",
+    version: 1,
+    inputs: { reason: "string" },
+    steps: [
+      { type: "navigate", label: "open", url: "{{base_url}}/login" },
+      { type: "act", label: "user", value: "{{secrets.username}}", locator: { cached: "#u", semantic: { intent: "user" } } },
+      { type: "act", label: "pass", value: "{{secrets.password}}", locator: { cached: "#p", semantic: { intent: "pass" } } },
+      { type: "extract", label: "title", extract: { key: "page_title", schema: { type: "string" } } },
+    ],
+  };
+  const { workflow, plan, credentialNames } = compileFlow(flow, target, { profileName: "urmc-mychart" });
+  assert.equal(workflow.name, "login-and-read");
+  assert.equal(workflow.authProfileName, "urmc-mychart");
+  assert.equal(workflow.authProfileRefresh, true);
+  assert.equal(workflow.startUrl, "https://example.com");
+  assert.deepEqual([...credentialNames].sort(), ["password", "username"]);
+  assert.equal(plan.length, 4);
+  // No recovery model configured → no recoveryAction on the deterministic workflow.
+  assert.equal(workflow.recoveryAction, undefined);
+});
+
+test("compileFlow refuses a no_booking flow that contains a booking action", () => {
+  const flow: Flow = {
+    key: "danger",
+    version: 1,
+    guard: { no_booking: true },
+    steps: [
+      { type: "navigate", url: "{{base_url}}" },
+      { type: "act", label: "Book the appointment", locator: { cached: "#book", semantic: { intent: "book" } } },
+    ],
+  };
+  assert.throws(() => compileFlow(flow, target), /no_booking/);
+});
+
+test("compileFlow rejects an agent step on the hot path", () => {
+  const flow = {
+    key: "llm",
+    version: 1,
+    steps: [{ type: "agent", label: "think" }],
+  } as unknown as Flow;
+  assert.throws(() => compileFlow(flow, target), /agent step/);
+});
+
+test("healModelConfigured is honest about missing config", () => {
+  assert.equal(healModelConfigured({}), false);
+  assert.equal(healModelConfigured({ PORTICO_HEAL_PROVIDER: "anthropic" }), false); // no key
+  assert.equal(
+    healModelConfigured({ PORTICO_HEAL_PROVIDER: "anthropic", PORTICO_HEAL_API_KEY: "k" }),
+    true,
+  );
+  assert.equal(healModelConfigured({ PORTICO_HEAL_PROVIDER: "nope", PORTICO_HEAL_API_KEY: "k" }), false);
+});
+
+test("resolveProfile normalizes the profile id and points at .libretto/profiles", () => {
+  const p = resolveProfile("URMC MyChart!", { cwd: "/tmp/repo" });
+  assert.equal(p.name, "urmc-mychart");
+  assert.equal(p.path, "/tmp/repo/.libretto/profiles/urmc-mychart.json");
+  assert.equal(p.loadPath, undefined); // does not exist
+  assert.equal(p.refresh, true);
+});

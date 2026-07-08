@@ -12,6 +12,7 @@ captures/
 *.local.yaml
 # artifacts
 traces/
+data/
 *.log
 .DS_Store
 .next/

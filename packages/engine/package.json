@@ -10,6 +10,12 @@
     "@portico/flow-spec": "workspace:*",
     "@portico/vault": "workspace:*",
     "libretto": "^0.6.33",
-    "playwright": "^1.49.0"
+    "playwright": "^1.49.0",
+    "zod": "^4.3.6"
+  },
+  "optionalDependencies": {
+    "ai": "^6.0.0",
+    "@ai-sdk/anthropic": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.0"
   }
 }
