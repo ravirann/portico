@@ -1,0 +1,41 @@
+name: Connector proposal
+description: Propose a new connector (target site + flows + auth)
+title: "connector: "
+labels: ["connector", "needs-triage"]
+body:
+  - type: input
+    id: target
+    attributes:
+      label: Target site or portal
+      placeholder: Payer portal, EHR portal, admin dashboard, partner portal
+    validations:
+      required: true
+  - type: textarea
+    id: flows
+    attributes:
+      label: Flows
+      description: Describe the flows (step graphs), their inputs, outputs, and success criteria.
+    validations:
+      required: true
+  - type: textarea
+    id: auth
+    attributes:
+      label: Authentication requirements
+      description: Username/password, SSO, TOTP (authenticator vs SMS), captcha, IP allowlist, etc.
+  - type: textarea
+    id: reliability
+    attributes:
+      label: Known reliability challenges
+      description: Dynamic selectors, slow pages, session expiry, rate limits, captchas, manual review, etc.
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Evidence or artifacts needed
+      description: Screenshots, PDFs, receipts, confirmation numbers, exports, logs, etc.
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Authorization
+      options:
+        - label: This connector automates only portals I (or my users) are authorized to access.
+          required: true

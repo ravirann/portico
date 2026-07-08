@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible Portico bug
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - OS:
+        - Node version:
+        - Browser runtime:
+        - Portico version / commit:
+    validations:
+      required: true
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Logs or artifacts
+      description: Remove secrets, cookies, tokens, and private tenant data before attaching.
