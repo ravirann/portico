@@ -44,9 +44,9 @@ steps:
   # ── Session tokens. csrf is read from the page; BrowserId + nonce are minted
   #    client-side (matching the captured formats).
   - type: read
-    label: Read the anti-forgery token
+    label: Read the anti-forgery token (the longest __RequestVerificationToken on the page)
     read:
-      expression: "document.querySelector('input[name=\"__RequestVerificationToken\"]')?.value || ''"
+      expression: "[...document.querySelectorAll('input[name=\"__RequestVerificationToken\"]')].map(e=>e.value).sort((a,b)=>b.length-a.length)[0] || ''"
       as: csrf
   - type: read
     label: Mint a BrowserId (20 random chars + unix seconds)
@@ -71,7 +71,7 @@ steps:
       url: "{{base_url}}/MyChart/Scheduling/GetSchedulingWorkflowData"
       method: POST
       bodyType: form
-      headers: { verificationtoken: "{{csrf}}" }         # « VALIDATE » header name
+      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }         # « VALIDATE » header name
       body: { nonce: "{{nonce}}" }
     extract:
       key: workflow
@@ -88,7 +88,7 @@ steps:
       url: "{{base_url}}/MyChart/Scheduling/GetSpecialtyData"
       method: POST
       bodyType: form
-      headers: { verificationtoken: "{{csrf}}" }
+      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }
       body: { SpecialtyId: "{{specialty_id}}" }
     extract:
       key: specialty_data
@@ -115,7 +115,7 @@ steps:
       url: "{{base_url}}/MyChart/Scheduling/GetDeferredSchedulingData"
       method: POST
       bodyType: form
-      headers: { verificationtoken: "{{csrf}}" }
+      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }
       body:
         schedulingParameters.reasonForVisitId: "{{reason_id}}"
         schedulingParameters.specialtyId: "{{specialty_id}}"
@@ -133,7 +133,7 @@ steps:
       url: "{{base_url}}/MyChart/Scheduling/GetSlots"
       method: POST
       bodyType: form
-      headers: { verificationtoken: "{{csrf}}" }
+      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }
       body:
         workflow.Type: "2"
         workflow.IsGuest: "false"

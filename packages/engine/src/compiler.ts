@@ -429,10 +429,31 @@ function apiStep(step: Step, api: ApiStepSpec, index: number): CompiledStep {
       const key = step.extract?.key ?? "api";
       const schema = step.extract?.schema;
       const zschema = schema ? (jsonSchemaToZod(schema) as z.ZodType) : undefined;
-      const data = await pageRequest(rt.rawPage, config, zschema ? { schema: zschema } : {});
+      const path = (() => {
+        try {
+          return new URL(config.url).pathname;
+        } catch {
+          return config.url;
+        }
+      })();
+      let data: unknown;
+      try {
+        data = await pageRequest(rt.rawPage, config, zschema ? { schema: zschema } : {});
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // A JSON endpoint that returns HTML almost always means the request was
+        // rejected as a non-AJAX / anti-forgery-missing call and redirected to a
+        // page — surface that instead of a raw "Unexpected token '<'".
+        const gotHtml = /Unexpected token '<'|<!DOCTYPE/i.test(msg);
+        throw new Error(
+          `api ${config.method} ${path} failed` +
+            (gotHtml ? " — endpoint returned HTML, not JSON (auth / anti-forgery: verify the token header + x-requested-with)" : "") +
+            `: ${msg.slice(0, 160)}`,
+        );
+      }
       rt.output[key] = data;
       if (!schema) rt.unvalidated.add(key);
-      return { status: "ok", detail: `api ${config.method} ${new URL(config.url).pathname}` };
+      return { status: "ok", detail: `api ${config.method} ${path}` };
     },
   };
 }
