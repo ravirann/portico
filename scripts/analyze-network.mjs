@@ -67,14 +67,17 @@ for (const line of lines) {
 // Classification helpers
 // ---------------------------------------------------------------------------
 
-// Endpoints that look like the availability/scheduling reads we actually want
-// to promote to the API tier — ranked to the top and starred.
-const RELEVANCE_REGEX = /slot|appoint|avail|opening|schedul|visit|provider|department|specialt|location/i;
+// Classify by the endpoint's VERB, not by method+body. Portals like Epic/MyChart
+// POST a body for READS too (e.g. GetSlots), so "POST with a body" is NOT a
+// mutation signal — the last path segment's verb is. Read verbs → promotable
+// API-tier reads; write verbs → keep on the resilient DOM path (they carry
+// rotating CSRF / anti-forgery / time-bound tokens).
+const READ_VERB_RE = /^(get|load|list|search|fetch|query|retrieve|is|check)/i;
+const WRITE_VERB_RE = /^(reserve|book|confirm|submit|save|create|update|delete|cancel|dologin|validate|sendcode|reconcile|set|add|remove)/i;
+const lastSegment = (pathname) => pathname.split("/").filter(Boolean).pop() ?? "";
 
-// URL/path shapes that indicate a write (booking, reserving, confirming, etc).
-// These commonly carry rotating CSRF / anti-forgery / time-bound slot tokens
-// and should stay on the resilient DOM path rather than being blindly replayed.
-const MUTATION_REGEX = /reserve|book|schedul|confirm|verify|submit|create|commit/i;
+// Highlight the availability/scheduling reads we most want to promote first.
+const RELEVANCE_REGEX = /slot|appoint|avail|opening|schedul|visit|provider|department|specialt|location/i;
 
 function isJsonLike(contentType) {
   return typeof contentType === "string" && /json|graphql/i.test(contentType);
@@ -85,7 +88,7 @@ function hasRequestBody(entry) {
     entry.requestBodyPreview ||
       entry.requestBodyPath ||
       (typeof entry.requestBodyBytes === "number" && entry.requestBodyBytes > 0) ||
-      entry.postData
+      entry.postData,
   );
 }
 
@@ -115,7 +118,7 @@ function isMutationMethod(method) {
 
 function looksLikeMutation(entry, pathname) {
   if (!isMutationMethod(entry.method)) return false;
-  return MUTATION_REGEX.test(pathname) || hasRequestBody(entry);
+  return WRITE_VERB_RE.test(lastSegment(pathname)); // real write verbs only
 }
 
 function is2xx(status) {
@@ -140,8 +143,13 @@ for (const entry of entries) {
   }
 
   const isXhrOrFetch = resourceType === "xhr" || resourceType === "fetch";
+  // GETs must be xhr/fetch; POSTs qualify as reads only when the verb says so
+  // (GetSlots, LoadX, …) — that's what rescues Epic's POST-based reads from the
+  // mutation bucket without letting write POSTs through.
   const qualifiesAsCleanRead =
-    is2xx(entry.status) && isJsonLike(entry.contentType) && isXhrOrFetch && (method === "GET" || method === "POST");
+    is2xx(entry.status) &&
+    isJsonLike(entry.contentType) &&
+    (method === "GET" ? isXhrOrFetch : method === "POST" && READ_VERB_RE.test(lastSegment(pathname)));
 
   if (!qualifiesAsCleanRead) continue;
 
