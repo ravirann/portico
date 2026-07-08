@@ -1,0 +1,14 @@
+[
+  { "name": "bug", "color": "d73a4a", "description": "Something is not working" },
+  { "name": "enhancement", "color": "a2eeef", "description": "New feature or improvement" },
+  { "name": "documentation", "color": "0075ca", "description": "Documentation improvements" },
+  { "name": "good first issue", "color": "7057ff", "description": "Good for newcomers" },
+  { "name": "help wanted", "color": "008672", "description": "Community contribution welcome" },
+  { "name": "needs-triage", "color": "ededed", "description": "Needs maintainer review" },
+  { "name": "security", "color": "ee0701", "description": "Security-sensitive work" },
+  { "name": "runtime", "color": "5319e7", "description": "Browser runtime or worker execution" },
+  { "name": "connector", "color": "fbca04", "description": "Connector: target site, flows, or auth" },
+  { "name": "observability", "color": "1d76db", "description": "Logs, traces, metrics, artifacts" },
+  { "name": "console", "color": "c5def5", "description": "Operator console UI" },
+  { "name": "ai-recovery", "color": "bfd4f2", "description": "AI-assisted authoring, heal, or reasoning" }
+]
