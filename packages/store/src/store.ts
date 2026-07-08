@@ -20,6 +20,8 @@ import type {
   AuditEvent,
   AuditFilter,
   BrowserSessionRecord,
+  ConfigEntry,
+  ConnectorRecord,
   FlowRecord,
   RunStatus,
   RunView,
@@ -88,6 +90,29 @@ interface BrowserSessionRow {
   status: string;
   started_at: string;
   last_active_at: string;
+  pid: number | null;
+}
+
+interface ConnectorRow {
+  id: string;
+  key: string;
+  name: string;
+  framework: string | null;
+  base_url: string | null;
+  auth: string | null;
+  variables_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ConfigRow {
+  id: string;
+  scope: string;
+  category: string;
+  key: string;
+  value: string | null;
+  secret: number;
+  updated_at: string;
 }
 
 interface ValidationRow {
@@ -418,13 +443,14 @@ export class Store {
     profile?: string;
     cdpEndpoint?: string;
     startedAt: string;
+    pid?: number;
   }): void {
     this.db
       .prepare(
         `INSERT INTO browser_sessions
-           (id, tenant, profile, cdp_endpoint, status, started_at, last_active_at)
+           (id, tenant, profile, cdp_endpoint, status, started_at, last_active_at, pid)
          VALUES
-           (@id, @tenant, @profile, @cdp_endpoint, 'active', @started_at, @last_active_at)`,
+           (@id, @tenant, @profile, @cdp_endpoint, 'active', @started_at, @last_active_at, @pid)`,
       )
       .run({
         id: s.id,
@@ -433,12 +459,18 @@ export class Store {
         cdp_endpoint: s.cdpEndpoint ?? null,
         started_at: s.startedAt,
         last_active_at: s.startedAt,
+        pid: s.pid ?? null,
       });
   }
 
   /** Bump a browser session's last-active timestamp. No-op if the session is unknown. */
   touchBrowserSession(id: string, at: string): void {
     this.db.prepare("UPDATE browser_sessions SET last_active_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Record the OS pid of a browser session's process. No-op if the session is unknown. */
+  setBrowserSessionPid(id: string, pid: number): void {
+    this.db.prepare("UPDATE browser_sessions SET pid = ? WHERE id = ?").run(pid, id);
   }
 
   /** Mark a browser session closed. */
@@ -482,7 +514,149 @@ export class Store {
     };
     if (row.profile != null) session.profile = row.profile;
     if (row.cdp_endpoint != null) session.cdpEndpoint = row.cdp_endpoint;
+    if (row.pid != null) session.pid = row.pid;
     return session;
+  }
+
+  // ---- connectors --------------------------------------------------------
+
+  /** Upsert a connector (by id) — the self-serve connector registry. */
+  saveConnector(c: {
+    id: string;
+    key: string;
+    name: string;
+    framework?: string;
+    baseUrl?: string;
+    auth?: string;
+    variables?: Record<string, string>;
+    createdAt: string;
+    updatedAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO connectors (id, key, name, framework, base_url, auth, variables_json, created_at, updated_at)
+         VALUES (@id, @key, @name, @framework, @base_url, @auth, @variables_json, @created_at, @updated_at)
+         ON CONFLICT(id) DO UPDATE SET
+           key            = excluded.key,
+           name           = excluded.name,
+           framework      = excluded.framework,
+           base_url       = excluded.base_url,
+           auth           = excluded.auth,
+           variables_json = excluded.variables_json,
+           updated_at     = excluded.updated_at`,
+      )
+      .run({
+        id: c.id,
+        key: c.key,
+        name: c.name,
+        framework: c.framework ?? null,
+        base_url: c.baseUrl ?? null,
+        auth: c.auth ?? null,
+        variables_json: JSON.stringify(c.variables ?? {}),
+        created_at: c.createdAt,
+        updated_at: c.updatedAt,
+      });
+  }
+
+  /** Fetch a connector by id OR key, or `undefined` if unknown. */
+  getConnector(idOrKey: string): ConnectorRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM connectors WHERE id = ? OR key = ?")
+      .get(idOrKey, idOrKey) as ConnectorRow | undefined;
+    if (!row) return undefined;
+    return this.hydrateConnector(row);
+  }
+
+  /** All connectors, name ascending. */
+  listConnectors(): ConnectorRecord[] {
+    const rows = this.db.prepare("SELECT * FROM connectors ORDER BY name ASC").all() as ConnectorRow[];
+    return rows.map((r) => this.hydrateConnector(r));
+  }
+
+  /** Delete a connector by id. */
+  deleteConnector(id: string): void {
+    this.db.prepare("DELETE FROM connectors WHERE id = ?").run(id);
+  }
+
+  private hydrateConnector(row: ConnectorRow): ConnectorRecord {
+    const connector: ConnectorRecord = {
+      id: row.id,
+      key: row.key,
+      name: row.name,
+      variables: row.variables_json ? (JSON.parse(row.variables_json) as Record<string, string>) : {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+    if (row.framework != null) connector.framework = row.framework;
+    if (row.base_url != null) connector.baseUrl = row.base_url;
+    if (row.auth != null) connector.auth = row.auth;
+    return connector;
+  }
+
+  // ---- app config (LLM settings + connector variables) ------------------
+
+  /**
+   * Upsert a config entry keyed by (scope, category, key). Secret values are
+   * written through the session cipher — the same seam `sessions.storage_state`
+   * uses — so they are never stored in plaintext.
+   */
+  setConfig(e: { scope: string; category: "llm" | "variable"; key: string; value: string; secret?: boolean }): void {
+    const id = `cfg_${e.scope}_${e.category}_${e.key}`;
+    const secret = e.secret ?? false;
+    this.db
+      .prepare(
+        `INSERT INTO app_config (id, scope, category, key, value, secret, updated_at)
+         VALUES (@id, @scope, @category, @key, @value, @secret, @updated_at)
+         ON CONFLICT(scope, category, key) DO UPDATE SET
+           value      = excluded.value,
+           secret     = excluded.secret,
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        id,
+        scope: e.scope,
+        category: e.category,
+        key: e.key,
+        value: secret ? this.cipher.encrypt(e.value) : e.value,
+        secret: secret ? 1 : 0,
+        updated_at: new Date().toISOString(),
+      });
+  }
+
+  /** Config entries for a scope (optionally filtered to a category), decrypted. */
+  getConfig(scope: string, category?: "llm" | "variable"): ConfigEntry[] {
+    const clause = category != null ? "AND category = @category" : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM app_config WHERE scope = @scope ${clause} ORDER BY key ASC`)
+      .all(category != null ? { scope, category } : { scope }) as ConfigRow[];
+    return rows.map((r) => this.hydrateConfig(r));
+  }
+
+  /** A single decrypted config value, or `undefined` if unset. */
+  getConfigValue(scope: string, category: "llm" | "variable", key: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM app_config WHERE scope = ? AND category = ? AND key = ?")
+      .get(scope, category, key) as ConfigRow | undefined;
+    if (!row) return undefined;
+    return this.hydrateConfig(row).value;
+  }
+
+  /** Delete a config entry. */
+  deleteConfig(scope: string, category: "llm" | "variable", key: string): void {
+    this.db.prepare("DELETE FROM app_config WHERE scope = ? AND category = ? AND key = ?").run(scope, category, key);
+  }
+
+  private hydrateConfig(row: ConfigRow): ConfigEntry {
+    const value = row.value == null ? "" : row.secret === 1 ? this.cipher.decrypt(row.value) : row.value;
+    return {
+      id: row.id,
+      scope: row.scope,
+      category: row.category as ConfigEntry["category"],
+      key: row.key,
+      value,
+      secret: row.secret === 1,
+      updatedAt: row.updated_at,
+    };
   }
 
   // ---- audit (APPEND-ONLY) ---------------------------------------------

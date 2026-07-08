@@ -52,6 +52,32 @@ export interface FlowView {
   validation: ValidationView | null;
 }
 
+/** A DB-backed connector record, owned and edited from the console (as opposed
+ *  to the read-only filesystem "seed" connectors under connectors/). */
+export interface ConnectorRecord {
+  id: string;
+  key: string;
+  name: string;
+  framework?: string;
+  baseUrl?: string;
+  auth?: string;
+  variables: Record<string, string>;
+  createdAt: string; // ISO
+  updatedAt: string; // ISO
+}
+
+/** A scoped config entry (LLM setting or connector variable). For secret:true
+ *  entries the `value` is sensitive and must never be rendered in the UI. */
+export interface ConfigEntry {
+  id: string;
+  scope: string;
+  category: "llm" | "variable";
+  key: string;
+  value: string;
+  secret: boolean;
+  updatedAt: string; // ISO
+}
+
 export type SessionStatus = "active" | "closed";
 export type SessionHealth = "active" | "idle" | "stale";
 

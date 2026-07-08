@@ -110,6 +110,35 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_validations_flow ON validations(flow_id, created_at DESC);
     `,
   },
+  {
+    version: 4,
+    sql: `
+      CREATE TABLE IF NOT EXISTS connectors (
+        id             TEXT PRIMARY KEY,
+        key            TEXT NOT NULL UNIQUE,
+        name           TEXT NOT NULL,
+        framework      TEXT,
+        base_url       TEXT,
+        auth           TEXT,
+        variables_json TEXT,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS app_config (
+        id         TEXT PRIMARY KEY,
+        scope      TEXT NOT NULL,
+        category   TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        value      TEXT,
+        secret     INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_app_config_scope ON app_config(scope, category, key);
+
+      ALTER TABLE browser_sessions ADD COLUMN pid INTEGER;
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

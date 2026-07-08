@@ -74,7 +74,7 @@ export function createRecorder(page: Page, opts: RecorderOptions): Recorder {
         // Best-effort, time-boxed: a blocked/offline CDN must not stall the run.
         await withTimeout(page.addScriptTag({ url: RRWEB_CDN }), 5000);
         await page.evaluate(() => {
-          const w = window as unknown as Record<string, unknown>;
+          const w = globalThis as unknown as Record<string, unknown>;
           const rr = w.rrweb as { record?: (o: unknown) => void } | undefined;
           if (!rr?.record) return;
           const events: unknown[] = ((w.__porticoRrweb as unknown[]) = []);
@@ -100,7 +100,7 @@ export function createRecorder(page: Page, opts: RecorderOptions): Recorder {
       let eventCount = 0;
       try {
         const events = await page.evaluate(() => {
-          const w = window as unknown as Record<string, unknown>;
+          const w = globalThis as unknown as Record<string, unknown>;
           return (w.__porticoRrweb as unknown[]) ?? [];
         });
         eventCount = Array.isArray(events) ? events.length : 0;

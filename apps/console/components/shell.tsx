@@ -2,7 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { IconConnectors, IconDash, IconFlows, IconRuns, IconSessions } from "./icons";
+import { IconConnectors, IconDash, IconFlows, IconRuns, IconSessions, IconSettings } from "./icons";
 
 const NAV = [
   { href: "/", label: "Overview", Icon: IconDash, exact: true },
@@ -10,6 +10,7 @@ const NAV = [
   { href: "/flows", label: "Flows", Icon: IconFlows },
   { href: "/sessions", label: "Sessions", Icon: IconSessions },
   { href: "/connectors", label: "Connectors", Icon: IconConnectors },
+  { href: "/settings", label: "Settings", Icon: IconSettings },
 ];
 
 export function Shell({ children }: { children: React.ReactNode }) {

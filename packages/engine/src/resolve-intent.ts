@@ -77,7 +77,7 @@ export function resolveIntent(
     if (originals.length === 0) continue; // no match at this tier — try the next, looser tier
 
     if (originals.length === 1) {
-      return { status: "resolved", value: originals[0], matchedBy: tier.matchedBy };
+      return { status: "resolved", value: originals[0]!, matchedBy: tier.matchedBy };
     }
     return { status: "ambiguous", matches: originals };
   }

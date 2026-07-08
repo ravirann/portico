@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["dist"],
+  "references": [
+    { "path": "../../packages/engine" },
+    { "path": "../../packages/flow-spec" },
+    { "path": "../../packages/store" },
+    { "path": "../../packages/vault" }
+  ]
+}

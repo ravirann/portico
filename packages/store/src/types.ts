@@ -118,4 +118,29 @@ export interface BrowserSessionRecord {
   status: BrowserSessionStatus;
   startedAt: string;
   lastActiveAt: string;
+  pid?: number;
+}
+
+/** A configured connector (self-serve portal connector registry). */
+export interface ConnectorRecord {
+  id: string;
+  key: string;
+  name: string;
+  framework?: string;
+  baseUrl?: string;
+  auth?: string;
+  variables: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Scope-namespaced app configuration (LLM settings, connector variables). */
+export interface ConfigEntry {
+  id: string;
+  scope: string;
+  category: "llm" | "variable";
+  key: string;
+  value: string;
+  secret: boolean;
+  updatedAt: string;
 }

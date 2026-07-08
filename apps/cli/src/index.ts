@@ -17,6 +17,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { spawn } from "node:child_process";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
@@ -37,19 +38,36 @@ interface CliOpts {
   out?: string;
   connector?: string;
   inputs: Record<string, string>;
+  scope?: string;
+  category?: string;
+  secret: boolean;
+  value?: string;
+  pid?: number;
+  name?: string;
+  framework?: string;
+  auth?: string;
+  tenant?: string;
+  port?: number;
+  yamlFile?: string;
 }
 
 function parseArgs(argv: string[]) {
-  const [cmd, flowPath, ...rest] = argv;
+  // First arg is the command. The positional (`flowPath`: a flow file/id, recording
+  // path, session id, …) is the FIRST NON-FLAG arg after it — so all-flag commands
+  // (save-connector, config-set, save-flow) parse correctly instead of eating the
+  // first flag as the positional.
+  const [cmd, ...rest] = argv;
+  let flowPath: string | undefined;
   // Default headless: the engine drives a real browser and most runs are
   // unattended. --headed opts into a visible window (for manual login/HITL).
-  const opts: CliOpts = { headless: true, json: false, live: false, inputs: {} };
+  const opts: CliOpts = { headless: true, json: false, live: false, secret: false, inputs: {} };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--headless") opts.headless = true;
     else if (a === "--headed") opts.headless = false;
     else if (a === "--live") opts.live = true;
     else if (a === "--json") opts.json = true;
+    else if (a === "--secret") opts.secret = true;
     else if (a === "--base-url") opts.baseUrl = rest[++i];
     else if (a === "--instance") opts.instance = rest[++i];
     else if (a === "--profile") opts.profile = rest[++i];
@@ -58,9 +76,21 @@ function parseArgs(argv: string[]) {
     else if (a === "--intercept") opts.intercept = rest[++i];
     else if (a === "--out") opts.out = rest[++i];
     else if (a === "--connector") opts.connector = rest[++i];
+    else if (a === "--scope") opts.scope = rest[++i];
+    else if (a === "--category") opts.category = rest[++i];
+    else if (a === "--value") opts.value = rest[++i];
+    else if (a === "--pid") opts.pid = Number(rest[++i]);
+    else if (a === "--name") opts.name = rest[++i];
+    else if (a === "--framework") opts.framework = rest[++i];
+    else if (a === "--auth") opts.auth = rest[++i];
+    else if (a === "--tenant") opts.tenant = rest[++i];
+    else if (a === "--port") opts.port = Number(rest[++i]);
+    else if (a === "--yaml-file") opts.yamlFile = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
+    } else if (!a.startsWith("--") && flowPath === undefined) {
+      flowPath = a; // first positional (flow file/id, recording path, session id)
     }
   }
   return { cmd, flowPath, opts };
@@ -123,12 +153,151 @@ async function main() {
     else console.log(`✔ closed session ${flowPath}`);
     process.exit(0);
   }
+
+  // ---- connectors (self-serve connector registry) ------------------------
+
+  if (cmd === "list-connectors") {
+    const store = new Store();
+    const connectors = store.listConnectors();
+    store.close();
+    process.stdout.write(JSON.stringify(connectors));
+    process.exit(0);
+  }
+  if (cmd === "get-connector") {
+    if (!flowPath) { console.error("usage: portico get-connector <idOrKey>"); process.exit(2); }
+    const store = new Store();
+    const connector = store.getConnector(flowPath);
+    store.close();
+    process.stdout.write(JSON.stringify(connector ?? null));
+    process.exit(0);
+  }
+  if (cmd === "save-connector") {
+    if (!opts.key || !opts.name) {
+      console.error("usage: portico save-connector --key <key> --name <name> [--framework F] [--base-url URL] [--auth AUTH]");
+      process.exit(2);
+    }
+    const store = new Store();
+    const existing = store.getConnector(opts.key);
+    const now = new Date().toISOString();
+    const id = existing?.id ?? `conn_${Math.random().toString(16).slice(2, 10)}`;
+    const record = {
+      id,
+      key: opts.key,
+      name: opts.name,
+      framework: opts.framework ?? existing?.framework,
+      baseUrl: opts.baseUrl ?? existing?.baseUrl,
+      auth: opts.auth ?? existing?.auth,
+      variables: existing?.variables,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    store.saveConnector(record);
+    store.close();
+    process.stdout.write(JSON.stringify(record));
+    process.exit(0);
+  }
+  if (cmd === "delete-connector") {
+    if (!flowPath) { console.error("usage: portico delete-connector <id>"); process.exit(2); }
+    const store = new Store();
+    store.deleteConnector(flowPath);
+    store.close();
+    process.stdout.write(JSON.stringify({ id: flowPath, deleted: true }));
+    process.exit(0);
+  }
+
+  // ---- app config (LLM settings + connector variables) -------------------
+
+  if (cmd === "config-get") {
+    const store = new Store();
+    const scope = opts.scope ?? "global";
+    const category = opts.category as "llm" | "variable" | undefined;
+    const entries = store.getConfig(scope, category);
+    store.close();
+    process.stdout.write(JSON.stringify(entries));
+    process.exit(0);
+  }
+  if (cmd === "config-set") {
+    if (!opts.scope || !opts.category || !opts.key || opts.value === undefined) {
+      console.error("usage: portico config-set --scope <scope> --category <llm|variable> --key <key> --value <value> [--secret]");
+      process.exit(2);
+    }
+    const store = new Store();
+    store.setConfig({
+      scope: opts.scope,
+      category: opts.category as "llm" | "variable",
+      key: opts.key,
+      value: opts.value,
+      secret: opts.secret,
+    });
+    store.close();
+    process.stdout.write(JSON.stringify({ ok: true }));
+    process.exit(0);
+  }
+
+  // ---- browser session lifecycle (start/kill a long-lived CDP browser) ---
+
+  if (cmd === "session-start") {
+    const tenant = opts.tenant ?? "default";
+    const port = opts.port ?? 9222;
+    const scriptArgs = ["--port", String(port), "--tenant", tenant];
+    if (opts.baseUrl) scriptArgs.push("--base-url", opts.baseUrl);
+    if (opts.profile) scriptArgs.push("--profile", opts.profile);
+
+    const child = spawn(process.execPath, ["scripts/serve-browser.mjs", ...scriptArgs], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+
+    // Track the session ourselves so it's visible even before serve-browser's
+    // own registration lands (that script records a SEPARATE session row under
+    // its own generated id once its browser is up — a harmless double-entry,
+    // not a conflict, since ids never collide).
+    const id = "sess_" + Date.now().toString(16) + Math.random().toString(16).slice(2, 8);
+    const cdpEndpoint = `http://localhost:${port}`;
+    const store = new Store();
+    store.createBrowserSession({
+      id,
+      tenant,
+      profile: opts.profile,
+      cdpEndpoint,
+      startedAt: new Date().toISOString(),
+      pid: child.pid,
+    });
+    store.close();
+    process.stdout.write(JSON.stringify({ id, pid: child.pid, cdpEndpoint }));
+    process.exit(0);
+  }
+  if (cmd === "session-kill") {
+    if (!flowPath) { console.error("usage: portico session-kill <id>"); process.exit(2); }
+    const store = new Store();
+    const session = store.getBrowserSession(flowPath);
+    if (session?.pid) {
+      try {
+        process.kill(session.pid);
+      } catch {
+        /* process may already be gone — proceed to mark the session closed */
+      }
+    }
+    store.closeBrowserSession(flowPath, new Date().toISOString());
+    store.close();
+    process.stdout.write(JSON.stringify({ id: flowPath, killed: true }));
+    process.exit(0);
+  }
+
   // LLM refine pass — clean a draft's coarse act names into a new (llm) draft.
   if (cmd === "refine") {
     const store = new Store();
     const rec = flowPath ? store.getFlow(flowPath) : undefined;
     if (!rec) { store.close(); console.error(`no flow with id "${flowPath ?? ""}"`); process.exit(2); }
     const draft = parseYaml(rec.yaml) as Flow;
+    // UI-set LLM config activates refine: per-connector overrides global, both
+    // over env. resolveHealModel reads PORTICO_HEAL_* — so map config → env first.
+    const pick = (k: string) => store.getConfigValue(rec.connector ?? "", "llm", k) || store.getConfigValue("global", "llm", k);
+    const cfgProvider = pick("provider"), cfgModel = pick("model"), cfgKey = pick("api_key");
+    if (cfgProvider) process.env.PORTICO_HEAL_PROVIDER = cfgProvider;
+    if (cfgModel) process.env.PORTICO_HEAL_MODEL = cfgModel;
+    if (cfgKey) process.env.PORTICO_HEAL_API_KEY = cfgKey;
     const heal = await resolveHealModel();
     if (!heal) {
       store.close();
@@ -148,6 +317,38 @@ async function main() {
     store.close();
     if (opts.json) process.stdout.write(JSON.stringify({ id, key: rec.key, version, source: "llm", steps: refined.steps.length }));
     else console.log(`✔ refined "${rec.key}" → new draft v${version} (id=${id}, ${refined.steps.length} steps)`);
+    process.exit(0);
+  }
+
+  // Save an edited flow YAML as a new draft version (console YAML editor).
+  if (cmd === "save-flow") {
+    if (!opts.key || !opts.yamlFile) {
+      console.error("usage: portico save-flow --key <key> --yaml-file <path> [--connector C]");
+      process.exit(2);
+    }
+    let yamlText: string;
+    try {
+      yamlText = readFileSync(opts.yamlFile, "utf8");
+      const parsed = parseYaml(yamlText) as Flow;
+      if (!parsed || typeof parsed.key !== "string" || !Array.isArray(parsed.steps)) {
+        throw new Error("a flow needs a string `key` and a `steps` array");
+      }
+    } catch (e) {
+      const msg = `yaml invalid: ${e instanceof Error ? e.message : e}`;
+      if (opts.json) process.stdout.write(JSON.stringify({ error: msg }));
+      else console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+    const store = new Store();
+    const version = (store.listFlowVersions(opts.key)[0]?.version ?? 0) + 1;
+    const id = `flow_${opts.key}_v${version}_${Math.random().toString(16).slice(2, 8)}`;
+    store.saveFlow({
+      id, key: opts.key, version, yaml: yamlText, status: "draft", source: "manual",
+      connector: opts.connector, createdAt: new Date().toISOString(),
+    });
+    store.close();
+    if (opts.json) process.stdout.write(JSON.stringify({ id, key: opts.key, version }));
+    else console.log(`✔ saved "${opts.key}" v${version} (id=${id})`);
     process.exit(0);
   }
 
@@ -210,7 +411,12 @@ async function main() {
   }
 
   if ((cmd !== "run" && cmd !== "validate") || !flowPath) {
-    console.error("usage: portico <run <flow.yaml> | validate <flow-id> | confirm <flow-id> | compile <recording.json> | list-flows | get-flow <id> | list-runs | get-run <id>>");
+    console.error(
+      "usage: portico <run <flow.yaml> | validate <flow-id> | confirm <flow-id> | compile <recording.json> | " +
+        "list-flows | get-flow <id> | list-runs | get-run <id> | list-sessions | close-session <id> | " +
+        "list-connectors | get-connector <idOrKey> | save-connector | delete-connector <id> | " +
+        "config-get | config-set | session-start | session-kill <id>>",
+    );
     process.exit(2);
   }
 

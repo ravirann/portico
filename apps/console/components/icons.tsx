@@ -29,3 +29,15 @@ export const IconBolt = (p: P) => (
 export const IconSessions = (p: P) => (
   <svg {...base} className={p.className}><rect x="2" y="3" width="12" height="9" rx="1.5" /><path d="M2 6h12" /><circle cx="4" cy="4.5" r="0.4" fill="currentColor" stroke="none" /><path d="M6 14h4" opacity="0.55" /></svg>
 );
+export const IconSettings = (p: P) => (
+  <svg {...base} className={p.className}><circle cx="8" cy="8" r="2.2" /><path d="M8 1.5v1.6M8 12.9v1.6M2.4 8H1M15 8h-1.4M4 4l1 1M11 11l1 1M12 4l-1 1M5 11l-1 1" /></svg>
+);
+export const IconPlus = (p: P) => (
+  <svg {...base} className={p.className}><path d="M8 3.5v9M3.5 8h9" /></svg>
+);
+export const IconTrash = (p: P) => (
+  <svg {...base} className={p.className}><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8" /></svg>
+);
+export const IconEdit = (p: P) => (
+  <svg {...base} className={p.className}><path d="M11 2.5l2.5 2.5M2.5 11L10 3.5 12.5 6 5 13.5H2.5V11z" /></svg>
+);

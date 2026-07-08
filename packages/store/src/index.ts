@@ -22,6 +22,8 @@ export type {
   AuditFilter,
   BrowserSessionRecord,
   BrowserSessionStatus,
+  ConfigEntry,
+  ConnectorRecord,
   FlowRecord,
   FlowSource,
   FlowStatus,

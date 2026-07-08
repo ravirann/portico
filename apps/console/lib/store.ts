@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import type { RunView, FlowView, SessionView } from "./types.js";
+import type { RunView, FlowView, SessionView, ConnectorRecord, ConfigEntry } from "./types.js";
 
 /** Durable run store, read via the CLI (which owns native SQLite) so nothing
  *  native enters the Next bundle. Runs are persisted by the CLI on every run,
@@ -51,4 +51,27 @@ export function readFlow(id: string): FlowView | undefined {
 export function readSessions(): SessionView[] {
   const r = query(["list-sessions", "--json"]);
   return Array.isArray(r) ? (r as SessionView[]) : [];
+}
+
+/** DB-backed connectors, read via the CLI (editable from the console). Distinct
+ *  from the read-only filesystem "seed" connectors in lib/connectors.ts. */
+export function readConnectors(): ConnectorRecord[] {
+  const r = query(["list-connectors", "--json"]);
+  return Array.isArray(r) ? (r as ConnectorRecord[]) : [];
+}
+
+export function readConnector(idOrKey: string): ConnectorRecord | undefined {
+  const r = query(["get-connector", idOrKey, "--json"]);
+  return r ? (r as ConnectorRecord) : undefined;
+}
+
+/** Scoped config entries (LLM settings + variables). Optionally filtered by
+ *  scope (e.g. "global" or a connector key) and category. */
+export function readConfig(opts: { scope?: string; category?: "llm" | "variable" } = {}): ConfigEntry[] {
+  const args = ["config-get"];
+  if (opts.scope) args.push("--scope", opts.scope);
+  if (opts.category) args.push("--category", opts.category);
+  args.push("--json");
+  const r = query(args);
+  return Array.isArray(r) ? (r as ConfigEntry[]) : [];
 }

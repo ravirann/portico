@@ -1,58 +1,110 @@
+import Link from "next/link";
 import { listConnectors } from "@/lib/connectors";
+import { readConnectors } from "@/lib/store";
+import { fmtRelative } from "@/lib/format";
 import { RunButton } from "@/components/run-button";
+import { ConnectorActions } from "@/components/connector-actions";
+import { IconPlus } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 
 export default function ConnectorsPage() {
-  const connectors = listConnectors();
+  const dbConnectors = readConnectors();
+  const seedConnectors = listConnectors();
+
   return (
     <>
       <div className="topbar"><div className="crumb"><b>Connectors</b></div></div>
       <div className="content">
-        <div className="page-head rise rise-1">
-          <h1 className="page-title">Connectors</h1>
-          <p className="page-sub">
-            A connector is a target site plus its flows and auth — the unit that extends Portico to a new portal.
-            Deployments of the same framework share self-heals.
-          </p>
+        <div className="page-head rise rise-1" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
+          <div>
+            <h1 className="page-title">Connectors</h1>
+            <p className="page-sub">
+              A connector is a target site plus its flows and auth — the unit that extends Portico to a new portal.
+              Deployments of the same framework share self-heals.
+            </p>
+          </div>
+          <Link href="/connectors/new" className="btn btn-primary" style={{ flex: "none", marginTop: 4 }}>
+            <IconPlus className="ico-sm" /> New connector
+          </Link>
         </div>
 
-        {connectors.length === 0 ? (
-          <div className="panel empty rise rise-2">
+        <div className="section-head" style={{ marginTop: 8 }}>
+          <h2>Your connectors</h2>
+          <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{dbConnectors.length} editable</span>
+        </div>
+
+        {dbConnectors.length === 0 ? (
+          <div className="panel empty rise rise-2" style={{ padding: "44px 20px" }}>
             <div className="empty-t">No connectors yet</div>
-            Add one under <span className="mono">connectors/</span> — see the example template.
+            Create one with <b>New connector</b> to define its target, auth and variables.
           </div>
         ) : (
-          <div className="stack rise rise-2" style={{ gap: 18 }}>
-            {connectors.map((c) => (
-              <div key={c.key} className="connector">
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
-                  <div>
-                    <div style={{ fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 560, letterSpacing: "-0.02em" }}>{c.name}</div>
-                    <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
-                      <span className="mono" style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.key}</span>
-                      {c.framework && <span className="chip">{c.framework}</span>}
+          <div className="stack rise rise-2" style={{ gap: 16 }}>
+            {dbConnectors.map((c) => {
+              const varCount = Object.keys(c.variables ?? {}).length;
+              return (
+                <div key={c.id} className="connector">
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+                    <div>
+                      <div style={{ fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 560, letterSpacing: "-0.02em" }}>{c.name}</div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <span className="mono" style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.key}</span>
+                        {c.framework && <span className="chip">{c.framework}</span>}
+                        {varCount > 0 && <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{varCount} variable{varCount === 1 ? "" : "s"}</span>}
+                      </div>
+                      {c.baseUrl && <div className="mono" style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 6 }}>{c.baseUrl}</div>}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
+                      <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>updated {fmtRelative(c.updatedAt)}</span>
+                      <ConnectorActions id={c.id} editKey={c.key} name={c.name} />
                     </div>
                   </div>
-                  <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.flows.length} flow{c.flows.length === 1 ? "" : "s"}</span>
                 </div>
+              );
+            })}
+          </div>
+        )}
 
-                <div style={{ marginTop: 16 }}>
-                  {c.flows.map((f) => (
-                    <div key={f.key} className="flow-row">
-                      <div>
-                        <div className="fk">
-                          {f.key}
-                          {f.noBooking && <span className="chip" style={{ marginLeft: 8, color: "var(--ok)", borderColor: "var(--accent-line)", background: "var(--ok-wash)" }}>no-write</span>}
-                        </div>
-                        {f.description && <div className="fd">{f.description}</div>}
+        {seedConnectors.length > 0 && (
+          <>
+            <div className="section-head">
+              <h2>Seed connectors</h2>
+              <span className="chip">read-only</span>
+            </div>
+            <div className="stack rise rise-3" style={{ gap: 16 }}>
+              {seedConnectors.map((c) => (
+                <div key={c.key} className="connector" style={{ opacity: 0.92 }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+                    <div>
+                      <div style={{ fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 560, letterSpacing: "-0.02em" }}>{c.name}</div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+                        <span className="mono" style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.key}</span>
+                        {c.framework && <span className="chip">{c.framework}</span>}
+                        <span className="chip" style={{ color: "var(--ink-3)" }}>seed</span>
                       </div>
                     </div>
-                  ))}
+                    <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.flows.length} flow{c.flows.length === 1 ? "" : "s"}</span>
+                  </div>
+                  {c.flows.length > 0 && (
+                    <div style={{ marginTop: 16 }}>
+                      {c.flows.map((f) => (
+                        <div key={f.key} className="flow-row">
+                          <div>
+                            <div className="fk">
+                              {f.key}
+                              {f.noBooking && <span className="chip" style={{ marginLeft: 8, color: "var(--ok)", borderColor: "var(--accent-line)", background: "var(--ok-wash)" }}>no-write</span>}
+                            </div>
+                            {f.description && <div className="fd">{f.description}</div>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          </>
         )}
 
         <div style={{ marginTop: 28, display: "flex", alignItems: "center", gap: 14, color: "var(--ink-3)", fontSize: 13 }}>

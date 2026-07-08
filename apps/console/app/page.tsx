@@ -7,13 +7,19 @@ import { IconArrow, IconBolt, IconShield } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 
+const LOOP: { n: string; title: string; body: string; href: string; cta: string }[] = [
+  { n: "01", title: "Record", body: "Drive a portal once — log in and do the task. Portico captures the clicks and the traffic.", href: "/flows", cta: "Flows" },
+  { n: "02", title: "Compile", body: "That recording becomes a draft flow automatically — navigate, harvest, select. No YAML by hand.", href: "/flows", cta: "Drafts" },
+  { n: "03", title: "Validate", body: "Dry-run the draft against a live session. It has to produce real data before it can ship.", href: "/sessions", cta: "Sessions" },
+  { n: "04", title: "Confirm", body: "Promote the validated flow. From here it replays on demand — at browser speed, no model in the loop.", href: "/flows", cta: "Confirm" },
+];
+
 export default function Dashboard() {
   const runs = listRuns();
   const connectors = listConnectors();
   const completed = runs.filter((r) => r.status === "completed");
-  const domRuns = completed.filter((r) => r.tier === "dom");
   const successRate = runs.length ? Math.round((completed.length / runs.length) * 100) : 0;
-  const p50 = median(domRuns.map((r) => r.durationMs));
+  const flowCount = connectors.reduce((n, c) => n + c.flows.length, 0);
   const healed = runs.reduce((n, r) => n + r.steps.filter((s) => s.status === "healed").length, 0);
 
   return (
@@ -25,19 +31,19 @@ export default function Dashboard() {
 
       <div className="content">
         <div className="page-head rise rise-1">
-          <div className="eyebrow" style={{ marginBottom: 12 }}>Automation control</div>
-          <h1 className="page-title">Every run, deterministic and accounted for.</h1>
+          <div className="eyebrow" style={{ marginBottom: 12 }}>Self-serve browser automation</div>
+          <h1 className="page-title">Record a portal once. Replay it in seconds.</h1>
           <p className="page-sub">
-            Flows replay without a model in the loop, self-heal when a portal shifts, and leave a full
-            audit trail — all self-hosted, so credentials never leave your infrastructure.
+            Portico turns a recorded click-through into a validated, self-hosted automation — harvesting the
+            portal&rsquo;s own data instead of scraping it, with no model on the hot path. Even portals you don&rsquo;t control.
           </p>
         </div>
 
         <div className="metrics rise rise-2">
-          <Metric k="Runs today" v={String(runs.length)} foot={<span><span className="up">{successRate}%</span> completed</span>} />
-          <Metric k="DOM-tier p50" v={<><span className="tnum">{(p50 / 1000).toFixed(1)}</span><small>s</small></>} foot={<span>SLO &lt; 6.0s</span>} />
+          <Metric k="Runs" v={String(runs.length)} foot={<span><span className="up">{successRate}%</span> completed</span>} />
+          <Metric k="Success rate" v={<><span className="tnum">{successRate}</span><small>%</small></>} foot={<span>{completed.length}/{runs.length} runs</span>} />
+          <Metric k="Connectors" v={String(connectors.length)} foot={<span>{flowCount} flows</span>} />
           <Metric k="Self-heals" v={String(healed)} foot={<span>locators recovered</span>} />
-          <Metric k="Connectors" v={String(connectors.length)} foot={<span>{connectors.reduce((n, c) => n + c.flows.length, 0)} flows</span>} />
         </div>
 
         <div className="grid-2" style={{ marginTop: 40 }}>
@@ -49,59 +55,74 @@ export default function Dashboard() {
               </Link>
             </div>
             <div className="panel">
-              <table className="table">
-                <thead>
-                  <tr><th>Flow</th><th>Tier</th><th>Status</th><th>Duration</th><th style={{ textAlign: "right" }}>When</th></tr>
-                </thead>
-                <tbody>
-                  {runs.slice(0, 5).map((r) => (
-                    <tr key={r.id} className="rowlink">
-                      <td className="flowcell">
-                        <Link href={`/runs/${r.id}`}>{r.flow}<small>{r.connector} · {r.id}</small></Link>
-                      </td>
-                      <td><span className="chip">{tierLabel[r.tier]}</span></td>
-                      <td><StatusBadge status={r.status} /></td>
-                      <td className="tnum">{fmtDuration(r.durationMs)}</td>
-                      <td style={{ textAlign: "right", color: "var(--ink-3)" }}>{fmtRelative(r.startedAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {runs.length === 0 ? (
+                <div style={{ padding: "40px 24px", textAlign: "center", color: "var(--ink-3)", fontSize: 13.5 }}>
+                  No runs yet. Record a workflow and validate a draft to see runs here.
+                </div>
+              ) : (
+                <table className="table">
+                  <thead>
+                    <tr><th>Flow</th><th>Tier</th><th>Status</th><th>Duration</th><th style={{ textAlign: "right" }}>When</th></tr>
+                  </thead>
+                  <tbody>
+                    {runs.slice(0, 6).map((r) => (
+                      <tr key={r.id} className="rowlink">
+                        <td className="flowcell">
+                          <Link href={`/runs/${r.id}`}>{r.flow}<small>{r.connector} · {r.id}</small></Link>
+                        </td>
+                        <td><span className="chip">{tierLabel[r.tier]}</span></td>
+                        <td><StatusBadge status={r.status} /></td>
+                        <td className="tnum">{fmtDuration(r.durationMs)}</td>
+                        <td style={{ textAlign: "right", color: "var(--ink-3)" }}>{fmtRelative(r.startedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
 
           <div className="rise rise-4 stack" style={{ gap: 20 }}>
             <div className="panel" style={{ padding: "22px 22px" }}>
               <div className="eyebrow" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <IconBolt className="ico-sm" /> Latency guarantee
+                <IconBolt className="ico-sm" /> The self-serve loop
               </div>
-              <p style={{ fontFamily: "var(--font-display)", fontSize: 19, lineHeight: 1.35, marginTop: 14, letterSpacing: "-0.01em" }}>
-                No model call sits on a promoted flow&rsquo;s hot path.
-              </p>
-              <p style={{ color: "var(--ink-2)", fontSize: 13, marginTop: 10 }}>
-                AI authors and heals off the critical path. Steady-state latency is browser speed, not model speed — enforced in review.
-              </p>
-              <hr className="hairline" style={{ margin: "18px 0 14px" }} />
-              <TierBar label="API tier" value="sub-second" pct={12} />
-              <TierBar label="DOM tier" value="seconds" pct={48} />
-              <TierBar label="Agent tier" value="authoring only" pct={100} muted />
-            </div>
-
-            <div className="panel" style={{ padding: "20px 22px" }}>
-              <div className="eyebrow" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <IconShield className="ico-sm" /> Posture
-              </div>
-              <ul style={{ listStyle: "none", marginTop: 14, display: "grid", gap: 11 }}>
-                {["Secrets vaulted, redacted from every trace", "One ephemeral browser context per run", "Egress firewalled to allowed domains", "Self-hosted — data never leaves"].map((t) => (
-                  <li key={t} style={{ display: "flex", gap: 10, fontSize: 13, color: "var(--ink-2)" }}>
-                    <span className="pulse" style={{ marginTop: 5 }} /> {t}
+              <ol className="loop">
+                {LOOP.map((s) => (
+                  <li key={s.n}>
+                    <span className="loop-n">{s.n}</span>
+                    <div className="loop-body">
+                      <div className="loop-title">
+                        {s.title}
+                        <Link href={s.href} className="loop-cta">{s.cta} <IconArrow className="ico-sm" /></Link>
+                      </div>
+                      <p>{s.body}</p>
+                    </div>
                   </li>
                 ))}
-              </ul>
+              </ol>
+            </div>
+
+            <div className="panel trust" style={{ padding: "16px 22px" }}>
+              <IconShield className="ico-sm" />
+              <span>Self-hosted — credentials never leave your infrastructure. Secrets vaulted &amp; redacted from every trace; egress firewalled to allowed domains.</span>
             </div>
           </div>
         </div>
       </div>
+
+      <style>{`
+        .loop { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 4px; }
+        .loop li { display: grid; grid-template-columns: auto 1fr; gap: 14px; padding: 12px 0; position: relative; }
+        .loop li:not(:last-child) { border-bottom: 1px solid var(--line); }
+        .loop-n { font-family: var(--font-mono, ui-monospace); font-size: 12px; color: var(--accent); font-weight: 600; padding-top: 2px; letter-spacing: 0.04em; }
+        .loop-title { display: flex; align-items: center; justify-content: space-between; font-weight: 650; font-size: 14.5px; }
+        .loop-cta { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--ink-3); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+        .loop-cta:hover { color: var(--accent); }
+        .loop-body p { color: var(--ink-2); font-size: 13px; margin: 5px 0 0; line-height: 1.5; max-width: 46ch; }
+        .trust { display: flex; align-items: flex-start; gap: 11px; color: var(--ink-2); font-size: 12.5px; line-height: 1.5; }
+        .trust svg { margin-top: 2px; flex: none; color: var(--accent); }
+      `}</style>
     </>
   );
 }
@@ -118,25 +139,4 @@ function Metric({ k, v, foot }: { k: string; v: React.ReactNode; foot: React.Rea
 
 function StatusBadge({ status }: { status: string }) {
   return <span className={`badge ${status}`}><span className="d" />{status}</span>;
-}
-
-function TierBar({ label, value, pct, muted }: { label: string; value: string; pct: number; muted?: boolean }) {
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 6 }}>
-        <span style={{ fontWeight: 600 }}>{label}</span>
-        <span style={{ color: "var(--ink-3)" }}>{value}</span>
-      </div>
-      <div style={{ height: 5, borderRadius: 4, background: "var(--paper-3)", overflow: "hidden" }}>
-        <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: muted ? "var(--line-2)" : "linear-gradient(90deg, var(--accent-2), var(--accent))" }} />
-      </div>
-    </div>
-  );
-}
-
-function median(xs: number[]): number {
-  if (!xs.length) return 0;
-  const s = [...xs].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 }

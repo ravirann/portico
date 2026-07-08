@@ -4,10 +4,9 @@ import { runCli } from "@/lib/actions";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Kill a live browser session's process (not just mark it closed). Returns
-// { id, killed: true } on success.
-export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+// Delete a DB-backed connector. Returns { id, deleted: true } on success.
+export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const { ok, json } = await runCli(["session-kill", id, "--json"]);
+  const { ok, json } = await runCli(["delete-connector", id, "--json"]);
   return NextResponse.json(json ?? { error: "No response from CLI" }, { status: ok ? 200 : 400 });
 }

@@ -111,7 +111,7 @@ export function pickByPolicy(
   const compare = opts?.compare ?? "date";
 
   if (policy === "first") {
-    return { index: 0, item: items[0] };
+    return { index: 0, item: items[0]! };
   }
 
   if (policy === "earliest" || policy === "latest") {
@@ -126,17 +126,17 @@ export function pickByPolicy(
   if (indexMatch) {
     const n = Number(indexMatch[1]);
     if (!Number.isInteger(n) || n < 0 || n >= items.length) return null;
-    return { index: n, item: items[n] };
+    return { index: n, item: items[n]! };
   }
 
   const onOrAfterMatch = /^on-or-after:(.+)$/.exec(policy);
   if (onOrAfterMatch) {
-    const thresholdRaw = onOrAfterMatch[1];
+    const thresholdRaw = onOrAfterMatch[1]!;
     const threshold = new Date(thresholdRaw).getTime();
     if (Number.isNaN(threshold)) return null;
 
     const candidates = orderableItems(items, opts?.by, compare);
-    const qualifying = candidates.filter((c) => c.value >= threshold);
+    const qualifying = candidates.filter((c) => (c.value as number) >= threshold);
     const winner = pickMin(qualifying);
     if (!winner) return null;
     return { index: winner.index, item: winner.item };

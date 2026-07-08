@@ -2,6 +2,7 @@ import { readSessions } from "@/lib/store";
 import { fmtRelative } from "@/lib/format";
 import type { SessionView } from "@/lib/types";
 import { SessionCloseButton } from "@/components/session-close-button";
+import { SessionStart } from "@/components/session-start";
 
 export const dynamic = "force-dynamic";
 
@@ -28,12 +29,15 @@ export default function SessionsPage() {
             Live and recent browser sessions. Validation runs against an active session&apos;s CDP
             endpoint — keep one running to validate flow drafts.
           </p>
+          <div style={{ marginTop: 18 }}>
+            <SessionStart />
+          </div>
         </div>
 
         {sessions.length === 0 ? (
           <div className="panel empty rise rise-2">
             <div className="empty-t">No sessions</div>
-            Start one with <span className="mono">node scripts/serve-browser.mjs --tenant &lt;you&gt;</span>.
+            Use <b>Start session</b> above to launch a local browser here.
           </div>
         ) : (
           <div className="panel rise rise-2">

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import BetterSqlite3 from "better-sqlite3";
 
 import * as storeModule from "./index.js";
 import { Store } from "./index.js";
@@ -404,6 +405,185 @@ test("listFlows returns recent flows newest-first across keys", () => {
     store.saveFlow({ id: "b", key: "beta", version: 1, yaml: "x", status: "confirmed", source: "llm", createdAt: "2026-07-08T11:00:00.000Z" });
     const flows = store.listFlows(10).map((f) => f.id);
     assert.deepEqual(flows, ["b", "a"]);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("connectors: save then get (by id and key), list, delete round-trip incl. variables", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveConnector({
+      id: "conn_1",
+      key: "example-portal",
+      name: "Example Portal",
+      framework: "playwright",
+      baseUrl: "https://example.test",
+      auth: "form",
+      variables: { region: "us-east", tier: "gold" },
+      createdAt: "2026-07-08T10:00:00.000Z",
+      updatedAt: "2026-07-08T10:00:00.000Z",
+    });
+    store.saveConnector({
+      id: "conn_2",
+      key: "alpha-portal",
+      name: "Alpha Portal",
+      createdAt: "2026-07-08T10:00:00.000Z",
+      updatedAt: "2026-07-08T10:00:00.000Z",
+    });
+
+    const byId = store.getConnector("conn_1");
+    assert.ok(byId);
+    assert.equal(byId.key, "example-portal");
+    assert.equal(byId.name, "Example Portal");
+    assert.equal(byId.framework, "playwright");
+    assert.equal(byId.baseUrl, "https://example.test");
+    assert.equal(byId.auth, "form");
+    assert.deepEqual(byId.variables, { region: "us-east", tier: "gold" });
+
+    const byKey = store.getConnector("example-portal");
+    assert.ok(byKey);
+    assert.equal(byKey.id, "conn_1");
+
+    assert.equal(store.getConnector("missing"), undefined);
+
+    const listed = store.listConnectors().map((c) => c.name);
+    assert.deepEqual(listed, ["Alpha Portal", "Example Portal"]); // name asc
+
+    store.deleteConnector("conn_1");
+    assert.equal(store.getConnector("conn_1"), undefined);
+    assert.equal(store.getConnector("example-portal"), undefined);
+    assert.equal(store.listConnectors().length, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("connectors: saveConnector upserts by id", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveConnector({
+      id: "conn_1",
+      key: "example-portal",
+      name: "Example Portal",
+      createdAt: "2026-07-08T10:00:00.000Z",
+      updatedAt: "2026-07-08T10:00:00.000Z",
+    });
+    store.saveConnector({
+      id: "conn_1",
+      key: "example-portal",
+      name: "Example Portal Renamed",
+      baseUrl: "https://updated.test",
+      createdAt: "2026-07-08T10:00:00.000Z",
+      updatedAt: "2026-07-08T11:00:00.000Z",
+    });
+    const got = store.getConnector("conn_1");
+    assert.equal(got?.name, "Example Portal Renamed");
+    assert.equal(got?.baseUrl, "https://updated.test");
+    assert.equal(store.listConnectors().length, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("config: plaintext values round-trip via getConfig/getConfigValue", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.setConfig({ scope: "global", category: "llm", key: "provider", value: "anthropic" });
+    store.setConfig({ scope: "global", category: "llm", key: "model", value: "claude-sonnet" });
+    store.setConfig({ scope: "example-portal", category: "variable", key: "region", value: "us-east" });
+
+    assert.equal(store.getConfigValue("global", "llm", "provider"), "anthropic");
+    const llmEntries = store.getConfig("global", "llm");
+    assert.equal(llmEntries.length, 2);
+    assert.deepEqual(
+      llmEntries.map((e) => e.key),
+      ["model", "provider"],
+    );
+    assert.equal(llmEntries.every((e) => e.secret === false), true);
+
+    const allGlobal = store.getConfig("global");
+    assert.equal(allGlobal.length, 2);
+
+    const scoped = store.getConfig("example-portal", "variable");
+    assert.equal(scoped.length, 1);
+    assert.equal(scoped[0]?.value, "us-east");
+
+    assert.equal(store.getConfigValue("missing-scope", "llm", "provider"), undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("config: secret values are encrypted at rest but decrypted on read", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.setConfig({ scope: "global", category: "llm", key: "api-key", value: "sk-super-secret", secret: true });
+
+    assert.equal(store.getConfigValue("global", "llm", "api-key"), "sk-super-secret");
+    const entries = store.getConfig("global", "llm");
+    assert.equal(entries[0]?.value, "sk-super-secret");
+    assert.equal(entries[0]?.secret, true);
+
+    // the stored column is ciphertext, not plaintext — inspect it directly.
+    const raw = new BetterSqlite3(join(dir, "portico.db"));
+    try {
+      const row = raw
+        .prepare("SELECT value FROM app_config WHERE scope = ? AND category = ? AND key = ?")
+        .get("global", "llm", "api-key") as { value: string };
+      assert.notEqual(row.value, "sk-super-secret");
+    } finally {
+      raw.close();
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("config: setConfig upserts by (scope, category, key); deleteConfig removes", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.setConfig({ scope: "global", category: "variable", key: "greeting", value: "hello" });
+    store.setConfig({ scope: "global", category: "variable", key: "greeting", value: "goodbye" });
+    assert.equal(store.getConfigValue("global", "variable", "greeting"), "goodbye");
+    assert.equal(store.getConfig("global", "variable").length, 1);
+
+    store.deleteConfig("global", "variable", "greeting");
+    assert.equal(store.getConfigValue("global", "variable", "greeting"), undefined);
+    assert.equal(store.getConfig("global", "variable").length, 0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("browser_sessions: pid persists through createBrowserSession + getBrowserSession", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.createBrowserSession({
+      id: "bsess-pid-1",
+      tenant: "tenant-x",
+      startedAt: "2026-07-08T10:00:00.000Z",
+      pid: 12345,
+    });
+    let got = store.getBrowserSession("bsess-pid-1");
+    assert.equal(got?.pid, 12345);
+
+    store.createBrowserSession({
+      id: "bsess-no-pid",
+      tenant: "tenant-x",
+      startedAt: "2026-07-08T10:00:00.000Z",
+    });
+    assert.equal(store.getBrowserSession("bsess-no-pid")?.pid, undefined);
+
+    store.setBrowserSessionPid("bsess-no-pid", 999);
+    got = store.getBrowserSession("bsess-no-pid");
+    assert.equal(got?.pid, 999);
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
