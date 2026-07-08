@@ -5,6 +5,7 @@
     { "path": "packages/vault" },
     { "path": "packages/store" },
     { "path": "packages/engine" },
+    { "path": "packages/author" },
     { "path": "apps/cli" }
   ]
 }

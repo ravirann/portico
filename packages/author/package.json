@@ -1,0 +1,15 @@
+{
+  "name": "@portico/author",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "build": "tsc -b" },
+  "dependencies": {
+    "@portico/flow-spec": "workspace:*",
+    "@browserbasehq/stagehand": "^3.6.0",
+    "playwright": "^1.49.0",
+    "zod": "^4.3.6"
+  }
+}
