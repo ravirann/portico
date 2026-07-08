@@ -18,6 +18,7 @@ export type StepType =
   | "resolve" // canonicalize a fuzzy intent input against real candidates
   | "read" // read a value out of the live page (session token / option list)
   | "select" // pick one item from a prior list by policy (e.g. earliest slot)
+  | "intercept" // passively capture a JSON response the page itself makes
   | "subflow"; // reuse another flow (e.g. portal-login)
 
 /** A cached deterministic locator plus the semantic descriptor used to heal it. */
@@ -87,6 +88,14 @@ export interface Step {
     compare?: "date" | "number" | "string";
     as: string;
   };
+  /**
+   * For intercept: register a passive listener that captures the JSON body of a
+   * response the PAGE itself makes (URL contains `url_contains`), storing the
+   * latest match in `output[as]`. Register it before the action that triggers
+   * the request. This harvests API-tier data without replaying the request —
+   * the robust path for anti-replay/anti-forgery-protected endpoints.
+   */
+  intercept?: { url_contains: string; as: string };
   /** For assert/guard: a named condition the engine knows how to check. */
   condition?: string;
   /** Retry/timeout policy overrides. */

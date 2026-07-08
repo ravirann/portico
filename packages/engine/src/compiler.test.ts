@@ -167,6 +167,32 @@ test("resolve emits an id from object candidates; select picks the earliest slot
   assert.equal(out.chosen.DisplayDateTimeUtc, "2026-09-04T17:30:00Z"); // the earliest, not first
 });
 
+test("intercept captures the latest matching JSON response the page makes", async () => {
+  const flow: Flow = {
+    key: "icept",
+    version: 1,
+    steps: [{ type: "intercept", label: "grab slots", intercept: { url_contains: "/Scheduling/GetSlots", as: "slots_raw" } }],
+  };
+  const { plan } = compileFlow(flow, target);
+  assert.equal(plan[0]!.type, "intercept");
+
+  let handler: ((resp: unknown) => Promise<void>) | undefined;
+  const out: Record<string, any> = {};
+  const rt = {
+    output: out,
+    rawPage: { on: (evt: string, h: (resp: unknown) => Promise<void>) => { if (evt === "response") handler = h; } },
+  } as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+
+  await plan[0]!.run(rt);
+  assert.equal(typeof handler, "function");
+
+  const resp = (url: string, body: unknown) => ({ url: () => url, ok: () => true, json: async () => body });
+  await handler!(resp("https://x/other", { nope: 1 }));
+  assert.equal(out.slots_raw, undefined); // non-matching URL ignored
+  await handler!(resp("https://mychart/MyChart/Scheduling/GetSlots", { Solutions: [{ Slots: [{ TimeString: "1:30 PM" }] }] }));
+  assert.deepEqual(out.slots_raw, { Solutions: [{ Slots: [{ TimeString: "1:30 PM" }] }] });
+});
+
 test("resolveProfile normalizes the profile id and points at .libretto/profiles", () => {
   const p = resolveProfile("URMC MyChart!", { cwd: "/tmp/repo" });
   assert.equal(p.name, "urmc-mychart");

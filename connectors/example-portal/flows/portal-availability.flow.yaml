@@ -1,31 +1,20 @@
-# API-TIER AVAILABILITY READ — the promoted, "seconds-not-minutes" scheduling flow.
-# Reads open MyChart appointment slots by INTENT (specialty/reason/location) via
-# Epic's own JSON endpoints, then picks one by policy. DISCOVERY ONLY — reads
-# availability and stops; never reserves, never books.
+# AVAILABILITY HARVEST — the robust "seconds-not-minutes" scheduling read.
 #
-# Authored + grounded from a real network capture (record-network → analyze +
-# response forensics). The read chain and every id path below are the actual ones
-# MyChart uses:
-#   GetSchedulingWorkflowData  → Specialties[] {Name, Id(encrypted)}  (specialty→id)
-#   GetSpecialtyData(SpecialtyId) → ReasonsForVisit[], Locations[], ProviderDepartmentPairs[]
-#   GetDeferredSchedulingData  → ReasonForVisitLineId  (token GetSlots needs)
-#   GetSlots                   → Solutions[].Slots[] {DateString, TimeString, …}
-# BrowserId + nonce are client-minted (random+timestamp / 32-hex), so we generate
-# them in-page rather than read them.
+# Instead of replaying Epic's anti-replay/anti-forgery-protected requests (which
+# fails — GetSchedulingWorkflowData's nonce is single-use), we work WITH the page:
+# it makes the GetSlots call itself (with valid tokens), and we PASSIVELY INTERCEPT
+# the JSON response. This is Libretto's recommended strategy for protected sites.
 #
-# ── VALIDATION CHECKLIST (first live run) ─────────────────────────────────────
-#   [ ] nonce: generated 32-hex is accepted by GetSchedulingWorkflowData; if it
-#       401/errors, read the real page nonce instead (« VALIDATE » at that step).
-#   [ ] GetSpecialtyData/GetSlots header name for the anti-forgery token.
-# The engine steps (read/resolve→id/select/form-api) are unit-tested; these two
-# are the only site-specific unknowns left.
+# The moment the appointment times render, we've captured EVERY open slot as
+# structured data — no scraping — and we pick one by policy. DISCOVERY ONLY:
+# it reads availability and stops; it never reserves and never books.
+#
+# Flow of control:
+#   navigate → register interceptor → (you log in + select) → pick earliest slot
 key: portal-availability
 version: 1
-description: Read MyChart open slots by intent via the API tier, pick by policy. Never books.
+description: Harvest MyChart open slots from the page's own GetSlots response, pick by policy. Never books.
 inputs:
-  specialty: string           # e.g. "Primary Care"
-  reason: string              # e.g. "New Patient Adult Visit (18 and over)"
-  location: string            # e.g. "Southview"
   slot_preference: string?    # "earliest" (default) | "on-or-after:YYYY-MM-DD"
 
 guard:
@@ -35,150 +24,22 @@ guard:
 
 steps:
   - type: navigate
-    label: Open the scheduling page (redirects to login if the session lapsed)
+    label: Open the scheduling page
     url: "{{base_url}}/MyChart/Scheduling"
 
-  # Log in inside the run — the reliable path for Epic's aggressive session expiry
-  # and mandatory 2FA. After sign-in, Epic redirects to the Scheduling page and the
-  # reads below pick up the real (172-char) anti-forgery token.
+  # Register the passive listener BEFORE the selection that triggers GetSlots.
+  # It captures the latest GetSlots JSON the page fetches into `slots_raw`.
+  - type: intercept
+    label: Capture the page's GetSlots response
+    intercept:
+      url_contains: "/Scheduling/GetSlots"
+      as: slots_raw
+
+  # You drive the selection — the page makes GetSlots with valid tokens for free.
   - type: human
-    label: Log in (+2FA) if prompted, land on "Schedule an Appointment", then press Enter
+    label: "Log in (+2FA), then choose specialty → reason → location until appointment TIMES appear, then press Enter"
 
-  # DIAGNOSTIC — dumps what page we actually landed on. If csrf stays 108-char and
-  # the API returns HTML, this tells us whether the session expired / we're on the
-  # wrong page (hasCSRFContainer=false, tokenLens without a 172) vs a real problem.
-  - type: read
-    label: DIAGNOSTIC — live page state
-    read:
-      expression: "JSON.stringify({url:location.href,title:document.title,hasCSRFContainer:!!document.querySelector('#__CSRFContainer'),tokenLens:[...document.querySelectorAll('input[name=\"__RequestVerificationToken\"]')].map(e=>e.value.length),hasSpecialtyUi:!!document.querySelector('[class*=schedul i],[id*=schedul i]'),bodyStart:(document.body.innerText||'').replace(/\\s+/g,' ').slice(0,160)})"
-      as: _probe
-
-  # ── Session tokens. csrf is read from the page; BrowserId + nonce are minted
-  #    client-side (matching the captured formats).
-  - type: read
-    label: Read the anti-forgery token from #__CSRFContainer
-    read:
-      expression: "document.querySelector('#__CSRFContainer input[name=\"__RequestVerificationToken\"]')?.value || [...document.querySelectorAll('input[name=\"__RequestVerificationToken\"]')].map(e=>e.value).sort((a,b)=>b.length-a.length)[0] || ''"
-      as: csrf
-  - type: read
-    label: Mint a BrowserId (20 random chars + unix seconds)
-    read:
-      expression: "(function(){var c='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',s='';for(var i=0;i<20;i++)s+=c[Math.floor(Math.random()*62)];return s+Math.floor(Date.now()/1000);})()"
-      as: browser_id
-  - type: read
-    label: Read the CSP nonce (Epic reuses it as the workflow nonce)
-    read:
-      expression: "(document.querySelector('style[nonce]')||document.querySelector('script[nonce]')||document.querySelector('[nonce]'))?.nonce || ''"
-      as: nonce
-  - type: read
-    label: Read the client time zone
-    read:
-      expression: "Intl.DateTimeFormat().resolvedOptions().timeZone"
-      as: client_tz
-
-  # DIAGNOSTIC — fire the exact GetSchedulingWorkflowData fetch from the page and
-  # report status / redirect / content-type, so we can see WHY it returns HTML.
-  - type: read
-    label: DIAGNOSTIC — raw GetSchedulingWorkflowData response
-    read:
-      expression: "(function(){var els=[].slice.call(document.getElementsByName('__RequestVerificationToken'));var tok=els.map(function(e){return e.value}).sort(function(a,b){return b.length-a.length})[0]||'';var nn=(document.querySelector('style[nonce]')||document.querySelector('[nonce]')||{}).nonce||'';return fetch('/MyChart/Scheduling/GetSchedulingWorkflowData',{method:'POST',headers:{'__RequestVerificationToken':tok,'X-Requested-With':'XMLHttpRequest','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body:'nonce='+encodeURIComponent(nn),credentials:'include'}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,redirected:r.redirected,finalUrl:r.url,ctype:r.headers.get('content-type'),tokLen:tok.length,head:t.slice(0,160).replace(/\\s+/g,' ')})})})})()"
-      as: _apiprobe
-
-  # ── API TIER — the specialty list (with its encrypted id) comes from here.
-  - type: extract
-    label: Load scheduling workflow data (API)
-    api:
-      url: "{{base_url}}/MyChart/Scheduling/GetSchedulingWorkflowData"
-      method: POST
-      bodyType: form
-      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }         # « VALIDATE » header name
-      body: { nonce: "{{nonce}}" }
-    extract:
-      key: workflow
-      schema: { type: object }
-
-  - type: resolve
-    label: specialty → SpecialtyId (encrypted; refuse if ambiguous)
-    resolve: { input: "{{specialty}}", candidates: "workflow.Specialties", match_on: Name, value_field: Id, as: specialty_id }
-
-  # ── Load that specialty's providers, reasons, locations, and provider/dept pairs.
-  - type: extract
-    label: Load specialty scheduling data (API)
-    api:
-      url: "{{base_url}}/MyChart/Scheduling/GetSpecialtyData"
-      method: POST
-      bodyType: form
-      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }
-      body: { SpecialtyId: "{{specialty_id}}" }
-    extract:
-      key: specialty_data
-      schema: { type: object }
-
-  # ── Resolve reason + location to the ids GetSlots needs, from the real arrays.
-  - type: resolve
-    label: reason → VisitTypeId
-    resolve: { input: "{{reason}}", candidates: "specialty_data.ReasonsForVisit", match_on: Title, value_field: DefaultVisitTypeId, as: visit_type_id }
-  - type: resolve
-    label: reason → ReasonForVisitId
-    resolve: { input: "{{reason}}", candidates: "specialty_data.ReasonsForVisit", match_on: Title, value_field: Id, as: reason_id }
-  - type: resolve
-    label: location → DepartmentId
-    resolve: { input: "{{location}}", candidates: "specialty_data.Locations", match_on: Name, value_field: ID, as: department_id }
-  - type: select
-    label: Provider-department pair for the visit          # « VALIDATE » filter by department for multi-provider specialties
-    select: { from: "specialty_data.ProviderDepartmentPairs", policy: first, as: pair }
-
-  # ── The reason-for-visit line token GetSlots requires.
-  - type: extract
-    label: Load deferred scheduling data (API)
-    api:
-      url: "{{base_url}}/MyChart/Scheduling/GetDeferredSchedulingData"
-      method: POST
-      bodyType: form
-      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }
-      body:
-        schedulingParameters.reasonForVisitId: "{{reason_id}}"
-        schedulingParameters.specialtyId: "{{specialty_id}}"
-        workflow.Type: "2"
-        workflow.BrowserId: "{{browser_id}}"
-    extract:
-      key: deferred
-      schema: { type: object }
-
-  # ── THE PROMOTED READ: all open slots in one sub-second call. Keys/params are
-  #    the exact ones captured from the live GetSlots request.
-  - type: extract
-    label: Read available slots (API tier)
-    api:
-      url: "{{base_url}}/MyChart/Scheduling/GetSlots"
-      method: POST
-      bodyType: form
-      headers: { __requestverificationtoken: "{{csrf}}", x-requested-with: XMLHttpRequest }
-      body:
-        workflow.Type: "2"
-        workflow.IsGuest: "false"
-        workflow.IsAnonymous: "false"
-        workflow.IsFromPrelogin: "false"
-        workflow.IsAuthenticatedWidget: "false"
-        workflow.BrowserId: "{{browser_id}}"
-        "appointmentBuilder.Appointments[0].VisitTypeId": "{{visit_type_id}}"
-        "appointmentBuilder.Appointments[0].ProviderDepartmentPairs[0].ProviderId": "{{pair.ProviderId}}"
-        "appointmentBuilder.Appointments[0].ProviderDepartmentPairs[0].DepartmentId": "{{pair.DepartmentId}}"
-        "appointmentBuilder.Appointments[0].ProviderDepartmentPairs[0].IsTeamMember": "false"
-        "appointmentBuilder.Appointments[0].Slot": ""
-        "appointmentBuilder.Appointments[0].SearchStartDte": ""
-        "appointmentBuilder.Appointments[0].SelectedTelehealthMode": "0"
-        "appointmentBuilder.Appointments[0].CanSkipLicensureCheck": "false"
-        appointmentBuilder.ReasonForVisitLine: "{{deferred.ReasonForVisitLineId}}"
-        appointmentBuilder.SpecialtyId: "{{specialty_id}}"
-        appointmentBuilder.ClientIANATimeZone: "{{client_tz}}"
-        startDte: ""
-        useSchedulingPreferences: "false"
-    extract:
-      key: slots_raw
-      schema: { type: object }
-
-  # ── Pick one slot by policy (earliest by default). Never reserved, never booked.
+  # Pick one slot by policy from the harvested availability. Never reserved/booked.
   - type: select
     label: Pick the slot matching slot_preference
     select:
@@ -187,5 +48,5 @@ steps:
       by: DisplayDateTimeUtc
       compare: date
       as: chosen_slot
-# Ends here. Output = slots_raw (all availability) + chosen_slot. No reserve step
-# exists and ReserveAppointment is forbidden → nothing is booked, by construction.
+# Output = slots_raw (every open slot, as structured JSON) + chosen_slot (the pick).
+# No reserve step exists and ReserveAppointment is forbidden → nothing is booked.

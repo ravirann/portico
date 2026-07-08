@@ -205,6 +205,8 @@ function compileStep(step: Step, index: number, target: Target): CompiledStep {
       return { index, type: "read", label, run: (rt) => runRead(rt, step) };
     case "select":
       return { index, type: "select", label, run: (rt) => runSelect(rt, step) };
+    case "intercept":
+      return { index, type: "intercept", label, run: (rt) => runIntercept(rt, step) };
     case "subflow":
       return { index, type: "subflow", label, run: (rt) => runAuthSubflow(rt, step, target) };
     case "download":
@@ -381,6 +383,30 @@ async function runSelect(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   }
   rt.output[spec.as] = picked.item;
   return { status: "ok", detail: `selected [${picked.index}] via ${policy}` };
+}
+
+/**
+ * Passive interception: register a listener that captures the JSON body of a
+ * response the PAGE itself makes (URL contains a marker), storing the latest
+ * match in output. Harvests API-tier data (e.g. GetSlots) without replaying the
+ * request — the robust path when the endpoint is anti-replay / anti-forgery
+ * protected. Register before the action (human selection / clicks) that triggers it.
+ */
+async function runIntercept(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+  const spec = step.intercept;
+  if (!spec) throw new Error(`intercept step "${step.label ?? "?"}" is missing its intercept config`);
+  let captured = 0;
+  rt.rawPage.on("response", async (resp) => {
+    try {
+      if (!resp.url().includes(spec.url_contains) || !resp.ok()) return;
+      rt.output[spec.as] = await resp.json(); // latest matching response wins
+      captured++;
+      rt.output[`${spec.as}__count`] = captured;
+    } catch {
+      /* non-JSON body or a torn-down response — ignore, keep listening */
+    }
+  });
+  return { status: "ok", detail: `intercepting responses matching "${spec.url_contains}" → ${spec.as}` };
 }
 
 async function runAssert(rt: StepRuntime, step: Step): Promise<StepOutcome> {
