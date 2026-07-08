@@ -211,7 +211,9 @@ async function main() {
     const store = new Store();
     const scope = opts.scope ?? "global";
     const category = opts.category as "llm" | "variable" | undefined;
-    const entries = store.getConfig(scope, category);
+    // Never hand decrypted secret values to the console — mask them, keep the
+    // flag so the UI can show "configured ✓". Runtime readers use getConfigValue.
+    const entries = store.getConfig(scope, category).map((e) => (e.secret ? { ...e, value: "" } : e));
     store.close();
     process.stdout.write(JSON.stringify(entries));
     process.exit(0);
@@ -231,6 +233,18 @@ async function main() {
     });
     store.close();
     process.stdout.write(JSON.stringify({ ok: true }));
+    process.exit(0);
+  }
+  if (cmd === "config-delete") {
+    if (!opts.scope || !opts.category || !opts.key) {
+      console.error("usage: portico config-delete --scope <scope> --category <llm|variable> --key <key>");
+      process.exit(2);
+    }
+    const store = new Store();
+    store.deleteConfig(opts.scope, opts.category as "llm" | "variable", opts.key);
+    store.close();
+    if (opts.json) process.stdout.write(JSON.stringify({ ok: true }));
+    else console.log(`✔ deleted ${opts.scope}/${opts.category}/${opts.key}`);
     process.exit(0);
   }
 
@@ -450,6 +464,21 @@ async function main() {
   const secrets = Object.keys(secretRefs).length
     ? await resolveSecrets(new EnvSecretProvider(), secretRefs)
     : {};
+
+  // Activate self-heal / AI-extract from the DB LLM config (Settings) when set —
+  // so a UI-configured model works on runs without editing .env. Per-connector
+  // (flow.connector / instance) overrides global; both map into PORTICO_HEAL_*
+  // which resolveHealModel reads inside the engine.
+  try {
+    const cfgStore = new Store();
+    const scope = opts.connector ?? (instance.instance as string | undefined) ?? "";
+    const pick = (k: string) => cfgStore.getConfigValue(scope, "llm", k) || cfgStore.getConfigValue("global", "llm", k);
+    const hp = pick("provider"), hm = pick("model"), hk = pick("api_key");
+    cfgStore.close();
+    if (hp) process.env.PORTICO_HEAL_PROVIDER = hp;
+    if (hm) process.env.PORTICO_HEAL_MODEL = hm;
+    if (hk) process.env.PORTICO_HEAL_API_KEY = hk;
+  } catch { /* config read is best-effort */ }
 
   const engine = getEngine("libretto");
   const mode: RunMode = opts.live ? "live" : "dry_run";

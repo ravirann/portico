@@ -15,7 +15,7 @@
 export { Store } from "./store.js";
 export type { StoreOptions } from "./store.js";
 export { Artifacts } from "./artifacts.js";
-export { base64Cipher } from "./crypto.js";
+export { base64Cipher, aesGcmCipher, defaultCipher } from "./crypto.js";
 export type { SessionCipher } from "./crypto.js";
 export type {
   AuditEvent,

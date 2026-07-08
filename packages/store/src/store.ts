@@ -14,7 +14,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Artifacts } from "./artifacts.js";
-import { base64Cipher, type SessionCipher } from "./crypto.js";
+import { defaultCipher, type SessionCipher } from "./crypto.js";
 import { migrate } from "./schema.js";
 import type {
   AuditEvent,
@@ -136,7 +136,7 @@ export class Store {
 
     this.db = new Database(dbPath);
     migrate(this.db);
-    this.cipher = opts.cipher ?? base64Cipher;
+    this.cipher = opts.cipher ?? defaultCipher();
     this.artifacts = new Artifacts(dataDir);
   }
 
