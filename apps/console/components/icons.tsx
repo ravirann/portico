@@ -26,3 +26,6 @@ export const IconArrow = (p: P) => (
 export const IconBolt = (p: P) => (
   <svg {...base} className={p.className}><path d="M9 2L4 9h3.5L7 14l5-7H8.5L9 2z" /></svg>
 );
+export const IconSessions = (p: P) => (
+  <svg {...base} className={p.className}><rect x="2" y="3" width="12" height="9" rx="1.5" /><path d="M2 6h12" /><circle cx="4" cy="4.5" r="0.4" fill="currentColor" stroke="none" /><path d="M6 14h4" opacity="0.55" /></svg>
+);

@@ -5,6 +5,7 @@ import type { Flow, Step } from "@portico/flow-spec";
 import { readFlow } from "@/lib/store";
 import { fmtRelative } from "@/lib/format";
 import type { FlowView } from "@/lib/types";
+import { FlowActions } from "@/components/flow-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -71,6 +72,12 @@ export default async function FlowDetail({ params }: { params: Promise<{ id: str
             <span className="chip">{flow.source}</span>
             <span style={{ fontSize: 12, color: "var(--ink-3)" }}>created {fmtRelative(flow.createdAt)}</span>
           </div>
+
+          {flow.status === "draft" && (
+            <div style={{ marginTop: 20 }}>
+              <FlowActions flowId={flow.id} />
+            </div>
+          )}
         </div>
 
         <div className="grid-2 rise rise-2" style={{ alignItems: "start" }}>

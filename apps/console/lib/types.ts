@@ -51,3 +51,17 @@ export interface FlowView {
   createdAt: string; // ISO
   validation: ValidationView | null;
 }
+
+export type SessionStatus = "active" | "closed";
+export type SessionHealth = "active" | "idle" | "stale";
+
+export interface SessionView {
+  id: string;
+  tenant: string;
+  profile?: string;
+  cdpEndpoint?: string;
+  status: SessionStatus;
+  startedAt: string; // ISO
+  lastActiveAt: string; // ISO
+  health: SessionHealth;
+}

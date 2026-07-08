@@ -22,6 +22,10 @@ export { compileRecording } from "./compile-recording.js";
 export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";
 export { evaluateValidation, expectedOutputKeys } from "./validate-flow.js";
 export type { ValidationResult, RunResultLike } from "./validate-flow.js";
+export { refineFlow, applyNameRefinements } from "./refine-flow.js";
+export type { NameRefinement } from "./refine-flow.js";
+export { sessionHealth, registerSession, keepAliveSession, endSession, listSessions } from "./session-manager.js";
+export type { SessionHealth, TrackedSession, SessionStore } from "./session-manager.js";
 
 import type { EngineAdapter } from "./types.js";
 import { LibrettoAdapter } from "./adapters/libretto.js";

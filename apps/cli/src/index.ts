@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getEngine, compileRecording, evaluateValidation } from "@portico/engine";
+import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
@@ -107,6 +107,50 @@ async function main() {
     process.stdout.write(JSON.stringify(out));
     process.exit(0);
   }
+  if (cmd === "list-sessions") {
+    const store = new Store();
+    const sessions = listSessions(store, Date.now());
+    store.close();
+    process.stdout.write(JSON.stringify(sessions));
+    process.exit(0);
+  }
+  if (cmd === "close-session") {
+    if (!flowPath) { console.error("usage: portico close-session <id>"); process.exit(2); }
+    const store = new Store();
+    store.closeBrowserSession(flowPath, new Date().toISOString());
+    store.close();
+    if (opts.json) process.stdout.write(JSON.stringify({ id: flowPath, closed: true }));
+    else console.log(`✔ closed session ${flowPath}`);
+    process.exit(0);
+  }
+  // LLM refine pass — clean a draft's coarse act names into a new (llm) draft.
+  if (cmd === "refine") {
+    const store = new Store();
+    const rec = flowPath ? store.getFlow(flowPath) : undefined;
+    if (!rec) { store.close(); console.error(`no flow with id "${flowPath ?? ""}"`); process.exit(2); }
+    const draft = parseYaml(rec.yaml) as Flow;
+    const heal = await resolveHealModel();
+    if (!heal) {
+      store.close();
+      const msg = "no model configured — set PORTICO_HEAL_PROVIDER + PORTICO_HEAL_API_KEY to refine";
+      if (opts.json) process.stdout.write(JSON.stringify({ error: msg }));
+      else console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+    const emptyRec: Recording = { baseUrl: "", clicks: [], network: [] };
+    const refined = await refineFlow(draft, emptyRec, heal.languageModel);
+    const version = (store.listFlowVersions(rec.key)[0]?.version ?? 0) + 1;
+    const id = `flow_${rec.key}_v${version}_${Math.random().toString(16).slice(2, 8)}`;
+    store.saveFlow({
+      id, key: rec.key, version, yaml: stringifyYaml(refined), status: "draft", source: "llm",
+      connector: rec.connector, createdAt: new Date().toISOString(),
+    });
+    store.close();
+    if (opts.json) process.stdout.write(JSON.stringify({ id, key: rec.key, version, source: "llm", steps: refined.steps.length }));
+    else console.log(`✔ refined "${rec.key}" → new draft v${version} (id=${id}, ${refined.steps.length} steps)`);
+    process.exit(0);
+  }
+
   // Promote a draft to confirmed — only if its latest validation passed.
   if (cmd === "confirm") {
     const store = new Store();

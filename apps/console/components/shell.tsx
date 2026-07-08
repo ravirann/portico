@@ -2,12 +2,13 @@
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { IconConnectors, IconDash, IconFlows, IconRuns } from "./icons";
+import { IconConnectors, IconDash, IconFlows, IconRuns, IconSessions } from "./icons";
 
 const NAV = [
   { href: "/", label: "Overview", Icon: IconDash, exact: true },
   { href: "/runs", label: "Runs", Icon: IconRuns },
   { href: "/flows", label: "Flows", Icon: IconFlows },
+  { href: "/sessions", label: "Sessions", Icon: IconSessions },
   { href: "/connectors", label: "Connectors", Icon: IconConnectors },
 ];
 
