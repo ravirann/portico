@@ -41,6 +41,15 @@ steps:
     label: Open the scheduling wizard (mints the session context)
     url: "{{base_url}}/MyChart/Scheduling"
 
+  # DIAGNOSTIC — dumps what page we actually landed on. If csrf stays 108-char and
+  # the API returns HTML, this tells us whether the session expired / we're on the
+  # wrong page (hasCSRFContainer=false, tokenLens without a 172) vs a real problem.
+  - type: read
+    label: DIAGNOSTIC — live page state
+    read:
+      expression: "JSON.stringify({url:location.href,title:document.title,hasCSRFContainer:!!document.querySelector('#__CSRFContainer'),tokenLens:[...document.querySelectorAll('input[name=\"__RequestVerificationToken\"]')].map(e=>e.value.length),hasSpecialtyUi:!!document.querySelector('[class*=schedul i],[id*=schedul i]'),bodyStart:(document.body.innerText||'').replace(/\\s+/g,' ').slice(0,160)})"
+      as: _probe
+
   # ── Session tokens. csrf is read from the page; BrowserId + nonce are minted
   #    client-side (matching the captured formats).
   - type: read
