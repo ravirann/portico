@@ -154,6 +154,14 @@ function looksLikeSlotData(preview?: string | null): boolean {
  */
 const LOGIN_FIELD_RE = /^(login|submit|sign\s?in|password|username|next|continue|verify|code)$/i;
 
+/**
+ * The click happened on an auth/login page — captured via the click's page URL.
+ * This is the robust login filter: it drops every click made while signing in
+ * (username field, "MyChart Username or", 2FA, etc.) regardless of its label,
+ * which the field-name heuristic alone misses.
+ */
+const AUTH_URL_RE = /\/authentication|\/login|sign-?in|\/oauth|\/idp\//i;
+
 /** Slot/time picks and explicit booking confirmations — never replayed as an act. */
 const FINAL_ACTION_RE = /\d{1,2}:\d{2}\s?(AM|PM)|book|reserve|confirm|schedule it/i;
 
@@ -166,6 +174,11 @@ function isLoginField(value?: string | null): boolean {
 function isLoginClick(click: ClickEvent): boolean {
   if ((click.tag ?? "").toUpperCase() !== "INPUT") return false;
   return isLoginField(click.text) || isLoginField(click.name) || isLoginField(click.id);
+}
+
+/** Any click made while on an auth/login page (by the recorded page URL). */
+function isOnAuthPage(click: ClickEvent): boolean {
+  return Boolean(click.url && AUTH_URL_RE.test(click.url));
 }
 
 /** The very last click in the recording, if it's a slot/time pick or a booking confirmation. */
@@ -217,8 +230,22 @@ function roleFor(click: ClickEvent): string | undefined {
   return roleIsButton || tag === "BUTTON" || tag === "A" ? "button" : undefined;
 }
 
+/** A CSS id selector, falling back to `[id='…']` for ids with awkward characters. */
+function cssForId(id: string): string {
+  return /^[A-Za-z][\w-]*$/.test(id) ? `#${id}` : `[id='${id.replace(/'/g, "\\'")}']`;
+}
+
 function actStepFor(click: ClickEvent): Step {
-  const label = labelOf(click);
+  const visible = (click.ariaLabel ?? click.text ?? "").trim();
+  // No visible label, but a DOM id/name → target it precisely with a cached CSS
+  // selector. A semantic text match would fail here (the id/name is not visible
+  // on the page) — this is the fix for controls like an <input id="…-continue">.
+  if (!visible && (click.id || click.name)) {
+    const cached = click.id ? cssForId(click.id) : `[name='${click.name}']`;
+    const ref = click.id ?? click.name ?? "control";
+    return { type: "act", label: `Click "${ref}"`, locator: { cached, semantic: { intent: ref } } };
+  }
+  const label = visible || labelOf(click);
   const name = shortName(label);
   const role = roleFor(click);
   return {
@@ -255,7 +282,7 @@ export function compileRecording(rec: Recording, opts: CompileRecordingOptions =
 
   const lastIndex = rec.clicks.length - 1;
   rec.clicks.forEach((click, index) => {
-    if (isLoginClick(click)) return; // auth-flow control, not part of the harvest path
+    if (isOnAuthPage(click) || isLoginClick(click)) return; // login/auth click, not part of the harvest path
     if (index === lastIndex && isFinalActionClick(click)) return; // never replay the booking/slot click
     if (!hasAnyLabel(click)) return; // nothing to locate it by
     steps.push(actStepFor(click));

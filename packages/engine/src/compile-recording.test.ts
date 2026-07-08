@@ -119,6 +119,34 @@ test("guard forbids booking on the compiled flow", () => {
   assert.ok(flow.guard?.forbidden_actions?.includes("book"));
 });
 
+test("clicks made on an auth/login page are filtered by URL, regardless of label", () => {
+  const rec: Recording = {
+    baseUrl: "https://mychart.example.org/MyChart/Scheduling",
+    clicks: [
+      { tag: "INPUT", text: "MyChart Username or", url: "https://mychart.example.org/MyChart/Authentication/Login" },
+      { tag: "BUTTON", text: "Sign in", url: "https://mychart.example.org/MyChart/Authentication/Login" },
+      { tag: "BUTTON", text: "Primary Care", url: "https://mychart.example.org/MyChart/Scheduling" },
+    ],
+    network: [],
+  };
+  const flow = compileRecording(rec);
+  const acts = flow.steps.filter((s) => s.type === "act");
+  assert.equal(acts.length, 1); // only the post-login "Primary Care" click survives
+  assert.equal(acts[0]!.locator!.semantic!.name, "Primary Care");
+});
+
+test("an id-only control becomes a cached #id selector, not an unmatchable text locator", () => {
+  const rec: Recording = {
+    baseUrl: "https://x/scheduling",
+    clicks: [{ tag: "INPUT", id: "scheduling-continue" }],
+    network: [],
+  };
+  const flow = compileRecording(rec);
+  const act = flow.steps.find((s) => s.type === "act")!;
+  assert.equal(act.locator!.cached, "#scheduling-continue");
+  assert.equal(act.locator!.semantic.intent, "scheduling-continue");
+});
+
 test("a recording with no JSON data endpoint compiles to navigate + acts only", () => {
   const noJson: Recording = {
     baseUrl: "https://portal.example.org/home",
