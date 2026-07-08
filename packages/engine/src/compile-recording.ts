@@ -281,8 +281,15 @@ function slugify(text: string): string {
  * Returns a suggested input name (slug) when flagged, undefined otherwise.
  * Tuned for false NEGATIVES: a missed flag is a minor annoyance at review
  * time, a false positive nags the user about a real button.
+ *
+ * `isAction` (the clicked element is a button/link/tab) disables ONLY the
+ * proper-noun heuristic — the branch that misfires on stable controls like
+ * "Apply Filters", "All Claims", "Under Review", turning a fixed button into a
+ * required run input. Unambiguous value SHAPES (email, phone, long numeric id)
+ * are still flagged even on a button, because a button literally labelled
+ * "8183054609" really is a per-run value, not chrome.
  */
-function paramHintFor(name: string): string | undefined {
+function paramHintFor(name: string, opts: { isAction?: boolean } = {}): string | undefined {
   const trimmed = name.trim();
   if (!trimmed) return undefined;
 
@@ -294,9 +301,12 @@ function paramHintFor(name: string): string | undefined {
     return digits >= 7 && digits <= 15 ? "phone_number" : "reference_number";
   }
 
-  // Proper-noun heuristic: 2+ words, every word capitalized, and at least one
-  // word outside the UI-navigation stoplist ("Prasanna Kumar D E" flags,
-  // "New Patient" does not).
+  // Proper-noun heuristic — the aggressive one. Only for NON-action targets: a
+  // capitalized multi-word label on a button/link is almost always UI vocabulary
+  // ("Apply Filters"), whereas on a role-less row/cell it's often a real name
+  // ("Prasanna Kumar D E"). Requires 2+ words, all capitalized, at least one
+  // outside the UI-navigation stoplist.
+  if (opts.isAction) return undefined;
   const words = trimmed.split(/\s+/);
   if (words.length >= 2 && words.every((w) => /^[A-Z]/.test(w))) {
     const outside = words.some((w) => !UI_NAV_WORDS.has(w.toLowerCase().replace(/[^a-z]/g, "")));
@@ -371,7 +381,11 @@ function actStepFor(click: ClickEvent): Step {
   const label = visible || labelOf(click);
   const name = semanticName(label);
   const role = roleFor(click);
-  const paramHint = paramHintFor(name);
+  // Buttons/links/tabs are ACTIONS: their proper-noun-shaped labels ("Apply
+  // Filters", "All Claims", "Under Review") must not become required run
+  // inputs. Value SHAPES (email/phone/id) are still flagged even on a button.
+  // This fixes the failure where every button became a required run input.
+  const paramHint = paramHintFor(name, { isAction: Boolean(role) });
   const cached = paramHint ? undefined : structuralHook(click); // tier 4: text discriminates, not the hook
   return {
     type: "act",

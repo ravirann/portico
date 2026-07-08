@@ -411,3 +411,30 @@ test("a label-less control still prefers testid over id for its cached selector"
   const act = compileRecording(rec).steps.find((s) => s.type === "act")!;
   assert.equal(act.locator!.cached, "[data-testid='continue-btn']");
 });
+
+test("stable UI buttons never get a param_hint, even proper-noun-shaped ones (pulse.clinikk regression)", () => {
+  // The exact labels from the failing pulse.clinikk.com recording: every one of
+  // these became a required run input before the fix. Buttons are actions.
+  const rec: Recording = {
+    baseUrl: "https://pulse.clinikk.com/claims",
+    clicks: [
+      { tag: "BUTTON", text: "APPLY FILTERS" },
+      { tag: "BUTTON", text: "Under Review 7 JULY 2026 gracy • 1 AI doc review MARK REVIEWED" },
+      { tag: "A", role: "tab", text: "All Claims" },
+      { tag: "BUTTON", text: "Workflow" },
+      { tag: "BUTTON", text: "View Details" },
+      { tag: "SPAN", text: "Hardik Gowda V" }, // role-less cell → a real value, still flagged
+      { tag: "BUTTON", text: "8183054609" }, // phone rendered as a button → shape wins, still flagged
+    ],
+    network: [],
+  };
+  const acts = compileRecording(rec).steps.filter((s) => s.type === "act");
+  const hintByName = Object.fromEntries(acts.map((a) => [a.locator!.semantic.name, a.locator!.semantic.param_hint]));
+  assert.equal(hintByName["APPLY FILTERS"], undefined);
+  assert.equal(hintByName["Under Review"], undefined); // volatile date also truncated out of the name
+  assert.equal(hintByName["All Claims"], undefined);
+  assert.equal(hintByName["Workflow"], undefined);
+  assert.equal(hintByName["View Details"], undefined);
+  assert.equal(hintByName["Hardik Gowda V"], "hardik_gowda_v"); // role-less → real value
+  assert.equal(hintByName["8183054609"], "phone_number"); // shape-based, survives on a button
+});
