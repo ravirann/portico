@@ -150,3 +150,26 @@ test("compileAgentRun emits auth-header read steps discovered from localStorage,
   assert.equal(write.api.headers["x-app-env"], "{{app_env}}");
   assert.equal(write.api.headers["content-type"], "application/json");
 });
+
+test("a search/read goal never emits a mutation (intent gate blocks session/heartbeat POSTs)", () => {
+  const requests = [
+    { method: "GET", url: "https://x/api/customers?phone=9717352594", pathname: "/api/customers", resourceType: "fetch" },
+    { method: "POST", url: "https://x/api/support/session", pathname: "/api/support/session", resourceType: "fetch", postData: "{}" },
+    { method: "POST", url: "https://x/api/orders", pathname: "/api/orders", resourceType: "fetch", postData: JSON.stringify({ x: 1 }) },
+  ];
+  // intent="search" → no write steps at all, even though POSTs were captured.
+  const flow = compileAgentRun("find customer 9717352594", "https://x/customers", [], "s", requests, new Map(), {}, [{ name: "phone", value: "9717352594", description: "" }], "search");
+  const hasWrite = flow.steps.some((s) => {
+    const api = (s as unknown as { api?: { method?: string } }).api;
+    return api && !["GET", "HEAD"].includes((api.method ?? "GET").toUpperCase());
+  });
+  assert.equal(hasWrite, false);
+  // intent="update" → the real mutation (orders) is emitted, the session POST is filtered as noise.
+  const upd = compileAgentRun("update order for 9717352594", "https://x/customers", [], "u", requests, new Map(), {}, [{ name: "phone", value: "9717352594", description: "" }], "update");
+  const writes = upd.steps.filter((s) => {
+    const api = (s as unknown as { api?: { method?: string } }).api;
+    return api && !["GET", "HEAD"].includes((api.method ?? "GET").toUpperCase());
+  }) as unknown as Array<{ api: { url: string } }>;
+  assert.equal(writes.length, 1);
+  assert.ok(writes[0]!.api.url.includes("/api/orders"));
+});

@@ -186,6 +186,10 @@ function parameterizeUrl(finalUrl: string): { url: string; inputs: Record<string
 const BOOT_NOISE_RE =
   /\/(permissions|feature-?flags|flags|userinfo|analytics|telemetry|collect|faro|rum|metrics|beacon|events|healthz?|heartbeat|ping|config)\b/i;
 
+// Non-GET requests a page fires on its own (session/heartbeat/telemetry POSTs)
+// that must never be mistaken for a user's intended mutation.
+const MUTATION_NOISE_RE = /\/(session|heartbeat|keep-?alive|track|collect|beacon|analytics|telemetry|log|events?|refresh)\b/i;
+
 /** Collapse duplicate captured requests (agents retry) by method+path+body. */
 export function dedupeRequests(requests: CapturedRequest[]): CapturedRequest[] {
   const seen = new Map<string, CapturedRequest>();
@@ -407,6 +411,7 @@ export function compileAgentRun(
   responseBodies: Map<string, string> = new Map(),
   localStorageSnapshot: Record<string, string> = {},
   planParams: GoalParameter[] = [],
+  intent: GoalPlan["intent"] = "update",
 ): Flow {
   // Preferred path: the goal names specific values (a phone/id) and the agent's
   // actions carried them. A GET LOOKUP (search by phone) is frozen as a
@@ -458,6 +463,11 @@ export function compileAgentRun(
         lookups.push({ pathname: r.pathname, ...hit });
         inputs[hit.name] = `string — e.g. ${hit.example}`;
       } else {
+        // Only an UPDATE goal yields writes — a read/search must never emit a
+        // mutation (the rewriter's intent guards against session/heartbeat
+        // POSTs a page fires on its own being mistaken for a user write).
+        if (intent !== "update") continue;
+        if (MUTATION_NOISE_RE.test(r.pathname)) continue; // infra POST, not a user mutation
         const sig = `${method} ${r.pathname}`;
         if (seenMut.has(sig)) continue;
         seenMut.add(sig);
@@ -717,6 +727,7 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
       responseBodies,
       localStorageSnapshot,
       plan.parameters,
+      plan.intent,
     );
     return {
       flow,
