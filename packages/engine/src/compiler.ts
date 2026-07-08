@@ -68,6 +68,10 @@ export interface StepRuntime {
   heal: HealModel | null;
   /** True when an auth profile was loaded (login likely already valid). */
   profileLoaded: boolean;
+  /** Run mode. In "dry_run", MUTATING api steps (PUT/PATCH/POST/DELETE) are
+   *  skipped, never executed — a dry-run of a write flow is side-effect-free.
+   *  Only "live" performs mutations. Defaults to "dry_run" where unset (safe). */
+  mode?: "dry_run" | "live";
   template: (s: string) => string;
 }
 
@@ -160,6 +164,10 @@ function buildWorkflow(
       secrets: {},
       heal: ctx.heal,
       profileLoaded: Boolean(ctx.profileName),
+      // The canonical subprocess path can't see the run mode, so default to the
+      // SAFE side: dry-run (mutations skipped). Live writes go through the
+      // programmatic runner, which threads the real mode.
+      mode: "dry_run",
       template: (s: string) => renderTemplate(s, { inputs, output, secrets: {}, target }),
     };
     for (const step of plan) await step.run(rt);
@@ -597,6 +605,21 @@ function apiStep(step: Step, api: ApiStepSpec, index: number): CompiledStep {
             : v && typeof v === "object"
               ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, val]) => [k, tmpl(val)]))
               : v;
+      const method = (api.method ?? "GET").toUpperCase();
+      const path0 = (() => {
+        try {
+          return new URL(rt.template(api.url)).pathname;
+        } catch {
+          return api.url;
+        }
+      })();
+      // SAFETY GATE: a mutating request is a real side effect. In dry-run it is
+      // SKIPPED entirely (never sent), so validating/rehearsing a write flow
+      // changes nothing. Only an explicit live run performs the mutation.
+      const isMutation = !["GET", "HEAD", "OPTIONS"].includes(method);
+      if (isMutation && (rt.mode ?? "dry_run") !== "live") {
+        return { status: "ok", detail: `skipped mutating ${method} ${path0} (dry-run — not sent)` };
+      }
       const config: RequestConfig = {
         url: rt.template(api.url),
         method: api.method ?? "GET",

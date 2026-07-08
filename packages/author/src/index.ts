@@ -59,6 +59,8 @@ export interface CapturedRequest {
   resourceType: string;
   /** Raw request body, if any (JSON string for most API calls). */
   postData?: string;
+  /** Request headers — needed to replicate an authenticated mutation. */
+  headers?: Record<string, string>;
 }
 
 export interface AuthorResult {
@@ -219,85 +221,171 @@ function outputKeyFor(pathname: string): string {
 interface ApiBlock {
   url: string;
   method: string;
+  headers?: Record<string, string>;
   body?: unknown;
   bodyType?: "json";
-  responseType?: "json";
+  responseType?: "json" | "text";
+}
+
+/** A localStorage key whose value equals `value`, else null. Used to discover
+ *  where an auth/tenant header value lives so the write can read it fresh. */
+function localStorageKeyForValue(value: string, ls: Record<string, string>): string | null {
+  for (const [k, v] of Object.entries(ls)) if (v === value) return k;
+  return null;
+}
+
+/** Dotted path to `value` within `obj` (e.g. "family.id"), or null if absent. */
+function findJsonPath(obj: unknown, value: string, prefix = ""): string | null {
+  if (obj == null || typeof obj !== "object") {
+    return String(obj) === value ? prefix.replace(/^\./, "") : null;
+  }
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    const hit = findJsonPath(v, value, `${prefix}.${k}`);
+    if (hit != null) return hit;
+  }
+  return null;
 }
 
 /**
- * Turn a captured request into a deterministic `api` step IF it carries a
- * goal value (a phone/id the flow must parameterize) — replacing that value in
- * the URL query and JSON body with a `{{input}}` marker. Returns null for
- * requests that carry no goal value (plain reads — covered by harvest).
+ * A `{{lookupKey.path}}` reference if `value` is found in a prior lookup's
+ * response — so a mutation URL's ids chain off the search result (the update
+ * URL's family/customer ids come from the customer lookup) instead of being
+ * hardcoded to the record used at authoring time. null when not chainable.
  */
-function apiStepFromRequest(
+function chainRef(
+  value: string,
+  lookups: Array<{ pathname: string }>,
+  bodies: Map<string, string>,
+): string | null {
+  for (const lk of lookups) {
+    const raw = bodies.get(lk.pathname);
+    if (!raw) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const path = findJsonPath(parsed, value);
+    if (path) return `{{${outputKeyFor(lk.pathname)}.${path}}}`;
+  }
+  return null;
+}
+
+/**
+ * Freeze a captured mutation into a deterministic `api` write step:
+ *  - path ids that came from a lookup response → chained `{{customer.family.id}}`
+ *  - a JSON body's string leaves → `{{key}}` inputs (lop:"english" → {{lop}})
+ *  - goal-value tokens in the URL → their canonical inputs
+ */
+function buildMutationStep(
   req: CapturedRequest,
   tokens: string[],
-): { step: Step; inputs: Record<string, string>; isMutation: boolean } | null {
-  const inputs: Record<string, string> = {};
-  let matched = false;
-
-  let url: string;
+  lookups: Array<{ pathname: string }>,
+  bodies: Map<string, string>,
+  localStorageSnapshot: Record<string, string> = {},
+): { step: Step; inputs: Record<string, string>; authReads: Step[] } | null {
+  let u: URL;
   try {
-    url = new URL(req.url).toString();
+    u = new URL(req.url);
   } catch {
     return null;
   }
-  const u = new URL(url);
-  for (const [k, v] of [...u.searchParams.entries()]) {
-    const tok = tokens.find((t) => v.includes(t));
-    if (!tok) continue;
-    const name = canonicalInputName(tok, k);
-    inputs[name] = `string — e.g. ${v}`;
-    u.searchParams.set(k, v.replace(tok, `{{${name}}}`));
-    matched = true;
-  }
-  const urlOut = u.toString().replace(/%7B%7B/gi, "{{").replace(/%7D%7D/gi, "}}");
+  const inputs: Record<string, string> = {};
+  const authReads: Step[] = [];
 
-  // Parameterize goal values inside a JSON body too.
+  const newPath = u.pathname
+    .split("/")
+    .map((seg) => {
+      if (!/^\d+$/.test(seg)) return seg;
+      const chained = chainRef(seg, lookups, bodies);
+      if (chained) return chained;
+      if (tokens.includes(seg)) {
+        inputs.id = `string — e.g. ${seg}`;
+        return "{{id}}";
+      }
+      return seg; // couldn't resolve — left concrete for human review
+    })
+    .join("/");
+  const urlOut = `${u.origin}${newPath}${u.search}`.replace(/%7B%7B/gi, "{{").replace(/%7D%7D/gi, "}}");
+
   let body: unknown;
   if (req.postData) {
     try {
-      const parsed = JSON.parse(req.postData) as unknown;
       const walk = (val: unknown): unknown => {
-        if (typeof val === "string") {
-          const tok = tokens.find((t) => val.includes(t));
-          if (tok) {
-            matched = true;
-            // Body values are usually the id/phone itself; name after the token's role.
-            const name = "phone_number";
-            inputs[name] = `string — e.g. ${val}`;
-            return val.replace(tok, `{{${name}}}`);
-          }
-          return val;
-        }
+        if (typeof val === "string") return val; // handled at the key level below
         if (Array.isArray(val)) return val.map(walk);
         if (val && typeof val === "object") {
-          return Object.fromEntries(Object.entries(val as Record<string, unknown>).map(([k, x]) => [k, walk(x)]));
+          return Object.fromEntries(
+            Object.entries(val as Record<string, unknown>).map(([k, x]) => {
+              if (typeof x === "string" && x.length > 0) {
+                const name = inputNameFor(k);
+                inputs[name] = `string — e.g. ${x}`;
+                return [k, `{{${name}}}`];
+              }
+              return [k, walk(x)];
+            }),
+          );
         }
         return val;
       };
-      body = walk(parsed);
+      body = walk(JSON.parse(req.postData));
     } catch {
       body = req.postData;
     }
   }
 
-  const isMutation = !["GET", "HEAD"].includes(req.method);
-  if (!matched && !isMutation) return null; // a plain read with no goal value — leave to harvest
+  // Auth/tenant headers: a mutation needs the same headers the SPA sends
+  // (Authorization + x-* context like x-clinic-id / x-app-env). Static ones
+  // (content-type) are emitted verbatim; value-bearing ones are read FRESH from
+  // the page at run time — we discover WHERE by matching the captured header
+  // value against localStorage (Bearer token → userToken, clinic id →
+  // selectedClinicId, …), so no stale token is ever baked into the flow.
+  const headers: Record<string, string> = {};
+  const seenReads = new Set<string>();
+  for (const [rawKey, rawVal] of Object.entries(req.headers ?? {})) {
+    const k = rawKey.toLowerCase();
+    if (!(k === "authorization" || k.startsWith("x-") || k === "content-type")) continue;
+    if (k === "content-type") {
+      headers[rawKey] = "application/json";
+      continue;
+    }
+    // Split "Bearer <token>" so the token part can map to localStorage.
+    const m = /^(Bearer\s+)(.+)$/i.exec(rawVal);
+    const prefix = m ? m[1] : "";
+    const valuePart = m ? m[2]! : rawVal;
+    const lsKey = localStorageKeyForValue(valuePart, localStorageSnapshot);
+    if (lsKey) {
+      const inputName = inputNameFor(lsKey);
+      if (!seenReads.has(inputName)) {
+        seenReads.add(inputName);
+        authReads.push({
+          type: "read",
+          label: `Read ${lsKey} from the page`,
+          read: { expression: `localStorage.getItem(${JSON.stringify(lsKey)})`, as: inputName },
+        } as unknown as Step);
+      }
+      headers[rawKey] = `${prefix}{{${inputName}}}`;
+    } else {
+      headers[rawKey] = rawVal; // not in localStorage — kept verbatim (review if session-specific)
+    }
+  }
 
-  const api: ApiBlock = { url: urlOut, method: req.method, responseType: "json" };
+  // Writes commonly return 204/empty — parse as text so an empty body isn't a
+  // JSON error that masks a successful mutation.
+  const api: ApiBlock = { url: urlOut, method: req.method, responseType: "text" };
+  if (Object.keys(headers).length) api.headers = headers;
   if (body !== undefined) {
     api.body = body;
     api.bodyType = "json";
   }
   const step = {
     type: "read",
-    label: `${isMutation ? "Update via" : "Look up via"} ${outputKeyFor(req.pathname)} API`,
+    label: `Update ${outputKeyFor(req.pathname)} (${req.method})`,
     api,
-    extract: { key: outputKeyFor(req.pathname), schema: {} as Record<string, unknown> },
+    extract: { key: `${outputKeyFor(req.pathname)}_update`, schema: {} as Record<string, unknown> },
   } as unknown as Step;
-  return { step, inputs, isMutation };
+  return { step, inputs, authReads };
 }
 
 export function compileAgentRun(
@@ -306,6 +394,8 @@ export function compileAgentRun(
   responses: HarvestedResponse[],
   key: string,
   requests: CapturedRequest[] = [],
+  responseBodies: Map<string, string> = new Map(),
+  localStorageSnapshot: Record<string, string> = {},
 ): Flow {
   // Preferred path: the goal names specific values (a phone/id) and the agent's
   // actions carried them. A GET LOOKUP (search by phone) is frozen as a
@@ -317,11 +407,12 @@ export function compileAgentRun(
   const tokens = goalTokens(goal);
   if (tokens.length > 0) {
     const lookups: Array<{ pathname: string; paramKey: string; name: string; example: string }> = [];
-    const mutationSteps: Step[] = [];
+    const mutations: CapturedRequest[] = [];
     const inputs: Record<string, string> = {};
     const seenLookup = new Set<string>();
     const seenMut = new Set<string>();
 
+    // First pass: classify lookups (GET carrying a goal value) and mutations.
     for (const r of dedupeRequests(requests)) {
       if (INTEGRATION_NOISE_RE.test(r.pathname)) continue; // peripheral integration
       const method = r.method.toUpperCase();
@@ -347,14 +438,29 @@ export function compileAgentRun(
         lookups.push({ pathname: r.pathname, ...hit });
         inputs[hit.name] = `string — e.g. ${hit.example}`;
       } else {
-        const built = apiStepFromRequest(r, tokens);
-        if (!built) continue;
         const sig = `${method} ${r.pathname}`;
         if (seenMut.has(sig)) continue;
         seenMut.add(sig);
-        mutationSteps.push(built.step);
-        Object.assign(inputs, built.inputs);
+        mutations.push(r);
       }
+    }
+
+    // Second pass: build mutation steps now that lookups (and their response
+    // bodies) are known, so the write's ids chain off the search result.
+    const mutationSteps: Step[] = [];
+    const authReadSteps: Step[] = [];
+    const seenAuthRead = new Set<string>();
+    for (const r of mutations) {
+      const built = buildMutationStep(r, tokens, lookups, responseBodies, localStorageSnapshot);
+      if (!built) continue;
+      for (const rd of built.authReads) {
+        const as = (rd as unknown as { read?: { as?: string } }).read?.as ?? "";
+        if (seenAuthRead.has(as)) continue;
+        seenAuthRead.add(as);
+        authReadSteps.push(rd);
+      }
+      mutationSteps.push(built.step);
+      Object.assign(inputs, built.inputs);
     }
 
     if (lookups.length > 0 || mutationSteps.length > 0) {
@@ -379,7 +485,7 @@ export function compileAgentRun(
           wait: { for: outputKeyFor(lookups[0]!.pathname), timeout_ms: 20000 },
         });
       }
-      steps.push(...mutationSteps);
+      steps.push(...authReadSteps, ...mutationSteps);
       return {
         key,
         version: 1,
@@ -470,6 +576,9 @@ export function compileAgentRun(
 export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
   const responses: HarvestedResponse[] = [];
   const requests: CapturedRequest[] = [];
+  // Latest response body per pathname (non-boot JSON, capped) — lets the compiler
+  // resolve where a mutation's ids came from in a lookup response, for chaining.
+  const responseBodies = new Map<string, string>();
 
   // Independent Playwright CDP client on the SAME browser — observes every JSON
   // response the agent's actions trigger, without depending on Stagehand's page
@@ -492,7 +601,13 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
     } catch {
       postData = undefined;
     }
-    requests.push({ method, url, pathname: pathnameOf(url), resourceType: rt, postData });
+    let headers: Record<string, string> | undefined;
+    try {
+      headers = req.headers();
+    } catch {
+      headers = undefined;
+    }
+    requests.push({ method, url, pathname: pathnameOf(url), resourceType: rt, postData, headers });
   });
   observerCtx.on("response", (resp) => {
     const req = resp.request();
@@ -503,7 +618,12 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
     // actual decoded body length — size is only a tiebreak, but a real one.
     resp
       .body()
-      .then((buf) => responses.push({ url, pathname: pathnameOf(url), bytes: buf.length, contentType: ct }))
+      .then((buf) => {
+        const pathname = pathnameOf(url);
+        responses.push({ url, pathname, bytes: buf.length, contentType: ct });
+        // Keep small non-boot JSON bodies for id-chaining (latest wins).
+        if (buf.length <= 262144 && !BOOT_NOISE_RE.test(pathname)) responseBodies.set(pathname, buf.toString("utf8"));
+      })
       .catch(() => responses.push({ url, pathname: pathnameOf(url), bytes: Number(resp.headers()["content-length"] ?? 0), contentType: ct }));
   });
 
@@ -535,7 +655,33 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
     // Let in-flight response-body reads (async) settle before we compile.
     await new Promise((r) => setTimeout(r, 1500));
 
-    const flow = compileAgentRun(opts.goal, finalUrl, responses, opts.key ?? "authored-flow", requests);
+    // Snapshot localStorage so a captured mutation's auth/tenant headers can be
+    // mapped to the page keys they live in (userToken, selectedClinicId, …) and
+    // read fresh at run time instead of baking a stale token into the flow.
+    let localStorageSnapshot: Record<string, string> = {};
+    try {
+      const p = sh.context.activePage() ?? page;
+      localStorageSnapshot = await p.evaluate(() => {
+        const out: Record<string, string> = {};
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k) out[k] = localStorage.getItem(k) ?? "";
+        }
+        return out;
+      });
+    } catch {
+      /* best-effort — writes without discoverable auth keep headers verbatim */
+    }
+
+    const flow = compileAgentRun(
+      opts.goal,
+      finalUrl,
+      responses,
+      opts.key ?? "authored-flow",
+      requests,
+      responseBodies,
+      localStorageSnapshot,
+    );
     return {
       flow,
       evidence: {

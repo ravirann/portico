@@ -79,3 +79,70 @@ test("compileAgentRun falls back to size ranking when no id is in the final URL"
 // Type-only guard: keep the public AuthorResult shape stable for callers.
 const _typecheck: (r: AuthorResult) => string = (r) => r.evidence.finalUrl;
 void _typecheck;
+
+// ---------------------------------------------------------------------------
+// Write flow: chain ids from the lookup into the mutation, parameterize the value
+// (real pulse.clinikk.com customer-lens shapes)
+// ---------------------------------------------------------------------------
+
+test("compileAgentRun freezes a search+update into a deep-link harvest + chained api write", () => {
+  const goal = "search phone 9717352594 and update the customer's LOP to English";
+  const requests = [
+    { method: "GET", url: "https://pulse.clinikk.com/api/proxy/v3/customers?phoneNumber=9717352594", pathname: "/api/proxy/v3/customers", resourceType: "fetch" },
+    { method: "PUT", url: "https://pulse.clinikk.com/api/proxy/v3/family/109862/members/125884/lop", pathname: "/api/proxy/v3/family/109862/members/125884/lop", resourceType: "fetch", postData: JSON.stringify({ lop: "english" }) },
+  ];
+  // The customer lookup response the page returned (id + family.id live here).
+  const bodies = new Map<string, string>([
+    ["/api/proxy/v3/customers", JSON.stringify({ id: 125884, first_name: "Ravi", lop: "english", family: { id: 109862 } })],
+  ]);
+
+  const flow = compileAgentRun(goal, "https://pulse.clinikk.com/customer-lens", [], "customer-lop", requests, bodies);
+  const types = flow.steps.map((s) => s.type);
+  assert.deepEqual(types, ["intercept", "navigate", "wait", "read"]);
+
+  // Deep-link search parameterizes the phone.
+  const nav = flow.steps.find((s) => s.type === "navigate")!;
+  assert.equal(nav.url, "https://pulse.clinikk.com/customer-lens?phoneNumber={{phone_number}}");
+
+  // The write chains the ids off the lookup and parameterizes the value.
+  const write = flow.steps[3] as unknown as { api: { url: string; method: string; body: Record<string, string> } };
+  assert.equal(write.api.method, "PUT");
+  assert.equal(write.api.url, "https://pulse.clinikk.com/api/proxy/v3/family/{{customer.family.id}}/members/{{customer.id}}/lop");
+  assert.deepEqual(write.api.body, { lop: "{{lop}}" });
+
+  // Inputs: the phone and the language value; ids are chained, not inputs.
+  assert.ok(flow.inputs && "phone_number" in flow.inputs && "lop" in flow.inputs);
+  assert.ok(!("customer_id" in (flow.inputs ?? {})));
+  // A captured mutation keeps the flow dry-run-only until a human confirms.
+  assert.equal(flow.guard?.dry_run_only, true);
+});
+
+test("compileAgentRun emits auth-header read steps discovered from localStorage, text response", () => {
+  const goal = "search phone 9717352594 and set the customer's LOP to English";
+  const requests = [
+    { method: "GET", url: "https://pulse.clinikk.com/api/proxy/v3/customers?phoneNumber=9717352594", pathname: "/api/proxy/v3/customers", resourceType: "fetch" },
+    {
+      method: "PUT",
+      url: "https://pulse.clinikk.com/api/proxy/v3/family/109862/members/125884/lop",
+      pathname: "/api/proxy/v3/family/109862/members/125884/lop",
+      resourceType: "fetch",
+      postData: JSON.stringify({ lop: "english" }),
+      headers: { authorization: "Bearer JWT_TOKEN_VALUE", "content-type": "application/json", "x-clinic-id": "42", "x-app-env": "production" },
+    },
+  ];
+  const bodies = new Map([["/api/proxy/v3/customers", JSON.stringify({ id: 125884, family: { id: 109862 } })]]);
+  const ls = { userToken: "JWT_TOKEN_VALUE", selectedClinicId: "42", appEnv: "production" };
+
+  const flow = compileAgentRun(goal, "https://pulse.clinikk.com/customer-lens", [], "lop", requests, bodies, ls);
+  // read steps for the auth/tenant values, discovered by value-matching localStorage.
+  const reads = flow.steps.filter((s) => s.type === "read" && (s as { read?: unknown }).read) as Array<{ read: { expression: string; as: string } }>;
+  const readKeys = reads.map((r) => r.read.as).sort();
+  assert.deepEqual(readKeys, ["app_env", "selected_clinic_id", "user_token"]);
+
+  const write = flow.steps.find((s) => (s as { api?: { method?: string } }).api?.method === "PUT") as unknown as { api: { headers: Record<string, string>; responseType: string } };
+  assert.equal(write.api.responseType, "text"); // 204/empty tolerated
+  assert.equal(write.api.headers.authorization, "Bearer {{user_token}}");
+  assert.equal(write.api.headers["x-clinic-id"], "{{selected_clinic_id}}");
+  assert.equal(write.api.headers["x-app-env"], "{{app_env}}");
+  assert.equal(write.api.headers["content-type"], "application/json");
+});

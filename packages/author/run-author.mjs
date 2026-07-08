@@ -50,6 +50,7 @@ const result = await authorFlow({
   model: `${provider}/${modelName}`,
   apiKey,
   key: "authored-flow",
+  maxSteps: Number(process.env.PORTICO_AUTHOR_MAXSTEPS) || 12,
   onLog: (l) => console.error("·", l),
 });
 

@@ -140,7 +140,8 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
     secrets: opts.auth.secrets,
     heal,
     profileLoaded: Boolean(profile?.loadPath),
-    template: (s: string) => renderTemplate(s, opts),
+    mode: opts.mode,
+    template: (s: string) => renderTemplate(s, opts, output),
   };
 
   try {
@@ -245,13 +246,23 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
   }
 }
 
-/** Substitute {{input}}, {{secrets.x}}, {{base_url}} for the programmatic runner. */
-function renderTemplate(input: string, opts: EngineRunOptions): string {
+/**
+ * Substitute {{input}}, {{secrets.x}}, {{base_url}}, and dotted paths into prior
+ * step OUTPUT (e.g. {{customer.family.id}}) for the programmatic runner. Output
+ * support is what lets a write step chain off a lookup — resolve inputs first,
+ * then walk the dotted path through `output` (mirrors the compiler's resolver).
+ */
+function renderTemplate(input: string, opts: EngineRunOptions, output: Record<string, unknown> = {}): string {
   return input.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, key: string) => {
     if (key === "base_url") return opts.target.base_url;
     if (key.startsWith("secrets.")) return opts.auth.secrets[key.slice(8)] ?? "";
-    const v = opts.inputs[key];
-    return v == null ? "" : String(v);
+    const [head, ...rest] = key.split(".");
+    let base: unknown = head! in opts.inputs ? opts.inputs[head!] : output[head!];
+    for (const seg of rest) {
+      if (base == null || typeof base !== "object") return "";
+      base = (base as Record<string, unknown>)[seg];
+    }
+    return base == null ? "" : String(base);
   });
 }
 
