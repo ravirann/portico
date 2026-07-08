@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
-import { addRun, listRuns } from "@/lib/store";
-import type { RunView } from "@/lib/types";
+import { listRuns } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,31 +12,16 @@ export async function GET() {
   return NextResponse.json(listRuns());
 }
 
-// Trigger a live run. The engine runs in the CLI subprocess so Playwright's
-// native deps never enter the Next bundle. Defaults to the credential-free
-// smoke flow so the button works out of the box.
+// Trigger a live run. The engine runs in the CLI subprocess (Playwright's native
+// deps stay out of the Next bundle); the CLI persists the run to the shared
+// store and returns its id, which we relay so the client can open the run.
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   const flow: string = body.flow ?? "examples/smoke.flow.yaml";
   const baseUrl: string = body.baseUrl ?? "https://example.com";
   try {
     const parsed = JSON.parse(await runCli(flow, baseUrl));
-    const run: RunView = {
-      id: "run_" + Math.random().toString(16).slice(2, 8),
-      connector: "live",
-      flow: parsed.flow,
-      engine: parsed.engine,
-      tier: "dom",
-      status: parsed.status,
-      mode: "dry_run",
-      startedAt: new Date().toISOString(),
-      durationMs: parsed.durationMs,
-      steps: parsed.steps,
-      output: parsed.output,
-      failure: parsed.failure,
-    };
-    addRun(run);
-    return NextResponse.json(run);
+    return NextResponse.json({ id: parsed.id, status: parsed.status });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }

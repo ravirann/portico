@@ -23,6 +23,9 @@ importers:
       '@portico/flow-spec':
         specifier: workspace:*
         version: link:../../packages/flow-spec
+      '@portico/store':
+        specifier: workspace:*
+        version: link:../../packages/store
       '@portico/vault':
         specifier: workspace:*
         version: link:../../packages/vault

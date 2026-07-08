@@ -21,6 +21,7 @@ import { getEngine } from "@portico/engine";
 import type { RunMode } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
+import { Store } from "@portico/store";
 
 interface CliOpts {
   baseUrl?: string;
@@ -56,6 +57,23 @@ function parseArgs(argv: string[]) {
 
 async function main() {
   const { cmd, flowPath, opts } = parseArgs(process.argv.slice(2));
+
+  // Read commands — query the durable store as JSON (the console spawns these
+  // so native SQLite stays in a plain Node process, out of the Next bundle).
+  if (cmd === "list-runs") {
+    const store = new Store();
+    process.stdout.write(JSON.stringify(store.listRuns(50)));
+    store.close();
+    process.exit(0);
+  }
+  if (cmd === "get-run") {
+    const store = new Store();
+    const run = flowPath ? store.getRun(flowPath) : undefined;
+    store.close();
+    process.stdout.write(JSON.stringify(run ?? null));
+    process.exit(0);
+  }
+
   if (cmd !== "run" || !flowPath) {
     console.error("usage: portico run <flow.yaml> [--base-url URL] [--instance file] [--headless] [--input k=v]");
     process.exit(2);
@@ -107,24 +125,48 @@ async function main() {
     onStep: (t) => log(`  [${t.index}] ${t.type}${t.label ? ` — ${t.label}` : ""}: ${t.status}${t.detail ? ` (${t.detail})` : ""}`),
   });
 
+  const runId = "run_" + Math.random().toString(16).slice(2, 8);
+  const durationMs = Date.now() - startedAt;
+  const steps = result.traces.map((t) => ({
+    index: t.index, type: t.type, label: t.label,
+    status: t.status, detail: t.detail,
+    healedFrom: t.healedFrom, healedTo: t.healedTo, screenshotRef: t.screenshotRef,
+    durationMs: Math.max(0, t.endedAt - t.startedAt),
+  }));
+
+  // Persist the run + append-only audit to the durable store. Best-effort:
+  // a persistence failure must not fail the run itself.
+  try {
+    const store = new Store();
+    store.createRun({
+      id: runId, connector: instance.instance ?? "cli", flow: flow.key, engine: engine.name,
+      tier: "dom", status: result.status, mode,
+      startedAt: new Date(startedAt).toISOString(), durationMs,
+      steps, output: result.output, failure: result.failure, rrwebRef: result.rrwebRef,
+    });
+    store.appendAudit({
+      ts: new Date().toISOString(), actor: "cli", action: `run.${result.status}`,
+      runId, target: target.base_url, detail: { flow: flow.key, mode, engine: engine.name },
+    });
+    store.close();
+  } catch (e) {
+    if (!opts.json) console.error("[store] persist failed:", e instanceof Error ? e.message : e);
+  }
+
   if (opts.json) {
     // Machine-readable run record (consumed by the console's run API).
     process.stdout.write(JSON.stringify({
+      id: runId,
       flow: flow.key,
       engine: engine.name,
       status: result.status,
-      durationMs: Date.now() - startedAt,
+      durationMs,
       output: result.output,
       unvalidatedOutputKeys: result.unvalidatedOutputKeys,
       rrwebRef: result.rrwebRef,
       authProfile: result.authProfile,
       failure: result.failure,
-      steps: result.traces.map((t) => ({
-        index: t.index, type: t.type, label: t.label,
-        status: t.status, detail: t.detail,
-        screenshotRef: t.screenshotRef,
-        durationMs: Math.max(0, t.endedAt - t.startedAt),
-      })),
+      steps,
     }));
     process.exit(0);
   }

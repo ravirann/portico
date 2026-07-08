@@ -199,12 +199,15 @@ export class Store {
     const stepRows = this.db
       .prepare("SELECT * FROM run_steps WHERE run_id = ? ORDER BY idx ASC")
       .all(row.id) as StepRow[];
-    const steps: StepView[] = stepRows.map((s) => ({
+    const steps: StepRecord[] = stepRows.map((s) => ({
       index: s.idx,
       type: s.type,
       ...(s.label != null ? { label: s.label } : {}),
       status: s.status as StepView["status"],
       ...(s.detail != null ? { detail: s.detail } : {}),
+      ...(s.healed_from != null ? { healedFrom: s.healed_from } : {}),
+      ...(s.healed_to != null ? { healedTo: s.healed_to } : {}),
+      ...(s.screenshot_ref != null ? { screenshotRef: s.screenshot_ref } : {}),
       durationMs: s.duration_ms,
     }));
     const run: RunView = {
@@ -221,6 +224,7 @@ export class Store {
     };
     if (row.output_json) run.output = JSON.parse(row.output_json);
     if (row.failure_json) run.failure = JSON.parse(row.failure_json);
+    if (row.rrweb_ref) run.rrwebRef = row.rrweb_ref;
     return run;
   }
 

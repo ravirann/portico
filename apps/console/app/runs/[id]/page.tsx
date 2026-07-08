@@ -71,6 +71,29 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
               </div>
             )}
 
+            {(() => {
+              const shots = run.steps.filter((s) => s.screenshotRef).length;
+              if (!run.rrwebRef && shots === 0) return null;
+              return (
+                <div className="panel" style={{ padding: "18px 22px" }}>
+                  <div className="eyebrow" style={{ marginBottom: 12 }}>Recording</div>
+                  <ul style={{ listStyle: "none", display: "grid", gap: 10 }}>
+                    {run.rrwebRef && (
+                      <li style={{ display: "flex", gap: 10, fontSize: 13, color: "var(--ink-2)" }}>
+                        <span className="pulse" style={{ marginTop: 5 }} /> DOM session capture (rrweb) recorded
+                      </li>
+                    )}
+                    {shots > 0 && (
+                      <li style={{ display: "flex", gap: 10, fontSize: 13, color: "var(--ink-2)" }}>
+                        <span className="pulse" style={{ marginTop: 5 }} /> {shots} per-step screenshot{shots === 1 ? "" : "s"}
+                      </li>
+                    )}
+                  </ul>
+                  {run.rrwebRef && <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 12 }}>{run.rrwebRef}</div>}
+                </div>
+              );
+            })()}
+
             {(run.status === "failed" || run.status === "paused") && (
               <button className="btn" style={{ justifyContent: "center" }}>Resume from step {(run.failure?.stepIndex ?? 0) + 1}</button>
             )}

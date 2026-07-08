@@ -43,9 +43,10 @@ export interface RunView {
   mode: RunMode;
   startedAt: string; // ISO
   durationMs: number;
-  steps: StepView[];
+  steps: StepRecord[];
   output?: Record<string, unknown>;
   failure?: { stepIndex: number; reason: string };
+  rrwebRef?: string;
 }
 
 /**

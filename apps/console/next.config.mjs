@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // The console never bundles the engine — live runs execute in a CLI
-  // subprocess (Playwright/Libretto stay out of the Next build entirely).
+  // Nothing native is bundled: live runs and store reads both go through the
+  // CLI subprocess, keeping Playwright/Libretto/better-sqlite3 out of Next.
   outputFileTracingRoot: new URL("../../", import.meta.url).pathname,
   devIndicators: false,
 };

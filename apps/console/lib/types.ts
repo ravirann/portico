@@ -9,6 +9,7 @@ export interface StepView {
   status: StepStatus;
   detail?: string;
   durationMs: number;
+  screenshotRef?: string;
 }
 
 export interface RunView {
@@ -24,4 +25,5 @@ export interface RunView {
   steps: StepView[];
   output?: Record<string, unknown>;
   failure?: { stepIndex: number; reason: string };
+  rrwebRef?: string;
 }

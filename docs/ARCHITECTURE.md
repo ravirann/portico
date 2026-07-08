@@ -134,7 +134,8 @@ heal into** and the guard is enforced — a rogue heal is structurally impossibl
   seed. Supports password, API key, cookie, token, session-state, TOTP.
 - **Redaction by construction:** flagged secret inputs auto-masked in DOM
   traces, screenshots, replays, and logs.
-- **Audit:** append-only, immutable log of every action, exportable.
+- **Audit:** append-only `audit_events` (implemented; write-once, exportable);
+  per-run rrweb + per-step screenshots captured to the artifact store.
 - **Data residency:** self-host in the operator's infrastructure → sensitive
   data never leaves it → supports BAA / regulated-industry requirements.
 
@@ -176,7 +177,8 @@ EXECUTION ENGINE (per-run, ephemeral): API → DOM → agent tiers ·
   locator cache · AI-heal   [engine adapter — see ADR-0001]
   inside → browser sandbox (1 ctx / run)
 ─────────────────────────────────────────────────
-DATA: Postgres (RLS) · object store (traces/replay) · secret store (KMS)
+DATA: SQLite store (runs·steps·sessions·audit) + local artifact store
+      (rrweb/screenshots) — pilot; Postgres(RLS) + KMS + object store = scale path
 ```
 
 ## 10. Repo structure & open-core
