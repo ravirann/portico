@@ -1,63 +1,55 @@
-# Scheduling flow — DISCOVERY ONLY. Drives the appointment wizard up to the final
-# review screen and STOPS. It never clicks the booking button, by construction.
+# Scheduling flow — GOAL-DRIVEN, DISCOVERY ONLY. You pass the *intent* (what kind
+# of appointment, for whom); the flow *discovers* availability and reserves a slot
+# by *policy*. It never books — it stops at the review screen, by construction.
 #
-# Authored from a live capture of the wizard's review screen (scripts/inspect-screen.mjs
-# against /MyChart/Scheduling). The click-through targets below are the real
-# accessible button names Epic/MyChart renders; the engine resolves them with
-# deterministic semantic locators (getByRole name) — no model on the hot path.
+# Why goal-driven: you never know the exact open slot ahead of time. So `slot` is
+# NOT an input — `slot_preference` is (a policy like "earliest"). Availability is
+# read from the portal's own API (the "API tier"), which returns the real open
+# slots as structured JSON in one sub-second call — no DOM scraping, no model.
 #
-# The four selections are inputs, so the same flow serves any specialty/reason/
-# location/slot (per-tenant, per-task reuse). Defaults reproduce the captured run.
+# ── Two-phase authoring (Libretto's convert-to-network-requests workflow) ──
+#   Phase 1 · CAPTURE  : scripts/record-network.mjs drives the flow once and logs
+#                        every request to .libretto/sessions/<s>/network.jsonl.
+#   Phase 2 · ANALYZE  : scripts/analyze-network.mjs surfaces the clean JSON read
+#                        endpoint (the availability call) to promote below.
+#   The `api:` step's url/body/schema are filled from that capture — you cannot
+#   know a portal's endpoint without observing its traffic; that IS the profiling.
 #
-#   node --import tsx apps/cli/src/index.ts run \
-#     connectors/example-portal/flows/portal-schedule.flow.yaml \
-#     --instance connectors/example-portal/instances/urmc.local.yaml \
-#     --profile mychart-urmc --headed --live \
-#     --input specialty="Primary Care" \
-#     --input reason="New Patient Adult Visit (18 and over)" \
-#     --input location="Southview Internal Medicine" \
-#     --input slot="October 1, 2026 1:00 PM"
+# The reserve/review steps use the real accessible labels captured from the live
+# review screen, and the booking button stays forbidden (defense in depth).
 key: portal-schedule
 version: 1
-description: Drive the MyChart scheduling wizard to the review screen and read the reserved slot. Never books.
+description: Discover MyChart availability via the API tier and reserve a slot by policy. Never books.
 inputs:
-  specialty: string
-  reason: string
-  location: string
-  slot: string          # substring of the target time button, e.g. "October 1, 2026 1:00 PM"
+  specialty: string           # intent — from the task/ticket, e.g. "Primary Care"
+  reason: string              # intent — e.g. "New Patient Adult Visit (18 and over)"
+  location: string            # intent — e.g. "Southview Internal Medicine"
+  slot_preference: string?    # policy — "earliest" (default) | "on-or-after:YYYY-MM-DD"
 
 guard:
-  no_booking: true                                # engine forbids any commit/confirm step
+  no_booking: true
   forbidden_actions: ["Verify and schedule", "book", "confirm", "submit appointment"]
   dry_run_only: true
 
 steps:
   - type: subflow
-    use: portal-login                             # reuse the trusted session (or paused HITL login)
+    use: portal-login                       # reuse the trusted session (or paused HITL login)
 
   - type: navigate
     label: Open the scheduling wizard
     url: "{{base_url}}/MyChart/Scheduling"
 
-  # --- Wizard drive-through: real accessible button names from the live capture.
-  - type: act
-    label: Select specialty
-    locator: { semantic: { role: button, name: "{{specialty}}", intent: "choose the specialty" } }
-
-  - type: act
-    label: Select reason for visit
-    locator: { semantic: { role: button, name: "{{reason}}", intent: "choose the reason for visit" } }
-
-  - type: act
-    label: Select location
-    locator: { semantic: { role: button, name: "{{location}}", intent: "choose the clinic location" } }
-
-  # --- Read availability BEFORE reserving anything. Author-tier extract: pin a
-  #     cached CSS selector (or configure a heal/extract model) to structure this;
-  #     otherwise it degrades to an unvalidated read.
+  # ── API TIER: read real availability in one call. Runs via Libretto pageRequest
+  #    inside the authenticated page context (session cookies + TLS reused), so it
+  #    is sub-second and needs no DOM and no model. FILL url/method/body from the
+  #    Phase-2 analysis of the recorded availability request; the schema below is
+  #    the target shape — adjust field names to the actual JSON response.
   - type: extract
-    label: Read available time slots
-    locator: { semantic: { role: button, intent: "the list of available appointment time slots (day, date, time)" } }
+    label: List available slots (API tier)
+    api:
+      url: "{{base_url}}/FILL_FROM_RECORDING"     # e.g. /MyChart/scheduling/GetOpenScheduleSlots
+      method: POST                                # copy method + body from the recorded request
+      responseType: json
     extract:
       key: available_slots
       schema:
@@ -65,22 +57,28 @@ steps:
         items:
           type: object
           properties:
-            day:  { type: string }
-            date: { type: string }
-            time: { type: string }
+            date:       { type: string }
+            time:       { type: string }
+            provider:   { type: string }
+            location:   { type: string }
+            slot_token: { type: string }          # opaque, time-bound reservation token
 
-  # --- Reserve (NOT book) the requested slot. MyChart holds the slot temporarily
-  #     ("reserved for you until …"); booking only happens at "Verify and schedule",
-  #     which this flow never clicks.
+  # ── SELECT by policy: pick the slot matching slot_preference (default earliest).
+  #    Finalized in Phase 2 against the real response shape — this is where the
+  #    goal ("earliest available") resolves to a concrete slot without hardcoding.
+  #    (Selection over available_slots → exposes {{selected.*}} for the next step.)
+
+  # ── RESERVE on the DOM (NOT book): slot reservation is guarded by the opaque,
+  #    time-bound token above ("reserved for you until …") and rotating anti-CSRF
+  #    tokens, so it stays on the resilient DOM path rather than a blind replay.
   - type: act
-    label: Reserve the requested time slot
-    locator: { semantic: { role: button, name: "{{slot}}", intent: "select the requested appointment time" } }
+    label: Reserve the selected time slot
+    locator: { semantic: { role: button, name: "{{selected.label}}", intent: "select the chosen appointment time" } }
 
-  # --- On the review screen the selections are exposed as "Edit … selection …"
-  #     buttons; read them back to confirm what was reserved.
+  # ── On the review screen the selections are "Edit … selection …" buttons.
   - type: extract
     label: Read the reserved appointment summary
-    locator: { semantic: { intent: "the specialty, reason, location, and time selected on the review screen" } }
+    locator: { semantic: { intent: "the specialty, reason, location, and time on the review screen" } }
     extract:
       key: reserved_appointment
       schema:
@@ -94,5 +92,4 @@ steps:
   - type: assert
     label: Reached the review screen (booking button present, not clicked)
     condition: page_loaded
-# Flow ends on the review screen. No "Verify and schedule" step exists → nothing is
-# booked, by construction, and the guard forbids it as a defense in depth.
+# Ends on the review screen. No "Verify and schedule" step exists → nothing books.
