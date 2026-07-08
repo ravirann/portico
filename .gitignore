@@ -13,6 +13,8 @@ captures/
 # artifacts
 traces/
 *.log
+# @portico/store local datastore (sqlite db + saved artifacts)
+data/
 .DS_Store
 .next/
 _shoot.mjs
