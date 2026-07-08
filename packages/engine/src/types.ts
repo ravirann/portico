@@ -39,11 +39,16 @@ export interface EngineRunResult {
   /** Schema-validated outputs from `extract` steps. */
   output: Record<string, unknown>;
   traces: StepTrace[];
+  /** Reference to the captured session recording (rrweb events file or video). */
   rrwebRef?: string;
   /** Present when status = failed | paused. `paused` ⇒ HITL/resume needed. */
   failure?: { stepIndex: number; reason: string; resumable: boolean };
   /** Updated trusted session to persist back to the vault, if it changed. */
   sessionState?: unknown;
+  /** Output keys that could NOT be schema-validated (no model → raw-DOM fallback). */
+  unvalidatedOutputKeys?: string[];
+  /** The Libretto auth profile this run loaded/refreshed, if any. */
+  authProfile?: string;
 }
 
 export interface EngineRunOptions {
@@ -60,12 +65,29 @@ export interface EngineRunOptions {
   /** Resume a previously paused run from this step index (durable resume). */
   resumeFrom?: number;
   signal?: AbortSignal;
+  /** Run the browser headless (true) or headed (false). Defaults to headless. */
+  headless?: boolean;
+  /**
+   * Stable id used to derive the Libretto **auth profile** name so that a
+   * one-time login persists to `.libretto/profiles/<name>.json` and later runs
+   * skip auth. Typically a target/credential id. When absent, no profile is
+   * loaded or written (fresh browser every run).
+   */
+  profileId?: string;
+  /** Where to write session recordings + per-step screenshots. Defaults to
+   *  `<repo>/data/artifacts`. Recording is best-effort and never fails a run. */
+  artifactsDir?: string;
+  /** Capture rrweb/screenshots. Defaults to true; set false for speed. */
+  record?: boolean;
 }
 
 export interface EngineCapabilities {
-  /** Can capture network → promote a target to the direct-API tier. */
+  /** Can execute API-tier steps directly (via Libretto `pageRequest`), for
+   *  steps/flows the flow-spec marks API-eligible. */
   apiPromotion: boolean;
-  /** Self-heals broken locators at run time. */
+  /** Self-heals at run time via the recovery model. HONEST + dynamic: true only
+   *  when a heal model is configured (PORTICO_HEAL_* / provider API key). With no
+   *  model the deterministic path still runs, but there is no self-heal. */
   selfHeal: boolean;
   /** Runs in-process (vs CLI/subprocess) — decides multi-tenant/latency shape. */
   inProcess: boolean;

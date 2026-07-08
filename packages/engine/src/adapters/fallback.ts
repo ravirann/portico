@@ -17,7 +17,8 @@ export class FallbackAdapter implements EngineAdapter {
   readonly name = "fallback";
 
   capabilities(): EngineCapabilities {
-    return { apiPromotion: false, selfHeal: true, inProcess: true };
+    // Placeholder: advertises nothing it does not implement.
+    return { apiPromotion: false, selfHeal: false, inProcess: true };
   }
 
   async run(_opts: EngineRunOptions): Promise<EngineRunResult> {

@@ -10,6 +10,15 @@ export * from "./types.js";
 export { LibrettoAdapter } from "./adapters/libretto.js";
 export { FallbackAdapter } from "./adapters/fallback.js";
 
+// Compiler + runner surface (used by generated workflow modules + tooling).
+export { compileFlow, compileToWorkflow, emitWorkflowModule } from "./compiler.js";
+export type { CompileResult, CompiledStep, StepRuntime } from "./compiler.js";
+export { runFlow, runnerMode } from "./runner.js";
+export { resolveHealModel, healModelConfigured } from "./model.js";
+export type { HealModel } from "./model.js";
+export { resolveProfile, refreshProfile } from "./auth-profile.js";
+export { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
+
 import type { EngineAdapter } from "./types.js";
 import { LibrettoAdapter } from "./adapters/libretto.js";
 import { FallbackAdapter } from "./adapters/fallback.js";

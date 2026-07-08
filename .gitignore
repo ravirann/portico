@@ -12,6 +12,7 @@ captures/
 *.local.yaml
 # artifacts
 traces/
+data/
 *.log
 # @portico/store local datastore (sqlite db + saved artifacts)
 data/

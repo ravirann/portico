@@ -3,7 +3,12 @@
  * portico — minimal CLI to run a flow through the engine.
  *
  *   portico run <flow.yaml> [--base-url URL] [--instance <instance.yaml>]
- *                            [--headless] [--input key=value]...
+ *                            [--headless | --headed] [--live] [--profile NAME]
+ *                            [--input key=value]...
+ *
+ * --headless / --headed  forward the browser mode to the engine (default headless).
+ * --live                 run in live mode (default dry_run).
+ * --profile NAME         Libretto auth profile id — persists login across runs.
  *
  * For the live test: point --instance at connectors/example-portal/
  * instances/urmc.local.yaml and set PORTICO_SECRET_EXAMPLE_* env vars (see @portico/vault).
@@ -13,22 +18,34 @@ import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { parse as parseYaml } from "yaml";
 import { getEngine } from "@portico/engine";
+import type { RunMode } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
 
+interface CliOpts {
+  baseUrl?: string;
+  instance?: string;
+  headless: boolean;
+  json: boolean;
+  live: boolean;
+  profile?: string;
+  inputs: Record<string, string>;
+}
+
 function parseArgs(argv: string[]) {
   const [cmd, flowPath, ...rest] = argv;
-  const opts: { baseUrl?: string; instance?: string; headless: boolean; json: boolean; inputs: Record<string, string> } = {
-    headless: false,
-    json: false,
-    inputs: {},
-  };
+  // Default headless: the engine drives a real browser and most runs are
+  // unattended. --headed opts into a visible window (for manual login/HITL).
+  const opts: CliOpts = { headless: true, json: false, live: false, inputs: {} };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--headless") opts.headless = true;
+    else if (a === "--headed") opts.headless = false;
+    else if (a === "--live") opts.live = true;
     else if (a === "--json") opts.json = true;
     else if (a === "--base-url") opts.baseUrl = rest[++i];
     else if (a === "--instance") opts.instance = rest[++i];
+    else if (a === "--profile") opts.profile = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -63,8 +80,9 @@ async function main() {
     : {};
 
   const engine = getEngine("libretto");
+  const mode: RunMode = opts.live ? "live" : "dry_run";
   const log = (...a: unknown[]) => { if (!opts.json) console.log(...a); };
-  log(`▶ running flow "${flow.key}" via ${engine.name} (headless=${opts.headless})`);
+  log(`▶ running flow "${flow.key}" via ${engine.name} (headless=${opts.headless}, mode=${mode}${opts.profile ? `, profile=${opts.profile}` : ""})`);
 
   // Headed runs get an interactive HITL handler: pause for the human to log in
   // (and complete 2FA) in the browser window, then press Enter to continue.
@@ -82,7 +100,9 @@ async function main() {
     flow,
     inputs: opts.inputs,
     auth: { secrets },
-    mode: "dry_run",
+    mode,
+    headless: opts.headless,
+    profileId: opts.profile,
     onHuman,
     onStep: (t) => log(`  [${t.index}] ${t.type}${t.label ? ` — ${t.label}` : ""}: ${t.status}${t.detail ? ` (${t.detail})` : ""}`),
   });
@@ -95,10 +115,14 @@ async function main() {
       status: result.status,
       durationMs: Date.now() - startedAt,
       output: result.output,
+      unvalidatedOutputKeys: result.unvalidatedOutputKeys,
+      rrwebRef: result.rrwebRef,
+      authProfile: result.authProfile,
       failure: result.failure,
       steps: result.traces.map((t) => ({
         index: t.index, type: t.type, label: t.label,
         status: t.status, detail: t.detail,
+        screenshotRef: t.screenshotRef,
         durationMs: Math.max(0, t.endedAt - t.startedAt),
       })),
     }));
@@ -107,6 +131,8 @@ async function main() {
 
   log(`\n${result.status.toUpperCase()}`);
   if (Object.keys(result.output).length) log("output:", JSON.stringify(result.output, null, 2));
+  if (result.unvalidatedOutputKeys?.length) log("unvalidated (no model):", result.unvalidatedOutputKeys.join(", "));
+  if (result.rrwebRef) log("recording:", result.rrwebRef);
   if (result.failure) log("failure:", result.failure);
   process.exit(result.status === "completed" ? 0 : 1);
 }
