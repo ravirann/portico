@@ -20,6 +20,10 @@ import { Stagehand } from "@browserbasehq/stagehand";
 import { chromium } from "playwright";
 import type { BrowserContext } from "playwright";
 import type { Flow, Step } from "@portico/flow-spec";
+import { rewriteGoal, type GoalPlan, type GoalParameter } from "./rewrite.js";
+
+export { rewriteGoal, normalizePlan } from "./rewrite.js";
+export type { GoalPlan, GoalParameter } from "./rewrite.js";
 
 export interface AuthorOptions {
   /** Plain-language goal, e.g. "open claim 4305's detail and show its workflow steps". */
@@ -75,6 +79,8 @@ export interface AuthorResult {
     dataEndpoints: string[];
     /** Search/mutation requests captured with bodies (for write-flow authoring). */
     writeRequests: CapturedRequest[];
+    /** The rewriter's structured plan of the goal. */
+    plan: GoalPlan;
   };
 }
 
@@ -174,8 +180,11 @@ function parameterizeUrl(finalUrl: string): { url: string; inputs: Record<string
  * Infrastructure/boot endpoints every page loads — permissions, feature flags,
  * auth/session, telemetry. Never the data a flow is authored to harvest.
  */
+// ONLY generic infrastructure/telemetry — never domain entities. (An earlier
+// version listed pulse-specific nouns like "tickets"/"clinics", which wrongly
+// dropped real data endpoints on other portals. Keep this domain-agnostic.)
 const BOOT_NOISE_RE =
-  /\/(permissions|flags|userinfo|session|clinics|tickets|me|config|health|analytics|telemetry|events|log|collect|faro|rum|metrics|beacon)\b/i;
+  /\/(permissions|feature-?flags|flags|userinfo|analytics|telemetry|collect|faro|rum|metrics|beacon|events|healthz?|heartbeat|ping|config)\b/i;
 
 /** Collapse duplicate captured requests (agents retry) by method+path+body. */
 export function dedupeRequests(requests: CapturedRequest[]): CapturedRequest[] {
@@ -284,6 +293,7 @@ function buildMutationStep(
   lookups: Array<{ pathname: string }>,
   bodies: Map<string, string>,
   localStorageSnapshot: Record<string, string> = {},
+  nameForValue: (value: string, fallbackKey: string) => string = (_v, k) => inputNameFor(k),
 ): { step: Step; inputs: Record<string, string>; authReads: Step[] } | null {
   let u: URL;
   try {
@@ -319,7 +329,7 @@ function buildMutationStep(
           return Object.fromEntries(
             Object.entries(val as Record<string, unknown>).map(([k, x]) => {
               if (typeof x === "string" && x.length > 0) {
-                const name = inputNameFor(k);
+                const name = nameForValue(x, k);
                 inputs[name] = `string — e.g. ${x}`;
                 return [k, `{{${name}}}`];
               }
@@ -396,6 +406,7 @@ export function compileAgentRun(
   requests: CapturedRequest[] = [],
   responseBodies: Map<string, string> = new Map(),
   localStorageSnapshot: Record<string, string> = {},
+  planParams: GoalParameter[] = [],
 ): Flow {
   // Preferred path: the goal names specific values (a phone/id) and the agent's
   // actions carried them. A GET LOOKUP (search by phone) is frozen as a
@@ -404,7 +415,16 @@ export function compileAgentRun(
   // AUTHENTICATED request itself, so there's no stale-token problem that a raw
   // API-replay would hit. A MUTATION (update) becomes a deterministic `api`
   // write step. Lookups run first so a write can reference what a read found.
-  const tokens = goalTokens(goal);
+  // Per-run VALUE tokens: digit-runs from the goal PLUS the values the query
+  // rewriter named (a phone, a name, an update's target value like "english").
+  // The rewriter is what lets non-numeric values become inputs — brute-force
+  // digit-matching alone can't. A value→name map gives each a stable input name.
+  const planByValue = new Map(planParams.filter((p) => p.value).map((p) => [p.value, p]));
+  const tokens = [...new Set([...goalTokens(goal), ...planParams.map((p) => p.value).filter(Boolean)])];
+  const nameForValue = (value: string, fallbackKey: string): string => {
+    for (const [v, p] of planByValue) if (value.includes(v)) return p.name;
+    return canonicalInputName(value, fallbackKey);
+  };
   if (tokens.length > 0) {
     const lookups: Array<{ pathname: string; paramKey: string; name: string; example: string }> = [];
     const mutations: CapturedRequest[] = [];
@@ -427,7 +447,7 @@ export function compileAgentRun(
         for (const [k, v] of u.searchParams.entries()) {
           const tok = tokens.find((t) => v.includes(t));
           if (tok) {
-            hit = { paramKey: k, name: canonicalInputName(tok, k), example: v };
+            hit = { paramKey: k, name: nameForValue(v, k), example: v };
             break;
           }
         }
@@ -451,7 +471,7 @@ export function compileAgentRun(
     const authReadSteps: Step[] = [];
     const seenAuthRead = new Set<string>();
     for (const r of mutations) {
-      const built = buildMutationStep(r, tokens, lookups, responseBodies, localStorageSnapshot);
+      const built = buildMutationStep(r, tokens, lookups, responseBodies, localStorageSnapshot, nameForValue);
       if (!built) continue;
       for (const rd of built.authReads) {
         const as = (rd as unknown as { read?: { as?: string } }).read?.as ?? "";
@@ -640,15 +660,30 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
     logger: (line) => opts.onLog?.(`[stagehand] ${line.category ?? ""}: ${line.message ?? ""}`),
   });
 
+  // Plan the goal FIRST: a decomposed, explicit instruction is what makes the
+  // browser agent complete reliably, and the named parameters drive precise
+  // compilation. Degrades to the raw goal when no model / on failure.
+  log(opts, "planning the goal…");
+  const plan = await rewriteGoal(opts.goal, {
+    model: opts.model,
+    apiKey: opts.apiKey,
+    startUrl: opts.startUrl,
+    onLog: opts.onLog,
+  });
+  log(opts, `plan: intent=${plan.intent}, params=[${plan.parameters.map((p) => p.name).join(", ")}]`);
+
   try {
     log(opts, "attaching agent to the live session…");
     await sh.init();
     const page = sh.context.activePage() ?? sh.context.pages()[0] ?? (await sh.context.newPage());
     await page.goto(opts.startUrl);
 
-    log(opts, `agent working toward: ${opts.goal}`);
+    log(opts, `agent working toward the refined goal`);
     const agent = sh.agent();
-    const result = await agent.execute({ instruction: opts.goal, maxSteps: opts.maxSteps ?? 12 });
+    // A write needs more room than a read; give the agent headroom, and always
+    // at least the caller's budget.
+    const budget = Math.max(opts.maxSteps ?? 12, plan.intent === "update" ? 24 : 12);
+    const result = await agent.execute({ instruction: plan.refinedGoal, maxSteps: budget });
 
     const finalUrl = sh.context.activePage()?.url() ?? page.url();
     log(opts, `agent ${result.success ? "reached" : "stopped at"}: ${finalUrl}`);
@@ -681,6 +716,7 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
       requests,
       responseBodies,
       localStorageSnapshot,
+      plan.parameters,
     );
     return {
       flow,
@@ -692,6 +728,7 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
         actions: result.actions ?? [],
         dataEndpoints: [...new Set(responses.map((r) => r.pathname))],
         writeRequests: dedupeRequests(requests),
+        plan,
       },
     };
   } finally {

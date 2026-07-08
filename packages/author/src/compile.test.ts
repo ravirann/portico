@@ -67,12 +67,16 @@ test("compileAgentRun parameterizes the id and picks data endpoints over boot no
 });
 
 test("compileAgentRun falls back to size ranking when no id is in the final URL", () => {
-  // A list page with no id param → no id-correlation; the biggest data endpoint
-  // wins, and boot noise is still excluded.
-  const flow = compileAgentRun("open list", "https://pulse.clinikk.com/claims", responses, "claims-list");
+  // A list page with no id param → no id-correlation; the biggest DATA endpoint
+  // wins, and genuine infra/telemetry (not domain entities) is excluded.
+  const localResponses = [
+    { url: "https://x/api/analytics/collect", pathname: "/api/analytics/collect", bytes: 999999, contentType: "application/json" }, // telemetry — biggest but excluded
+    { url: "https://x/api/orders", pathname: "/api/orders", bytes: 5000, contentType: "application/json" },
+    { url: "https://x/api/lookups", pathname: "/api/lookups", bytes: 800, contentType: "application/json" },
+  ];
+  const flow = compileAgentRun("open list", "https://x/orders", localResponses, "orders-list");
   const first = flow.steps.find((s) => s.type === "intercept")!;
-  // /clinics is boot noise (excluded); the biggest remaining data endpoint is /claims.
-  assert.equal(first.intercept!.url_contains, "/api/proxy/v1/claims");
+  assert.equal(first.intercept!.url_contains, "/api/orders"); // biggest non-telemetry data endpoint
   assert.equal(flow.inputs, undefined); // nothing to parameterize
 });
 

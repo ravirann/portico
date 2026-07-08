@@ -1,16 +1,12 @@
 "use client";
 
-import { useState } from "react";
-import { RecordFlow, type ActiveSession } from "./record-flow";
 import { AgentAuthor } from "./agent-author";
-import { NewFlowEditor, type ConnectorOption } from "./new-flow-editor";
+import type { ActiveSession } from "./record-flow";
+import type { ConnectorOption } from "./new-flow-editor";
 
-type Mode = "record" | "agent" | "manual";
-
-/** The three ways to create a flow. Record-by-demonstration and author-by-goal
- *  (an AI agent drives the portal, then the run is frozen into a deterministic
- *  draft) are the guided paths; hand-authoring is the escape hatch for when you
- *  already know the steps. */
+/** Flows are created by describing a goal — an AI agent drives the portal once,
+ *  then the run is frozen into a deterministic, reviewable draft. (Recording and
+ *  hand-authoring remain in the codebase but are no longer surfaced here.) */
 export function NewFlow({
   connectors,
   sessions,
@@ -20,28 +16,19 @@ export function NewFlow({
   sessions: ActiveSession[];
   initialConnector?: string;
 }) {
-  const [mode, setMode] = useState<Mode>("record");
-
   return (
     <div className="stack" style={{ gap: 22 }}>
-      <div className="segmented" role="tablist" aria-label="How to create the flow">
-        <button role="tab" aria-selected={mode === "record"} className={mode === "record" ? "seg on" : "seg"} onClick={() => setMode("record")}>
-          <span className="seg-t">Record a demonstration</span>
-          <span className="seg-s">Drive the portal once — Portico compiles the steps</span>
-        </button>
-        <button role="tab" aria-selected={mode === "agent"} className={mode === "agent" ? "seg on" : "seg"} onClick={() => setMode("agent")}>
-          <span className="seg-t">Author with AI agent</span>
-          <span className="seg-s">Describe a goal — an agent drives it, then it&apos;s frozen deterministic</span>
-        </button>
-        <button role="tab" aria-selected={mode === "manual"} className={mode === "manual" ? "seg on" : "seg"} onClick={() => setMode("manual")}>
-          <span className="seg-t">Write YAML by hand</span>
-          <span className="seg-s">You already know the steps</span>
-        </button>
+      <div
+        className="panel"
+        style={{ padding: "14px 16px", background: "var(--wash)", border: "1px solid var(--line)" }}
+      >
+        <div className="seg-t" style={{ fontWeight: 600 }}>Author with an AI agent</div>
+        <div className="seg-s" style={{ color: "var(--ink-3)", fontSize: 12.5, marginTop: 2 }}>
+          Describe the goal in plain language. Portico plans it, an agent performs it once on your live
+          session, and the run is frozen into a deterministic flow you review, validate, and confirm.
+        </div>
       </div>
-
-      {mode === "record" && <RecordFlow connectors={connectors} sessions={sessions} initialConnector={initialConnector} />}
-      {mode === "agent" && <AgentAuthor connectors={connectors} sessions={sessions} initialConnector={initialConnector} />}
-      {mode === "manual" && <NewFlowEditor connectors={connectors} initialConnector={initialConnector} />}
+      <AgentAuthor connectors={connectors} sessions={sessions} initialConnector={initialConnector} />
     </div>
   );
 }

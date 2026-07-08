@@ -51,8 +51,8 @@ export default async function NewFlowPage({
         <div className="page-head rise rise-1">
           <h1 className="page-title" style={{ fontSize: 30 }}>New flow</h1>
           <p className="page-sub">
-            Record a demonstration and Portico compiles it into a draft — or write the steps by hand.
-            Either way you get a version-1 draft to verify, validate and confirm.
+            Describe a goal in plain language. Portico plans it, an agent performs it once on your live
+            session, and freezes the run into a version-1 draft to verify, validate and confirm.
           </p>
         </div>
         <div className="rise rise-2">
