@@ -61,10 +61,20 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
   // (cookies + localStorage only) can't restore portals like Epic/MyChart that
   // also keep sessionStorage / bind the session server-side. Profile-less runs
   // use an ephemeral Libretto session (storage-state path still honored).
+  const cdpEndpoint = opts.cdpEndpoint ?? process.env.PORTICO_CDP_ENDPOINT;
   let context: BrowserContext;
   let rawPage: Page;
   let closeSession: () => Promise<void>;
-  if (profile) {
+  if (cdpEndpoint) {
+    // Attach to an already-running, already-logged-in browser (scripts/serve-browser.mjs).
+    // Reuse its live tab so the session persists across runs — no re-login. Never
+    // close it: it's the user's long-lived browser, not ours.
+    const browser = await chromium.connectOverCDP(cdpEndpoint);
+    context = browser.contexts()[0] ?? (await browser.newContext());
+    rawPage = context.pages()[0] ?? (await context.newPage());
+    await rawPage.bringToFront().catch(() => {});
+    closeSession = async () => { /* leave the attached browser open */ };
+  } else if (profile) {
     mkdirSync(profile.userDataDir, { recursive: true });
     context = await chromium.launchPersistentContext(profile.userDataDir, {
       headless: opts.headless ?? true,

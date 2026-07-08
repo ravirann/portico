@@ -74,6 +74,14 @@ export interface EngineRunOptions {
    * loaded or written (fresh browser every run).
    */
   profileId?: string;
+  /**
+   * Attach to an ALREADY-RUNNING browser over CDP (e.g. `http://localhost:9222`)
+   * instead of launching one. The browser keeps its logged-in session between
+   * runs, so you log in ONCE (in that browser) and every run reuses it — no
+   * re-login. Started via `scripts/serve-browser.mjs`. Takes precedence over
+   * profileId; the attached browser is never closed by the run.
+   */
+  cdpEndpoint?: string;
   /** Where to write session recordings + per-step screenshots. Defaults to
    *  `<repo>/data/artifacts`. Recording is best-effort and never fails a run. */
   artifactsDir?: string;

@@ -30,6 +30,7 @@ interface CliOpts {
   json: boolean;
   live: boolean;
   profile?: string;
+  cdp?: string;
   inputs: Record<string, string>;
 }
 
@@ -47,6 +48,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--base-url") opts.baseUrl = rest[++i];
     else if (a === "--instance") opts.instance = rest[++i];
     else if (a === "--profile") opts.profile = rest[++i];
+    else if (a === "--cdp") opts.cdp = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -129,6 +131,7 @@ async function main() {
     mode,
     headless: opts.headless,
     profileId: opts.profile,
+    cdpEndpoint: opts.cdp,
     onHuman,
     onStep: (t) => log(`  [${t.index}] ${t.type}${t.label ? ` — ${t.label}` : ""}: ${t.status}${t.detail ? ` (${t.detail})` : ""}`),
   });
