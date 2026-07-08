@@ -147,13 +147,22 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
       };
 
       try {
-        // Interactive HITL: if the caller can service a human step (headed
-        // login/2FA), await it and continue instead of pausing the run.
-        if (step.type === "human" && opts.onHuman) {
-          await opts.onHuman({ index: i, label: step.label });
-          const shot = await recorder.screenshot(i);
-          emit("ok", "human step completed interactively", { screenshotRef: shot });
-          continue;
+        if (step.type === "human") {
+          // Attached (CDP) browser is already logged in → the login gate is
+          // moot; skip it so CDP runs are fully unattended.
+          if (cdpEndpoint) {
+            const shot = await recorder.screenshot(i);
+            emit("ok", "skipped — attached browser already authenticated (CDP)", { screenshotRef: shot });
+            continue;
+          }
+          // Interactive HITL: if the caller can service the step (headed
+          // login/2FA), await it and continue instead of pausing the run.
+          if (opts.onHuman) {
+            await opts.onHuman({ index: i, label: step.label });
+            const shot = await recorder.screenshot(i);
+            emit("ok", "human step completed interactively", { screenshotRef: shot });
+            continue;
+          }
         }
 
         const outcome = await step.run(rt);
