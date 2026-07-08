@@ -34,12 +34,15 @@ guard:
   dry_run_only: true
 
 steps:
-  - type: subflow
-    use: portal-login                                    # persistent-profile login
-
   - type: navigate
-    label: Open the scheduling wizard (mints the session context)
+    label: Open the scheduling page (redirects to login if the session lapsed)
     url: "{{base_url}}/MyChart/Scheduling"
+
+  # Log in inside the run — the reliable path for Epic's aggressive session expiry
+  # and mandatory 2FA. After sign-in, Epic redirects to the Scheduling page and the
+  # reads below pick up the real (172-char) anti-forgery token.
+  - type: human
+    label: Log in (+2FA) if prompted, land on "Schedule an Appointment", then press Enter
 
   # DIAGNOSTIC — dumps what page we actually landed on. If csrf stays 108-char and
   # the API returns HTML, this tells us whether the session expired / we're on the
