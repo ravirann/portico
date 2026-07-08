@@ -16,6 +16,8 @@ export type StepType =
   | "upload"
   | "human" // HITL: pause, notify, resume (2FA / CAPTCHA / ambiguity)
   | "resolve" // canonicalize a fuzzy intent input against real candidates
+  | "read" // read a value out of the live page (session token / option list)
+  | "select" // pick one item from a prior list by policy (e.g. earliest slot)
   | "subflow"; // reuse another flow (e.g. portal-login)
 
 /** A cached deterministic locator plus the semantic descriptor used to heal it. */
@@ -53,12 +55,37 @@ export interface Step {
   resolve?: {
     /** Templated intent to resolve, e.g. "{{location}}". */
     input: string;
-    /** Output key holding the candidate strings (from a prior extract). */
+    /** Output key holding the candidates (string[] or object[]) from a prior step. */
     candidates: string;
-    /** Output key to write the resolved canonical value into. */
+    /** For object candidates: the field to fuzzy-match against (e.g. "Title"). */
+    match_on?: string;
+    /**
+     * What to write into `output[as]`: with object candidates, the matched item's
+     * `value_field` (e.g. the encrypted "Value"/id); omit to write the matched
+     * display value itself.
+     */
+    value_field?: string;
+    /** Output key to write the resolved value (canonical name or id) into. */
     as: string;
     /** What to do when the input matches >1 candidate. Default "fail" (fail loud). */
     on_ambiguous?: "fail" | "human";
+  };
+  /**
+   * For read: evaluate a JS expression in the live page and store the result.
+   * Used to lift a session token / hidden field / option list out of the DOM
+   * so downstream API-tier steps can send it (e.g. an anti-forgery token).
+   */
+  read?: { expression: string; as: string };
+  /**
+   * For select: pick ONE item from a prior list (output[from]) by policy and
+   * store it — e.g. the earliest available slot. `by` is the field to order on.
+   */
+  select?: {
+    from: string;
+    policy: string; // "first" | "earliest" | "latest" | "index:N" | "on-or-after:<iso>"
+    by?: string;
+    compare?: "date" | "number" | "string";
+    as: string;
   };
   /** For assert/guard: a named condition the engine knows how to check. */
   condition?: string;

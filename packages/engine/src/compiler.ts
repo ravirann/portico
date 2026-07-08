@@ -41,6 +41,7 @@ import type { Flow, Step, Target } from "@portico/flow-spec";
 import { generateTotp } from "@portico/vault";
 import { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 import { resolveIntent } from "./resolve-intent.js";
+import { pickByPolicy, type PickPolicy } from "./pick-slot.js";
 import type { HealModel } from "./model.js";
 
 /** An API-tier marker a flow can attach to a step (extra flow-spec field). */
@@ -200,6 +201,10 @@ function compileStep(step: Step, index: number, target: Target): CompiledStep {
       return { index, type: "human", label, run: async () => ({ status: "paused" }) };
     case "resolve":
       return { index, type: "resolve", label, run: (rt) => runResolve(rt, step) };
+    case "read":
+      return { index, type: "read", label, run: (rt) => runRead(rt, step) };
+    case "select":
+      return { index, type: "select", label, run: (rt) => runSelect(rt, step) };
     case "subflow":
       return { index, type: "subflow", label, run: (rt) => runAuthSubflow(rt, step, target) };
     case "download":
@@ -303,24 +308,35 @@ async function runResolve(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   if (!spec) throw new Error(`resolve step "${step.label ?? "?"}" is missing its resolve config`);
 
   const input = rt.template(spec.input);
-  const raw = rt.output[spec.candidates];
-  // Accept string[] (e.g. location names) or object[] (use .name/.label/.value).
-  const candidates = Array.isArray(raw)
-    ? raw
-        .map((c) =>
-          typeof c === "string"
-            ? c
-            : ((c as Record<string, unknown>)?.name ??
-                (c as Record<string, unknown>)?.label ??
-                (c as Record<string, unknown>)?.value) as string | undefined,
-        )
-        .filter((c): c is string => typeof c === "string" && c.length > 0)
-    : [];
+  // Candidates key may be a dotted path into a prior response, e.g.
+  // "specialty_data.ReasonsForVisit".
+  const raw = lookupPath(spec.candidates, rt.input, rt.output);
+  const items = Array.isArray(raw) ? raw : [];
+
+  // The string each candidate is fuzzy-matched against: a plain string as-is,
+  // or an object's `match_on` field (falling back to common name fields).
+  const display = (c: unknown): string => {
+    if (typeof c === "string") return c;
+    const o = (c ?? {}) as Record<string, unknown>;
+    const v = spec.match_on ? o[spec.match_on] : (o.name ?? o.label ?? o.title ?? o.Title ?? o.value);
+    return v == null ? "" : String(v);
+  };
+  const candidates = items.map(display).filter((s) => s.length > 0);
 
   const result = resolveIntent(input, candidates);
   if (result.status === "resolved") {
-    rt.output[spec.as] = result.value;
-    return { status: "ok", detail: `resolved "${input}" → "${result.value}" (${result.matchedBy})` };
+    // Default: write the matched display value. With value_field, write that
+    // field of the matched object instead (e.g. the encrypted id GetSlots needs).
+    let out: unknown = result.value;
+    if (spec.value_field) {
+      const match = items.find((c) => typeof c !== "string" && display(c) === result.value) as
+        | Record<string, unknown>
+        | undefined;
+      out = match ? match[spec.value_field] ?? "" : "";
+    }
+    rt.output[spec.as] = out;
+    const shown = spec.value_field ? `${spec.value_field}=${String(out).slice(0, 16)}…` : `"${result.value}"`;
+    return { status: "ok", detail: `resolved "${input}" → ${shown} (${result.matchedBy})` };
   }
   if (result.status === "ambiguous") {
     // Ambiguity is a human/decision signal, never a silent pick.
@@ -335,6 +351,36 @@ async function runResolve(rt: StepRuntime, step: Step): Promise<StepOutcome> {
     `resolve: "${input}" matched none of ${candidates.length} option(s)` +
       (candidates.length ? `: ${candidates.slice(0, 8).join(", ")}${candidates.length > 8 ? ", …" : ""}` : "."),
   );
+}
+
+/**
+ * Read a value out of the live page (a session token, hidden anti-forgery field,
+ * or an option list) so downstream API-tier steps can send it. The expression is
+ * evaluated in page context — flows are trusted, authored artifacts.
+ */
+async function runRead(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+  const spec = step.read;
+  if (!spec) throw new Error(`read step "${step.label ?? "?"}" is missing its read config`);
+  const value = await rt.rawPage.evaluate(spec.expression);
+  rt.output[spec.as] = value;
+  const preview = Array.isArray(value) ? `${value.length} items` : String(value ?? "").slice(0, 24);
+  return { status: "ok", detail: `read ${spec.as} (${preview})` };
+}
+
+/** Pick ONE item from a prior list by policy (e.g. the earliest available slot). */
+async function runSelect(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+  const spec = step.select;
+  if (!spec) throw new Error(`select step "${step.label ?? "?"}" is missing its select config`);
+  const raw = lookupPath(spec.from, rt.input, rt.output); // dotted path allowed
+  const items = (Array.isArray(raw) ? raw : []) as Array<Record<string, unknown>>;
+  // policy may be templated (e.g. "{{slot_preference}}"); empty ⇒ earliest.
+  const policy = (rt.template(spec.policy).trim() || "earliest") as PickPolicy;
+  const picked = pickByPolicy(items, policy, { by: spec.by, compare: spec.compare });
+  if (!picked) {
+    throw new Error(`select: no item in "${spec.from}" (${items.length}) matched policy "${policy}".`);
+  }
+  rt.output[spec.as] = picked.item;
+  return { status: "ok", detail: `selected [${picked.index}] via ${policy}` };
 }
 
 async function runAssert(rt: StepRuntime, step: Step): Promise<StepOutcome> {
@@ -361,11 +407,22 @@ function apiStep(step: Step, api: ApiStepSpec, index: number): CompiledStep {
     type: "api",
     label: step.label,
     async run(rt) {
+      // Template {{...}} everywhere the caller can inject a resolved value:
+      // the url, header values, and string values inside an object/form body
+      // (so a form param like {{specialty_id}} resolves, not just a string body).
+      const tmpl = (v: unknown): unknown =>
+        typeof v === "string"
+          ? rt.template(v)
+          : Array.isArray(v)
+            ? v.map(tmpl)
+            : v && typeof v === "object"
+              ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, val]) => [k, tmpl(val)]))
+              : v;
       const config: RequestConfig = {
         url: rt.template(api.url),
         method: api.method ?? "GET",
-        headers: api.headers,
-        body: typeof api.body === "string" ? rt.template(api.body) : api.body,
+        headers: api.headers ? (tmpl(api.headers) as Record<string, string>) : undefined,
+        body: tmpl(api.body) as RequestConfig["body"],
         bodyType: api.bodyType,
         responseType: api.responseType ?? "json",
       };
@@ -491,9 +548,11 @@ function renderTemplate(
 }
 
 /** Walk a dotted key ("selected.time") through inputs, falling back to output. */
-function lookupPath(key: string, inputs: Record<string, unknown>, output: Record<string, unknown>): unknown {
+function lookupPath(key: string, inputs?: Record<string, unknown>, output?: Record<string, unknown>): unknown {
+  const inp = inputs ?? {};
+  const out = output ?? {};
   const [head, ...rest] = key.split(".");
-  let base: unknown = head! in inputs ? inputs[head!] : output[head!];
+  let base: unknown = head! in inp ? inp[head!] : out[head!];
   for (const seg of rest) {
     if (base == null || typeof base !== "object") return undefined;
     base = (base as Record<string, unknown>)[seg];

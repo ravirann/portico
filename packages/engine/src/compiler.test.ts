@@ -129,6 +129,44 @@ test("compileFlow wires a resolve step: canonicalizes intent, fails loud on ambi
   await assert.rejects(() => plan[0]!.run(mkRt({ location: "Southview" }, out2)), /ambiguous/);
 });
 
+test("resolve emits an id from object candidates; select picks the earliest slot", async () => {
+  const flow: Flow = {
+    key: "id-and-slot",
+    version: 1,
+    inputs: { specialty: "string" },
+    steps: [
+      {
+        type: "resolve",
+        label: "specialty → encrypted id",
+        resolve: { input: "{{specialty}}", candidates: "specialties", match_on: "Title", value_field: "Value", as: "specialty_id" },
+      },
+      {
+        type: "select",
+        label: "earliest available slot",
+        select: { from: "slots", policy: "earliest", by: "DisplayDateTimeUtc", compare: "date", as: "chosen" },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  assert.deepEqual(plan.map((s) => s.type), ["resolve", "select"]);
+
+  const mkRt = (inputs: Record<string, unknown>, output: Record<string, unknown>) =>
+    ({
+      output,
+      rawPage: {},
+      template: (s: string) => s.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k: string) => String(inputs[k] ?? "")),
+    }) as unknown as Parameters<(typeof plan)[0]["run"]>[0];
+
+  const out: Record<string, any> = {
+    specialties: [{ Title: "Primary Care", Value: "200" }, { Title: "Cardiology", Value: "17" }],
+    slots: [{ DisplayDateTimeUtc: "2026-10-05T14:00:00Z" }, { DisplayDateTimeUtc: "2026-09-04T17:30:00Z" }],
+  };
+  await plan[0]!.run(mkRt({ specialty: "primary care" }, out));
+  assert.equal(out.specialty_id, "200"); // fuzzy name → the encrypted id GetSlots needs
+  await plan[1]!.run(mkRt({}, out));
+  assert.equal(out.chosen.DisplayDateTimeUtc, "2026-09-04T17:30:00Z"); // the earliest, not first
+});
+
 test("resolveProfile normalizes the profile id and points at .libretto/profiles", () => {
   const p = resolveProfile("URMC MyChart!", { cwd: "/tmp/repo" });
   assert.equal(p.name, "urmc-mychart");
