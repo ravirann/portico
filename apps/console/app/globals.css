@@ -313,12 +313,17 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 .step-output-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .step-output-toggle {
   display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
-  background: none; border: 0; padding: 0; cursor: pointer; text-align: left; color: inherit;
+  background: none; border: 0; padding: 3px 6px; margin-left: -6px; border-radius: var(--radius-sm);
+  cursor: pointer; text-align: left; color: inherit; transition: background 0.12s ease;
 }
+.step-output-toggle:hover { background: var(--paper-3); }
 .step-output-caret {
-  display: inline-block; font-size: 10px; color: var(--ink-3);
-  transition: transform 0.15s ease; transform: rotate(0deg);
+  display: grid; place-items: center; width: 18px; height: 18px; flex: none;
+  border: 1px solid var(--line-2); border-radius: 5px; background: var(--paper-2);
+  font-size: 12px; line-height: 1; color: var(--ink-2);
+  transition: transform 0.15s ease, color 0.12s ease, border-color 0.12s ease;
 }
+.step-output-toggle:hover .step-output-caret { color: var(--ink); border-color: var(--ink-3); }
 .step-output-caret.open { transform: rotate(90deg); }
 .step-output-key { font-size: 12px; color: var(--ink); font-weight: 600; }
 .step-output-tag {
