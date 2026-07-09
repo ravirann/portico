@@ -6,42 +6,80 @@ import Link from "next/link";
 import { IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings } from "./icons";
 import { ConnectorSwitcher } from "./connector-switcher";
 
-function ThemeToggle() {
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+type ThemeMode = "dark" | "light" | "system";
+
+const THEME_OPTIONS: { value: ThemeMode; label: string; icon: React.ReactNode }[] = [
+  {
+    value: "dark",
+    label: "Dark",
+    icon: (
+      <svg className="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
+  {
+    value: "light",
+    label: "Light",
+    icon: (
+      <svg className="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <circle cx="8" cy="8" r="3.2" />
+        <path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.7 3.3l-1.1 1.1M4.4 11.6l-1.1 1.1M12.7 12.7l-1.1-1.1M4.4 4.4 3.3 3.3" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
+    value: "system",
+    label: "System",
+    icon: (
+      <svg className="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <rect x="1.5" y="2.5" width="13" height="9" rx="1.2" />
+        <path d="M6 14h4M8 11.5V14" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+];
+
+function ThemeSwitcher() {
+  // Default follows the device — absent stored preference means no data-theme
+  // attribute, so the app tracks prefers-color-scheme (see layout.tsx).
+  const [mode, setMode] = useState<ThemeMode>("system");
   useEffect(() => {
     const saved = localStorage.getItem("portico-theme");
-    const initial =
-      saved === "dark" || saved === "light"
-        ? saved
-        : window.matchMedia("(prefers-color-scheme: dark)").matches
-          ? "dark"
-          : "light";
-    setTheme(initial);
+    setMode(saved === "dark" || saved === "light" ? saved : "system");
   }, []);
-  const toggle = () => {
-    const next = theme === "dark" ? "light" : "dark";
-    setTheme(next);
-    document.documentElement.setAttribute("data-theme", next);
+  const apply = (next: ThemeMode) => {
+    setMode(next);
+    const root = document.documentElement;
+    if (next === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", next);
+    }
     try {
-      localStorage.setItem("portico-theme", next);
+      if (next === "system") localStorage.removeItem("portico-theme");
+      else localStorage.setItem("portico-theme", next);
     } catch {
       /* storage disabled — theme still applies for the session */
     }
   };
   return (
-    <button className="theme-toggle" onClick={toggle} aria-label="Toggle light or dark theme" title="Toggle theme">
-      {theme === "dark" ? (
-        <svg className="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-          <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z" strokeLinejoin="round" />
-        </svg>
-      ) : (
-        <svg className="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-          <circle cx="8" cy="8" r="3.2" />
-          <path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.7 3.3l-1.1 1.1M4.4 11.6l-1.1 1.1M12.7 12.7l-1.1-1.1M4.4 4.4 3.3 3.3" strokeLinecap="round" />
-        </svg>
-      )}
-      <span>{theme === "dark" ? "Dark" : "Light"}</span>
-    </button>
+    <div className="theme-switch" role="radiogroup" aria-label="Color theme">
+      {THEME_OPTIONS.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          role="radio"
+          aria-checked={mode === opt.value}
+          aria-label={opt.label}
+          title={opt.label}
+          className={`theme-seg${mode === opt.value ? " active" : ""}`}
+          onClick={() => apply(opt.value)}
+        >
+          {opt.icon}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -125,7 +163,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         ))}
 
         <div className="sidebar-foot">
-          <ThemeToggle />
+          <ThemeSwitcher />
           <span className="self-host">
             <span className="pulse" />
             <span className="self-host-text">Self-hosted · local</span>

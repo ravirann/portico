@@ -6,6 +6,12 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["--filter", "@portico/console", "dev"],
       "port": 4400
+    },
+    {
+      "name": "console-preview",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@portico/console", "exec", "next", "dev"],
+      "autoPort": true
     }
   ]
 }
