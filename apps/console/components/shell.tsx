@@ -60,23 +60,67 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const isActive = (href: string, exact?: boolean) =>
     exact ? path === href : path === href || path.startsWith(href + "/");
 
-  return (
-    <div className="shell">
-      <aside className="sidebar">
-        <Link href="/" className="brand" aria-label="Portico">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img className="brand-logo light" src="/brand/portico-logo.svg" alt="Portico" />
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img className="brand-logo dark" src="/brand/portico-logo-dark.svg" alt="Portico" />
-        </Link>
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("portico-sidebar-collapsed") === "1") setCollapsed(true);
+    } catch {
+      /* storage disabled — sidebar just stays expanded for the session */
+    }
+  }, []);
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("portico-sidebar-collapsed", next ? "1" : "0");
+      } catch {
+        /* storage disabled — collapse still applies for the session */
+      }
+      return next;
+    });
+  };
 
-        <ConnectorSwitcher />
+  return (
+    <div className={`shell${collapsed ? " collapsed" : ""}`}>
+      <aside className="sidebar">
+        <div className="sidebar-top">
+          <Link href="/" className="brand" aria-label="Portico">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img className="brand-logo light" src="/brand/portico-logo.svg" alt="Portico" />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img className="brand-logo dark" src="/brand/portico-logo-dark.svg" alt="Portico" />
+          </Link>
+          <button
+            type="button"
+            className="rail-toggle"
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            <svg className="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+              {collapsed ? (
+                <path d="M6 3.5 10.5 8 6 12.5" strokeLinecap="round" strokeLinejoin="round" />
+              ) : (
+                <path d="M10 3.5 5.5 8 10 12.5" strokeLinecap="round" strokeLinejoin="round" />
+              )}
+            </svg>
+          </button>
+        </div>
+
+        <div className="connector-switcher-wrap">
+          <ConnectorSwitcher />
+        </div>
 
         <div className="nav-label">Workspace</div>
         {NAV.map(({ href, label, Icon, exact }) => (
-          <Link key={href} href={href} className={`nav-item${isActive(href, exact) ? " active" : ""}`}>
+          <Link
+            key={href}
+            href={href}
+            title={label}
+            className={`nav-item${isActive(href, exact) ? " active" : ""}`}
+          >
             <Icon className="ico" />
-            {label}
+            <span className="nav-text">{label}</span>
           </Link>
         ))}
 
@@ -84,7 +128,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <ThemeToggle />
           <span className="self-host">
             <span className="pulse" />
-            Self-hosted · local
+            <span className="self-host-text">Self-hosted · local</span>
           </span>
         </div>
       </aside>
