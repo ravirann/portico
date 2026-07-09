@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getRun } from "@/lib/store";
-import { CopyJsonButton, JsonView } from "@/components/json-view";
+import { StepTimeline } from "@/components/step-timeline";
 import { fmtDuration, fmtRelative, tierLabel } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -31,19 +31,7 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
               <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{run.steps.length} steps · {fmtDuration(run.durationMs)}</span>
             </div>
             <hr className="hairline" style={{ margin: "6px 0 8px" }} />
-            <div className="timeline">
-              {run.steps.map((s) => (
-                <div key={s.index} className={`step ${s.status}`}>
-                  <div className="step-dot">{s.status === "failed" ? "!" : s.status === "healed" ? "↻" : s.index + 1}</div>
-                  <div className="step-body">
-                    <div className="step-label">{s.label ?? s.type}</div>
-                    <div className="step-type">{s.type}{s.status === "healed" ? " · self-healed" : ""}</div>
-                    {s.detail && <div className="step-detail">{s.detail}</div>}
-                  </div>
-                  <div className="step-dur">{fmtDuration(s.durationMs)}</div>
-                </div>
-              ))}
-            </div>
+            <StepTimeline steps={run.steps} output={run.output} />
 
             {run.failure && (
               <div style={{ marginTop: 8, padding: "14px 16px", background: "var(--fail-wash)", border: "1px solid oklch(0.86 0.05 27)", borderRadius: "var(--radius-sm)" }}>
@@ -66,16 +54,6 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
                 <dt>Started</dt><dd>{fmtRelative(run.startedAt)}</dd>
               </dl>
             </div>
-
-            {run.output && Object.keys(run.output).length > 0 && (
-              <div className="panel" style={{ padding: "18px 22px" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-                  <div className="eyebrow">Structured output</div>
-                  <CopyJsonButton data={run.output} />
-                </div>
-                <JsonView data={run.output} />
-              </div>
-            )}
 
             {(() => {
               const shots = run.steps.filter((s) => s.screenshotRef).length;
