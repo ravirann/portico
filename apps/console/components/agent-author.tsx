@@ -9,6 +9,22 @@ import type { ActiveSession } from "./record-flow";
 const KEY_RE = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
 const slugify = (s: string) => s.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
 
+/** Prepend https:// when the user typed a bare domain (no scheme). */
+function normalizeUrl(raw: string): string {
+  const s = raw.trim();
+  if (!s) return "";
+  return /^https?:\/\//i.test(s) ? s : `https://${s}`;
+}
+/** A real http(s) URL with a dotted host (rejects "foo", accepts "a.com"). */
+function isValidHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s);
+    return (u.protocol === "http:" || u.protocol === "https:") && u.hostname.includes(".");
+  } catch {
+    return false;
+  }
+}
+
 const fieldStyle: React.CSSProperties = {
   width: "100%",
   padding: "10px 13px",
@@ -54,8 +70,23 @@ export function AgentAuthor({
   const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
   const keyValid = key === "" || KEY_RE.test(key);
-  const canSubmit = goal.trim().length > 8 && /^https?:\/\//.test(startUrl.trim()) && keyValid && !busy;
   const hasSession = sessions.length > 0;
+  // Accept a bare domain — prepend https:// if no scheme was typed — then check
+  // it's a real host. Users shouldn't have to type the scheme.
+  const normalizedUrl = normalizeUrl(startUrl);
+  const urlValid = isValidHttpUrl(normalizedUrl);
+
+  // Explain WHY the button is disabled instead of a dead grey button.
+  const disabledReason = !hasSession
+    ? "Start a browser session first (Sessions page)."
+    : goal.trim().length <= 8
+      ? "Describe the goal in a sentence."
+      : !urlValid
+        ? "Enter the portal's URL (e.g. mychart.urmc.rochester.edu)."
+        : !keyValid
+          ? "Flow key must be lowercase letters, numbers, or hyphens."
+          : null;
+  const canSubmit = !disabledReason && !busy;
 
   async function author() {
     setBusy(true);
@@ -64,7 +95,7 @@ export function AgentAuthor({
       const res = await fetch("/api/flows/author", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ goal: goal.trim(), startUrl: startUrl.trim(), connector: connector || undefined, key: key.trim() || undefined }),
+        body: JSON.stringify({ goal: goal.trim(), startUrl: normalizedUrl, connector: connector || undefined, key: key.trim() || undefined }),
       });
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok || data.error || !data.draftId) {
@@ -153,11 +184,11 @@ export function AgentAuthor({
       )}
 
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", borderTop: "1px solid var(--line)", paddingTop: 20, marginTop: 2 }}>
-        <button className="btn btn-primary" onClick={author} disabled={!canSubmit || !hasSession}>
+        <button className="btn btn-primary" onClick={author} disabled={!canSubmit} title={disabledReason ?? undefined}>
           {busy ? "Authoring…" : "Author with agent"}
         </button>
-        <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
-          Produces a read-only draft you review before it can run.
+        <span style={{ fontSize: 11.5, color: disabledReason && !busy ? "var(--fail)" : "var(--ink-3)" }}>
+          {disabledReason && !busy ? disabledReason : "Produces a read-only draft you review before it can run."}
         </span>
       </div>
     </div>
