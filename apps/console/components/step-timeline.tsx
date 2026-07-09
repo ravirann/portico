@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { JsonView, CopyJsonButton } from "./json-view";
 import { fmtDuration } from "@/lib/format";
 import type { StepView } from "@/lib/types";
@@ -78,6 +79,11 @@ export function StepTimeline({
 }) {
   const { byStep, unattributed } = attributeOutput(steps, output);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+  // Portal the lightbox to <body> so no transformed/blurred ancestor (the .rise
+  // entrance animation, panel backdrop-filter) becomes its containing block and
+  // knocks the fixed overlay off-center. Only true after mount (client only).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   // Escape closes the full-size screenshot overlay.
   useEffect(() => {
@@ -140,23 +146,25 @@ export function StepTimeline({
         </div>
       )}
 
-      {lightbox && (
-        <div
-          className="lightbox"
-          role="dialog"
-          aria-modal="true"
-          aria-label={lightbox.alt}
-          onClick={() => setLightbox(null)}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            className="lightbox-img"
-            src={lightbox.src}
-            alt={lightbox.alt}
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
-      )}
+      {mounted && lightbox &&
+        createPortal(
+          <div
+            className="lightbox"
+            role="dialog"
+            aria-modal="true"
+            aria-label={lightbox.alt}
+            onClick={() => setLightbox(null)}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              className="lightbox-img"
+              src={lightbox.src}
+              alt={lightbox.alt}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
