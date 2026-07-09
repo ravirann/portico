@@ -103,3 +103,28 @@ test("sampleInputsFromFlow lifts examples from hints and tolerates bare values",
   assert.equal(s.lop, "hindi");               // bare value used directly
   assert.equal(s.note, "string");             // hint with no example → the hint (harmless)
 });
+
+test("missingFlowInputs catches inputs referenced only in an api step's body/headers/url", () => {
+  const flow: Flow = {
+    key: "w", version: 1,
+    inputs: { phone_number: "string", lop: "string", auth_token: "string" },
+    steps: [
+      { type: "navigate", url: "https://x/lens?phoneNumber={{phone_number}}" },
+      {
+        type: "read",
+        api: {
+          url: "https://x/api/family/{{customer.family.id}}/members/{{customer.id}}/lop",
+          method: "PUT",
+          headers: { Authorization: "Bearer {{auth_token}}" },
+          body: { lop: "{{lop}}" },
+        },
+      } as unknown as Flow["steps"][number],
+    ],
+  };
+  // lop + auth_token are only in the api block; all three must be detected.
+  assert.deepEqual(missingFlowInputs(flow, {}).sort(), ["auth_token", "lop", "phone_number"]);
+  // With values provided, none are missing.
+  assert.deepEqual(missingFlowInputs(flow, { phone_number: "9717352594", lop: "hindi", auth_token: "t" }), []);
+  // An empty lop is still caught (would otherwise send an empty write).
+  assert.deepEqual(missingFlowInputs(flow, { phone_number: "9717352594", lop: "  ", auth_token: "t" }), ["lop"]);
+});

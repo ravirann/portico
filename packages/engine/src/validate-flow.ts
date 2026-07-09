@@ -58,12 +58,21 @@ export function missingFlowInputs(flow: Flow, provided: Record<string, unknown>)
     if (!s) return;
     for (const m of s.matchAll(/\{\{\s*(\w+)[\w.]*\s*\}\}/g)) referenced.add(m[1]!);
   };
+  // Deep-scan any value (api url/body/headers are nested objects) for {{refs}}.
+  const scanDeep = (v: unknown): void => {
+    if (typeof v === "string") scan(v);
+    else if (Array.isArray(v)) v.forEach(scanDeep);
+    else if (v && typeof v === "object") Object.values(v as Record<string, unknown>).forEach(scanDeep);
+  };
   for (const step of flow.steps) {
     scan(step.url);
     scan(step.value);
     scan(step.locator?.semantic?.name);
     scan(step.resolve?.input);
     scan(step.select?.policy);
+    // An `api` step's url/headers/body carry inputs too (e.g. a write's {{lop}})
+    // — a missing one must fail fast, not send an empty value the API rejects.
+    scanDeep((step as unknown as { api?: unknown }).api);
   }
 
   return declared.filter((name) => {

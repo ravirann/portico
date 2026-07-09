@@ -32,10 +32,20 @@ export interface FlowInputField {
  *  inputs, choose dry-run vs live, POST /api/runs and jump to the run. The
  *  server picks the live browser session (connector-aware), so the panel only
  *  asks for what the flow itself declares. */
+/** The example value embedded in a hint ("string — e.g. 9717352594" → "9717352594"). */
+function exampleOf(hint: string): string {
+  const m = /e\.g\.\s*(.+)$/i.exec(hint ?? "");
+  return (m?.[1] ?? "").trim();
+}
+
 export function RunFlowButton({ flowId, inputs }: { flowId: string; inputs: FlowInputField[] }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [values, setValues] = useState<Record<string, string>>({});
+  // Prefill each field with its declared example so a required value (e.g. the
+  // new language of a write) is never accidentally sent empty.
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(inputs.map((f) => [f.name, exampleOf(f.hint)])),
+  );
   const [live, setLive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -104,11 +114,15 @@ export function RunFlowButton({ flowId, inputs }: { flowId: string; inputs: Flow
       )}
 
       <div>
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 600, color: "var(--ink-2)" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 600, color: live ? "var(--fail)" : "var(--ink-2)" }}>
           <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
-          Live mode
+          Live mode {live ? "— will apply changes to the portal" : ""}
         </label>
-        <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4 }}>unchecked = dry run</div>
+        <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4 }}>
+          {live
+            ? "Any update step (PUT/PATCH/POST) will be SENT to the portal."
+            : "Dry run — reads only; update steps are SKIPPED, so nothing changes on the portal."}
+        </div>
       </div>
 
       {note && (
