@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { JsonView, CopyJsonButton } from "./json-view";
 import { fmtDuration } from "@/lib/format";
 import type { StepView } from "@/lib/types";
@@ -77,11 +77,26 @@ export function StepTimeline({
   output?: Record<string, unknown>;
 }) {
   const { byStep, unattributed } = attributeOutput(steps, output);
+  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+
+  // Escape closes the full-size screenshot overlay.
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLightbox(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [lightbox]);
 
   return (
     <div className="timeline">
       {steps.map((s) => {
         const keys = byStep.get(s.index) ?? [];
+        const shotSrc = s.screenshotRef
+          ? `/api/artifacts?path=${encodeURIComponent(s.screenshotRef)}`
+          : null;
+        const shotAlt = `Screenshot after step ${s.index + 1}`;
         return (
           <div key={s.index} className={`step ${s.status}`}>
             <div className="step-dot">
@@ -94,6 +109,17 @@ export function StepTimeline({
               {keys.map((k) => (
                 <OutputDisclosure key={k} name={k} value={output?.[k]} />
               ))}
+              {shotSrc && (
+                <button
+                  type="button"
+                  className="step-shot"
+                  onClick={() => setLightbox({ src: shotSrc, alt: shotAlt })}
+                  aria-label={`Open ${shotAlt}`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img className="step-shot-thumb" src={shotSrc} alt={shotAlt} loading="lazy" />
+                </button>
+              )}
             </div>
             <div className="step-dur">{fmtDuration(s.durationMs)}</div>
           </div>
@@ -111,6 +137,24 @@ export function StepTimeline({
             ))}
           </div>
           <div className="step-dur" />
+        </div>
+      )}
+
+      {lightbox && (
+        <div
+          className="lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={lightbox.alt}
+          onClick={() => setLightbox(null)}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            className="lightbox-img"
+            src={lightbox.src}
+            alt={lightbox.alt}
+            onClick={(e) => e.stopPropagation()}
+          />
         </div>
       )}
     </div>
