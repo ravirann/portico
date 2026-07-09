@@ -69,21 +69,23 @@ test("reconcile drops dashboard/notification noise the agent never clicked (the 
   assert.equal(r.droppedNoise, 2); // 5 hook clicks - 3 matched
 });
 
-test("reconcile matches by label when xpaths differ (agent targeted a child node)", () => {
+test("close-ancestor xpath match: agent targeted a child node, hook got the actionable button", () => {
+  // Realistic depth: the hook's closest() resolved to the <button>; the agent
+  // targeted the inner <span> one level down. A few levels apart on a deep path
+  // → close-ancestor (strong). (Shallow /html/body/button is a container, not.)
+  const btn = "/html[1]/body[1]/div[3]/main[1]/section[1]/ul[1]/li[1]/button[1]";
   const clicks: ClickEvent[] = [
-    { text: "Schedule an Appointment", role: "button", url: "u", xpath: "xpath=/html[1]/body[1]/button[1]" },
-    { text: "Primary Care", role: "button", url: "u", xpath: "xpath=/html[1]/body[1]/button[2]" },
+    { text: "Schedule an Appointment", role: "button", url: "u", xpath: `xpath=${btn}` },
+    { text: "Primary Care", role: "button", url: "u", xpath: "xpath=/html[1]/body[1]/div[3]/main[1]/section[1]/ul[1]/li[2]/button[1]" },
   ];
-  // Agent xpaths point at inner <span>s; label overlap still aligns them.
   const agentActs = extractAgentActions([
-    act("click the Schedule an Appointment option", "/html[1]/body[1]/button[1]/span[1]"),
-    act("choose Primary Care", "/html[1]/body[1]/button[2]/span[1]"),
+    act("click the Schedule an Appointment option", `${btn}/span[1]`), // one level below the button
+    act("choose Primary Care", "/html[1]/body[1]/div[3]/main[1]/section[1]/ul[1]/li[2]/button[1]/span[1]"),
   ]);
   const r = reconcileClicks(clicks, agentActs);
   assert.equal(r.usedAgentStream, true);
   assert.equal(r.steps.length, 2);
-  // xpath ancestor match is "strong"; child→parent prefix counts as identity.
-  assert.equal(r.meta[0]!.confidence, "high");
+  assert.equal(r.meta[0]!.confidence, "high"); // close-ancestor on a deep path
 });
 
 test("a noise blob that a short agent label sits inside does NOT steal the match (B3)", () => {
@@ -104,6 +106,34 @@ test("a noise blob that a short agent label sits inside does NOT steal the match
   assert.equal(r.usedAgentStream, true);
   assert.equal(r.steps[0]!.text, "Schedule an Appointment"); // the real button, not the noise div
   assert.ok(!r.steps.some((s) => (s.text ?? "").includes("reminders")), "noise blob leaked into steps");
+});
+
+test("exact xpath identity beats an interleaved blob that only shares a shallow prefix (the live URMC bug)", () => {
+  // Reproduces the real capture: for each control the hook fired TWICE — once on
+  // the exact node (clean accessible name) and once mis-resolved to a page blob
+  // (/html or /main). The agent's xpath equals the clean node's. Reconcile MUST
+  // bind to the clean node (real name), not the blob (which shares "/html/").
+  const base = "/html[1]/body[1]/div[7]/div[2]/main[1]/div[2]/div[1]";
+  const pcXpath = `${base}/div[2]/div[2]/div[1]/div[1]/ul[1]/li[3]/div[1]/button[1]`;
+  const npXpath = `${base}/div[2]/div[2]/div[1]/div[2]/ul[1]/li[1]/div[1]/button[1]`;
+  const clicks: ClickEvent[] = [
+    { text: "Skip navigation to main content S Schedule an Appointment Tell us why you're com", url: "u", xpath: "xpath=/html[1]" }, // blob
+    { text: "Primary Care Includes adult, pediatric, and geriatric care", role: "button", url: "u", xpath: `xpath=${pcXpath}` }, // clean
+    { text: "Back Primary Care Schedule with a New Provider New Patient Adult Visit (18 and o", id: "main", url: "u", xpath: "xpath=/html[1]/body[1]/div[7]/div[2]/main[1]" }, // container blob
+    { text: "New Patient Adult Visit (18 and over) - Primary Care", role: "button", url: "u", xpath: `xpath=${npXpath}` }, // clean
+  ];
+  const agentActs = extractAgentActions([
+    { type: "act", action: "click Primary Care", playwrightArguments: { selector: `xpath=${pcXpath}`, description: "Primary Care appointment category button", method: "click" } },
+    { type: "act", action: "click New Patient", playwrightArguments: { selector: `xpath=${npXpath}`, description: "Button for New Patient Adult Visit (18 and over) - Primary Care", method: "click" } },
+  ]);
+  const r = reconcileClicks(clicks, agentActs);
+  assert.equal(r.usedAgentStream, true);
+  // The REAL accessible names win — not the agent's LLM descriptions, not the blobs.
+  assert.deepEqual(r.steps.map((s) => s.ariaLabel ?? s.text), [
+    "Primary Care Includes adult, pediatric, and geriatric care",
+    "New Patient Adult Visit (18 and over) - Primary Care",
+  ]);
+  assert.ok(r.meta.every((m) => m.confidence === "high"));
 });
 
 test("an agent click the hook missed becomes a heal-only step (no cached identity)", () => {

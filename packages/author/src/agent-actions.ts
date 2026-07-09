@@ -147,16 +147,30 @@ function labelMatch(a: string, b: string): boolean {
 function xpathNorm(x: string | null | undefined): string {
   return (x ?? "").replace(/^xpath=/, "").replace(/\/+$/, "").trim();
 }
+const xpathDepth = (x: string): number => x.split("/").filter(Boolean).length;
 
-/** Equal, or one path is an ancestor of the other (hook `closest()` may resolve
- *  to the actionable ancestor of the exact node the agent targeted). */
-function xpathMatch(a: string | undefined, b: string | null | undefined): boolean {
+/**
+ * How an agent xpath relates to a hook-click xpath:
+ *  - "exact": the same DOM node — the agent resolved a selector, the hook fired
+ *    on that exact node. This is the reliable, ground-truth correlation.
+ *  - "close-ancestor": the hook's `closest()` resolved to the ACTIONABLE ancestor
+ *    of the node the agent targeted (e.g. hook got the <button>, agent the inner
+ *    <span>). Only counts when the ancestor is a real control a FEW levels up —
+ *    NOT a page-level container. A shallow "/html[1]" or a far "/…/main[1]"
+ *    (which a naive prefix test would call an ancestor of everything) is a blob
+ *    mis-capture, not the same control, and must NOT match.
+ */
+function xpathRelation(a: string | undefined, b: string | null | undefined): "exact" | "close-ancestor" | "none" {
   const na = xpathNorm(a);
   const nb = xpathNorm(b);
-  if (!na || !nb) return false;
-  if (na === nb) return true;
+  if (!na || !nb) return "none";
+  if (na === nb) return "exact";
   const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
-  return long.startsWith(short + "/");
+  if (!long.startsWith(short + "/")) return "none";
+  const shortDepth = xpathDepth(short);
+  // Reject page-level containers (/html, /html/body/…/main) and far-apart paths.
+  if (shortDepth >= 5 && xpathDepth(long) - shortDepth <= 3) return "close-ancestor";
+  return "none";
 }
 
 export function labelOfClick(c: ClickEvent): string {
@@ -190,20 +204,35 @@ export function conciseLabel(s: string): string {
   return out.replace(/\s+/g, " ").trim().slice(0, 72).trim();
 }
 
-/** Earliest hook click at/after `cursor` matching this agent action; xpath
- *  identity is a strong match and wins over a mere label overlap. */
+/**
+ * Best hook click at/after `cursor` for this agent action, most-reliable-wins:
+ * EXACT xpath identity → close actionable-ancestor xpath → clean-label overlap.
+ * Exact xpath is the ground truth (the agent resolved a node; the hook fired on
+ * that same node), so it must beat an earlier blob that merely shares a shallow
+ * prefix. Label matching is a last resort and only against a USABLE (non-blob)
+ * hook label — a container blob's concatenated text can token-overlap anything.
+ */
 function bestMatch(
   act: AgentActionRecord,
   clicks: ClickEvent[],
   cursor: number,
 ): { index: number; strong: boolean } {
+  let ancestor = -1;
   let labelHit = -1;
   for (let i = cursor; i < clicks.length; i++) {
     const c = clicks[i];
     if (!c) continue;
-    if (act.xpath && xpathMatch(act.xpath, c.xpath)) return { index: i, strong: true };
-    if (labelHit < 0 && labelMatch(act.label, labelOfClick(c))) labelHit = i;
+    if (act.xpath && c.xpath) {
+      const rel = xpathRelation(act.xpath, c.xpath);
+      if (rel === "exact") return { index: i, strong: true }; // same node — done
+      if (rel === "close-ancestor" && ancestor < 0) ancestor = i;
+    }
+    if (labelHit < 0) {
+      const hl = labelOfClick(c);
+      if (hl && hl.length <= 72 && labelMatch(act.label, hl)) labelHit = i;
+    }
   }
+  if (ancestor >= 0) return { index: ancestor, strong: true };
   return { index: labelHit, strong: false };
 }
 
