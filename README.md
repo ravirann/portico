@@ -8,6 +8,10 @@ payer/EHR) where the automation must run in your own VPC and PHI never leaves.
 > the hot path of a promoted flow**. A healthy run's latency is *browser speed*,
 > not *model speed*. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+<p align="center">
+  <img src="docs/architecture.svg" alt="Portico — a Stagehand agent authors a run once; it is frozen into a Libretto flow that replays deterministically across API, DOM, and agent tiers with no model on the hot path" width="840">
+</p>
+
 ## Why
 
 Browser-automation tools are typically a *library* or a *managed cloud*. The
