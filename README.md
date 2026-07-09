@@ -20,30 +20,39 @@ behind a swappable adapter) rather than reinventing one.
 
 ```
 packages/
-  flow-spec/   # the declarative flow contract (types)
-  engine/      # EngineAdapter interface + Libretto adapter (+ fallback)
+  flow-spec/   # declarative flow contract + compileRecording (types, pure)
+  engine/      # EngineAdapter + Libretto adapter, tiered runner, self-heal, deriveTier
   vault/       # secret resolution, redaction, TOTP
+  store/       # SQLite store: runs · steps · sessions · flows · audit · author jobs
+  author/      # agent authoring + two-source reconciliation (Stagehand)
+apps/
+  cli/         # `portico` runner: run · validate · confirm · sessions
+  console/     # Next.js admin console (overview · runs · flows · sessions · connectors)
 connectors/
-  example-portal/  # template connector: scheduling (discovery only, never commits)
+  example-portal/  # template connector (discovery only, never commits)
 docs/
-  ARCHITECTURE.md          # founding doc + latency SLO
-  decisions/0001-execution-engine.md   # engine decision (Libretto)
+  ARCHITECTURE.md · architecture.svg   # architecture + diagram
+  decisions/0001-execution-engine.md   # engine (Libretto)
+  decisions/0002-agent-authoring.md    # authoring + two-source reconciliation
+  LIBRETTO-INTEGRATION-NOTES.md        # field notes
 ```
 
-## Status — Phase 0 (engine)
+## Status
 
-Scaffolded. What's real vs. what's a wired-later seam:
+Runs end-to-end. A live Epic/MyChart scheduling flow was **authored by
+demonstration, validated, and replayed deterministically** against the live
+portal — it reaches the appointment-selection screen and **stops before any
+booking**.
 
 | Piece | State |
 |---|---|
-| Flow spec contract (`@portico/flow-spec`) | ✅ types |
-| Engine boundary (`EngineAdapter`) + registry | ✅ interface |
-| Vault (env provider, redaction) | ✅ + tests |
-| `example-portal` connector + flow YAMLs | ✅ specs |
-| Engine adapter (Libretto, in-process) + `portico` CLI | ✅ **runs live** (`examples/smoke.flow.yaml` proven end-to-end) |
-| ADR-0001 validation (in-process embeddable) | ✅ confirmed — `launchBrowser`/`attemptWithRecovery`/`extractFromPage` used directly |
-| Portal auth + real selectors | pending the one-time record-by-demo (your login/2FA) |
-| TOTP (`generateTotp`) | seam — wire `otplib` in the auth build |
+| Flow spec + `compileRecording` (`@portico/flow-spec`) | ✅ |
+| Engine (Libretto adapter, tiered runner, self-heal, `deriveTier`) | ✅ runs live |
+| Vault (secret resolution, redaction, TOTP) | ✅ + tests |
+| Store (SQLite: runs · steps · sessions · flows · audit · author jobs) | ✅ |
+| Agent authoring + two-source reconciliation (`@portico/author`) | ✅ authored + validated live |
+| Console (overview · runs · flows · sessions · connectors) | ✅ async authoring + live timelines |
+| Scale path (control plane · Postgres/RLS · KMS · warm pool · fleet) | planned |
 
 ### Prove it live (no credentials needed)
 
@@ -67,19 +76,21 @@ pnpm typecheck
 ## Console
 
 A Next.js admin console: overview, runs with step-level timelines (self-heal +
-fail-safe), and connectors read from disk.
+fail-safe), **flows** (author by demonstration → review → validate → confirm),
+**sessions** (launch/attach a browser, scoped per connector), and connectors.
 
 ```bash
 pnpm --filter @portico/console dev   # → http://localhost:4400
 ```
 
-"Run smoke flow" executes the real engine (headless Chromium) and the completed
-run appears live.
+Authoring runs asynchronously with a live timeline; validated flows run the real
+engine and the completed run appears live.
 
-## The two things to validate before wiring Libretto (ADR-0001)
+## Libretto integration
 
-1. **Telemetry off + self-host** for PHI (`LIBRETTO_CLOUD_*`).
-2. **Invocation shape** — in-process (preferred) vs CLI/subprocess.
+Libretto runs **in-process** behind the `EngineAdapter` seam ([ADR-0001](docs/decisions/0001-execution-engine.md)),
+telemetry off for self-hosted PHI. Field notes, friction, and suggestions we sent
+upstream: [docs/LIBRETTO-INTEGRATION-NOTES.md](docs/LIBRETTO-INTEGRATION-NOTES.md).
 
 ## License
 

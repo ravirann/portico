@@ -5,7 +5,10 @@
 > runs against authenticated portals — deployed in the operator's own
 > infrastructure so credentials and sensitive data never leave it.**
 
-Status: founding draft. Engine choice: [ADR-0001](decisions/0001-execution-engine.md).
+Status: founding draft. Engine: [ADR-0001](decisions/0001-execution-engine.md).
+Authoring: [ADR-0002](decisions/0002-agent-authoring.md).
+
+![Portico — author once, replay deterministically](architecture.svg)
 
 ---
 
@@ -52,6 +55,34 @@ Capturing the network at authoring time is the *signal* that unlocks the API
 tier; it is not always the runtime path (some portals' CSRF-bound, session-coupled
 endpoints stay on the DOM tier). This is strictly more capable than a
 browser-replay-only approach.
+
+The **run tier is derived from what a run actually did** (`deriveTier` over the
+step traces), not hardcoded — a run that reached its data purely via passive
+interception is labeled `api`, one that drove the DOM is `dom`, one that
+self-healed is `agent`.
+
+### Authoring: demonstration → deterministic flow  ([ADR-0002](decisions/0002-agent-authoring.md))
+
+A flow is authored **once** by demonstration, then frozen. An agent
+([Stagehand](https://github.com/browserbase/stagehand)) drives the live,
+authenticated session toward a plain-language goal; Portico captures **two
+independent streams** and reconciles them (see the diagram above):
+
+- the **agent action stream** — authority on INTENT + SEQUENCE (which
+  interactions were deliberate), plus the element the agent resolved (an xpath);
+- a **DOM click hook** — authority on ELEMENT IDENTITY (the real accessible name
+  + role, captured at click time) that a resilient `getByRole(name)` / `getByText`
+  locator needs at replay.
+
+The reliable join is **exact xpath identity**: the agent's resolved xpath equals
+the clean DOM-hook capture for the same control, so we recover the element's real
+accessible name rather than the agent's paraphrase. The result compiles to a
+frozen `intercept → navigate → act… → wait` flow — pure Libretto, no model on
+replay. When the agent stream is thin or uncorrelated it falls back to the
+DOM-hook path (no regression). Compiling from raw DOM clicks alone froze noise
+and mis-identified elements; the agent stream supplies intent, the DOM hook the
+real name — neither alone is enough. This layer is `@portico/author`, isolated
+from the engine (the authoring agent pins `ai@5`; the engine uses `ai@6`).
 
 ## 4. Latency budget & SLO
 
@@ -184,12 +215,19 @@ DATA: SQLite store (runs·steps·sessions·audit) + local artifact store
 ## 10. Repo structure & open-core
 
 ```
-packages/  flow-spec · engine · sdk · vault
-apps/      control-plane · console · cli
-connectors/ ...
-deploy/    docker-compose · helm
-examples/  docs/
+packages/  flow-spec · engine · vault · store · author
+apps/      cli · console
+connectors/ ·  scripts/ ·  examples/ ·  docs/
 ```
+
+- **`flow-spec`** — declarative flow contract + `compileRecording` (shared, pure).
+- **`engine`** — `EngineAdapter` + Libretto adapter, tiered runner, self-heal,
+  `deriveTier`.  **`vault`** — secret resolution, redaction, TOTP.
+  **`store`** — SQLite store (runs · steps · sessions · flows · audit · author jobs).
+  **`author`** — agent authoring + two-source reconciliation (Stagehand).
+- **`apps/cli`** — `portico` runner (run/validate/confirm/sessions).
+  **`apps/console`** — Next.js admin console (overview · runs · flows · sessions ·
+  connectors), with async agent-authoring and live timelines.
 
 - **OSS (Apache-2.0):** engine adapter, SDK, flow spec, deterministic runtime,
   self-heal, console, single-tenant self-host, connectors, compose.

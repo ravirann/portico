@@ -1,0 +1,78 @@
+<svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg" role="img" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title>Portico architecture — author once with an agent, replay deterministically on Libretto</title>
+  <desc>Top lane (model-assisted, run once): a Stagehand agent drives the live portal; two capture streams — the agent's action stream and a DOM click hook — are reconciled by exact xpath identity and compiled into a frozen deterministic flow. Bottom lane (every run, no model on the hot path): Libretto replays that flow across three tiers — API via pageRequest and passive interception, DOM via cached locators, and a model-gated agent heal.</desc>
+
+  <rect x="0" y="0" width="960" height="540" fill="#fbfbfd"/>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa2b1"/>
+    </marker>
+  </defs>
+
+  <!-- title -->
+  <text x="32" y="42" font-size="21" font-weight="700" fill="#111827">Portico — author once, replay deterministically</text>
+  <text x="32" y="65" font-size="13" fill="#6b7280">A Stagehand agent authors a run; Portico freezes it into a Libretto flow that runs with zero model calls on the hot path.</text>
+
+  <!-- ===== LANE 1 · AUTHORING ===== -->
+  <rect x="24" y="86" width="912" height="150" rx="12" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="40" y="110" font-size="12" font-weight="600" fill="#4338ca" letter-spacing="0.4">AUTHORING · once · model-assisted</text>
+
+  <!-- boxes -->
+  <g>
+    <rect x="40" y="126" width="196" height="86" rx="9" fill="#ffffff" stroke="#c7d2fe"/>
+    <text x="138" y="163" font-size="13.5" font-weight="600" fill="#1f2937" text-anchor="middle">Agent drives portal</text>
+    <text x="138" y="184" font-size="11.5" fill="#6b7280" text-anchor="middle">Stagehand · live session</text>
+
+    <rect x="264" y="126" width="196" height="86" rx="9" fill="#ffffff" stroke="#c7d2fe"/>
+    <text x="362" y="158" font-size="13.5" font-weight="600" fill="#1f2937" text-anchor="middle">Two-source capture</text>
+    <text x="362" y="178" font-size="11" fill="#6b7280" text-anchor="middle">agent action stream</text>
+    <text x="362" y="193" font-size="11" fill="#6b7280" text-anchor="middle">+ DOM click hook</text>
+
+    <rect x="488" y="126" width="196" height="86" rx="9" fill="#ffffff" stroke="#c7d2fe"/>
+    <text x="586" y="163" font-size="13.5" font-weight="600" fill="#1f2937" text-anchor="middle">Reconcile + compile</text>
+    <text x="586" y="184" font-size="11.5" fill="#6b7280" text-anchor="middle">exact xpath identity</text>
+
+    <rect x="712" y="126" width="196" height="86" rx="9" fill="#e0e7ff" stroke="#818cf8"/>
+    <text x="810" y="163" font-size="13.5" font-weight="700" fill="#3730a3" text-anchor="middle">Deterministic flow</text>
+    <text x="810" y="184" font-size="11.5" fill="#4f46e5" text-anchor="middle">frozen YAML</text>
+  </g>
+  <!-- arrows lane1 -->
+  <line x1="240" y1="169" x2="260" y2="169" stroke="#9aa2b1" stroke-width="1.6" marker-end="url(#ah)"/>
+  <line x1="464" y1="169" x2="484" y2="169" stroke="#9aa2b1" stroke-width="1.6" marker-end="url(#ah)"/>
+  <line x1="688" y1="169" x2="708" y2="169" stroke="#9aa2b1" stroke-width="1.6" marker-end="url(#ah)"/>
+
+  <!-- bridge arrow: deterministic flow -> execution -->
+  <path d="M810,212 L810,258 L130,258 L130,336" fill="none" stroke="#9aa2b1" stroke-width="1.6" marker-end="url(#ah)"/>
+  <text x="470" y="251" font-size="11" fill="#9aa2b1" text-anchor="middle" font-style="italic">handed to the engine — no re-authoring</text>
+
+  <!-- ===== LANE 2 · EXECUTION ===== -->
+  <rect x="24" y="336" width="912" height="150" rx="12" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="40" y="360" font-size="12" font-weight="600" fill="#166534" letter-spacing="0.4">EXECUTION · every run · 0 model calls on the hot path</text>
+
+  <rect x="40" y="376" width="176" height="86" rx="9" fill="#ffffff" stroke="#a7f3d0"/>
+  <text x="128" y="413" font-size="13.5" font-weight="700" fill="#065f46" text-anchor="middle">Libretto engine</text>
+  <text x="128" y="434" font-size="11.5" fill="#6b7280" text-anchor="middle">deterministic replay</text>
+
+  <line x1="220" y1="419" x2="244" y2="419" stroke="#9aa2b1" stroke-width="1.6" marker-end="url(#ah)"/>
+
+  <!-- tier chips -->
+  <g>
+    <rect x="248" y="376" width="210" height="86" rx="9" fill="#ffffff" stroke="#a7f3d0"/>
+    <text x="353" y="405" font-size="13" font-weight="600" fill="#166534" text-anchor="middle">API tier</text>
+    <text x="353" y="425" font-size="11" fill="#6b7280" text-anchor="middle">pageRequest ·</text>
+    <text x="353" y="440" font-size="11" fill="#6b7280" text-anchor="middle">passive interception</text>
+
+    <rect x="470" y="376" width="210" height="86" rx="9" fill="#ffffff" stroke="#a7f3d0"/>
+    <text x="575" y="405" font-size="13" font-weight="600" fill="#166534" text-anchor="middle">DOM tier</text>
+    <text x="575" y="425" font-size="11" fill="#6b7280" text-anchor="middle">cached locators ·</text>
+    <text x="575" y="440" font-size="11" fill="#6b7280" text-anchor="middle">role + name cascade</text>
+
+    <rect x="692" y="376" width="210" height="86" rx="9" fill="#ffffff" stroke="#a7f3d0" stroke-dasharray="4 3"/>
+    <text x="797" y="405" font-size="13" font-weight="600" fill="#166534" text-anchor="middle">Agent tier</text>
+    <text x="797" y="425" font-size="11" fill="#6b7280" text-anchor="middle">heal only ·</text>
+    <text x="797" y="440" font-size="11" fill="#6b7280" text-anchor="middle">model-gated, off hot path</text>
+  </g>
+
+  <!-- footnote -->
+  <text x="32" y="512" font-size="11" fill="#94a3b8">Portal hostility handled: root-nav cookie clearing · multi-tab logout · single-use nonces → passive intercept, not replay.</text>
+</svg>
