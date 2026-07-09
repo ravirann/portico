@@ -217,8 +217,8 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   .shell.collapsed .nav-label { display: none; }
   .shell.collapsed .nav-item { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; }
   .shell.collapsed .nav-text { display: none; }
-  .shell.collapsed .theme-toggle { justify-content: center; }
-  .shell.collapsed .theme-toggle span,
+  /* stack the 3 theme segments vertically so they fit the narrow rail */
+  .shell.collapsed .theme-switch { grid-template-columns: 1fr; }
   .shell.collapsed .self-host-text { display: none; }
   .shell.collapsed .self-host { justify-content: center; }
 }
