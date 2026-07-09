@@ -11,21 +11,24 @@ const slugify = (s: string) => s.toLowerCase().replace(/\s+/g, "-").replace(/[^a
 
 const fieldStyle: React.CSSProperties = {
   width: "100%",
-  padding: "9px 12px",
+  padding: "10px 13px",
   borderRadius: "var(--radius-sm)",
   border: "1px solid var(--line-2)",
   background: "var(--paper)",
   color: "var(--ink)",
   fontFamily: "var(--font-body)",
   fontSize: 13.5,
+  lineHeight: 1.5,
+  boxSizing: "border-box",
 };
 const labelStyle: React.CSSProperties = {
   display: "block",
   fontSize: 12,
   fontWeight: 600,
   color: "var(--ink-2)",
-  marginBottom: 6,
+  marginBottom: 7,
 };
+const helpStyle: React.CSSProperties = { fontSize: 11.5, color: "var(--ink-3)", marginTop: 6, lineHeight: 1.5 };
 
 /**
  * Author-with-AI-agent wizard. An LLM agent drives the connector's live browser
@@ -78,7 +81,7 @@ export function AgentAuthor({
   }
 
   return (
-    <div className="panel" style={{ display: "grid", gap: 16 }}>
+    <div className="panel" style={{ display: "grid", gap: 20, padding: "24px 26px" }}>
       {!hasSession && (
         <div className="review-guard">
           No active browser session. Start one on the <b>Sessions</b> page and log into the portal — the agent
@@ -106,7 +109,7 @@ export function AgentAuthor({
           onChange={(e) => setGoal(e.target.value)}
           disabled={busy}
         />
-        <p style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 5 }}>
+        <p style={helpStyle}>
           Plain language. The agent figures out the steps; Portico freezes them into a deterministic flow.
         </p>
       </div>
@@ -149,7 +152,7 @@ export function AgentAuthor({
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", borderTop: "1px solid var(--line)", paddingTop: 20, marginTop: 2 }}>
         <button className="btn btn-primary" onClick={author} disabled={!canSubmit || !hasSession}>
           {busy ? "Authoring…" : "Author with agent"}
         </button>

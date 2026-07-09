@@ -17,13 +17,13 @@ export function NewFlow({
   initialConnector?: string;
 }) {
   return (
-    <div className="stack" style={{ gap: 22 }}>
+    <div className="stack" style={{ gap: 20, maxWidth: 720 }}>
       <div
         className="panel"
-        style={{ padding: "14px 16px", background: "var(--wash)", border: "1px solid var(--line)" }}
+        style={{ padding: "16px 18px", background: "var(--wash)", border: "1px solid var(--line)" }}
       >
         <div className="seg-t" style={{ fontWeight: 600 }}>Author with an AI agent</div>
-        <div className="seg-s" style={{ color: "var(--ink-3)", fontSize: 12.5, marginTop: 2 }}>
+        <div className="seg-s" style={{ color: "var(--ink-3)", fontSize: 12.5, marginTop: 4, lineHeight: 1.55 }}>
           Describe the goal in plain language. Portico plans it, an agent performs it once on your live
           session, and the run is frozen into a deterministic flow you review, validate, and confirm.
         </div>
