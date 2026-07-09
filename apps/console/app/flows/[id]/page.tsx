@@ -124,7 +124,7 @@ export default async function FlowDetail({
           </div>
 
           <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
-            {flow.status === "draft" && <FlowActions flowId={flow.id} />}
+            {flow.status === "draft" && <FlowActions flowId={flow.id} validated={Boolean(flow.validation?.passed)} />}
             {flow.status === "confirmed" && (
               <RunFlowButton flowId={flow.id} inputs={inputs.map(([name, hint]) => ({ name, hint: String(hint) }))} />
             )}

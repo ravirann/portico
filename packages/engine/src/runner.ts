@@ -87,13 +87,19 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
   let closeSession: () => Promise<void>;
   if (cdpEndpoint) {
     // Attach to an already-running, already-logged-in browser (scripts/serve-browser.mjs).
-    // Reuse its live tab so the session persists across runs — no re-login. Never
-    // close it: it's the user's long-lived browser, not ours.
+    // Open OUR OWN page in its context — which carries the auth cookies, so it's
+    // authenticated — instead of hijacking the user's visible tab. Driving
+    // pages()[0] fails with "Target page … has been closed" the moment the human
+    // (or a prior run/author) navigates or closes that tab, and replaying a
+    // multi-step SOP in the user's face is disruptive and race-prone. Close only
+    // our page at the end; NEVER close the browser — it's the user's long-lived one.
     const browser = await chromium.connectOverCDP(cdpEndpoint);
     context = browser.contexts()[0] ?? (await browser.newContext());
-    rawPage = context.pages()[0] ?? (await context.newPage());
+    rawPage = await context.newPage();
     await rawPage.bringToFront().catch(() => {});
-    closeSession = async () => { /* leave the attached browser open */ };
+    closeSession = async () => {
+      await rawPage.close().catch(() => {});
+    };
   } else if (profile) {
     mkdirSync(profile.userDataDir, { recursive: true });
     context = await chromium.launchPersistentContext(profile.userDataDir, {

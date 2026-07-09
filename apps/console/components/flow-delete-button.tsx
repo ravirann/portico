@@ -55,29 +55,51 @@ export function FlowDeleteButton({
   }
 
   return (
-    <span onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", flexDirection: "column", gap: 6 }}>
-      {!confirming ? (
-        <button
-          className="btn"
-          style={danger}
-          disabled={busy}
-          onClick={(e) => {
-            e.stopPropagation();
-            setNote(null);
-            setConfirming(true);
+    <span
+      onClick={(e) => e.stopPropagation()}
+      style={{ position: "relative", display: "inline-flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}
+    >
+      {/* The Delete button stays in normal flow so the table cell keeps a stable
+          width; the confirm row FLOATS below-right as a popover (right-anchored,
+          grows leftward) so it never widens the cell or overflows the panel. */}
+      <button
+        className="btn"
+        style={danger}
+        disabled={busy || confirming}
+        onClick={(e) => {
+          e.stopPropagation();
+          setNote(null);
+          setConfirming(true);
+        }}
+      >
+        <IconTrash className="ico-sm" /> Delete
+      </button>
+
+      {confirming && (
+        <span
+          style={{
+            position: "absolute",
+            right: 0,
+            top: "calc(100% + 4px)",
+            zIndex: 20,
+            display: "inline-flex",
+            gap: 6,
+            alignItems: "center",
+            whiteSpace: "nowrap",
+            padding: "8px 10px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid var(--line-2)",
+            background: "var(--paper)",
+            boxShadow: "0 10px 28px rgba(0,0,0,0.16)",
           }}
         >
-          <IconTrash className="ico-sm" /> Delete
-        </button>
-      ) : (
-        <span style={{ display: "inline-flex", gap: 6, alignItems: "center", whiteSpace: "nowrap" }}>
-          <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Delete {flowKey}?</span>
+          <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Delete?</span>
           <button className="btn" style={danger} disabled={busy} onClick={(e) => doDelete(e, false)}>
             {busy ? "Deleting…" : "This version"}
           </button>
           {(versions ?? 1) > 1 && (
             <button className="btn" style={danger} disabled={busy} onClick={(e) => doDelete(e, true)}>
-              All {versions} versions
+              All {versions}
             </button>
           )}
           <button

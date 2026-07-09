@@ -8,11 +8,18 @@ type Action = "refine" | "validate" | "confirm";
 type Note = { kind: "ok" | "error"; text: string } | null;
 
 /** Draft controls for the flow detail page. Server-rendered page stays static;
- *  this island POSTs to the /api/flows/[id]/* route handlers and refreshes. */
-export function FlowActions({ flowId }: { flowId: string }) {
+ *  this island POSTs to the /api/flows/[id]/* route handlers and refreshes.
+ *  `validated` (from the latest passing validation) drives the button state so a
+ *  flow that's already validated shows "Re-validate" instead of prompting a
+ *  fresh "Validate", and surfaces Confirm as the primary next step. */
+export function FlowActions({ flowId, validated: validatedProp }: { flowId: string; validated: boolean }) {
   const router = useRouter();
   const [busy, setBusy] = useState<Action | null>(null);
   const [note, setNote] = useState<Note>(null);
+  // Mirror the server's validation verdict locally so the button flips the
+  // instant a validate completes, then stays in sync when the page refreshes.
+  const [validated, setValidated] = useState(validatedProp);
+  useEffect(() => setValidated(validatedProp), [validatedProp]);
   // The page only hands us the id; resolve the human-readable key for the
   // delete confirm label via the flow read API (falls back to the id).
   const [flowKey, setFlowKey] = useState<string | null>(null);
@@ -47,8 +54,10 @@ export function FlowActions({ flowId }: { flowId: string }) {
         return;
       }
       if (action === "validate") {
+        const passed = Boolean(data.passed);
+        setValidated(passed);
         setNote(
-          data.passed
+          passed
             ? { kind: "ok", text: "Validation passed ✓" }
             : { kind: "error", text: "Validation failed — see reasons below." },
         );
@@ -66,17 +75,33 @@ export function FlowActions({ flowId }: { flowId: string }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <button className="btn btn-primary" onClick={() => run("confirm")} disabled={busy !== null}>
+        <button
+          className={validated ? "btn btn-primary" : "btn"}
+          onClick={() => run("confirm")}
+          disabled={busy !== null || !validated}
+          title={validated ? "Confirm for live execution" : "Validate the flow before confirming"}
+        >
           {busy === "confirm" ? "Confirming…" : "Confirm"}
         </button>
-        <button className="btn" onClick={() => run("validate")} disabled={busy !== null}>
-          {busy === "validate" ? "Validating…" : "Validate"}
+        <button
+          className={validated ? "btn" : "btn btn-primary"}
+          onClick={() => run("validate")}
+          disabled={busy !== null}
+          title={validated ? "Already validated — run again only if the flow changed" : "Dry-run against a live session"}
+        >
+          {busy === "validate" ? "Validating…" : validated ? "Re-validate" : "Validate"}
         </button>
         <button className="btn" onClick={() => run("refine")} disabled={busy !== null}>
           {busy === "refine" ? "Refining…" : "Refine"}
         </button>
         <FlowDeleteButton flowId={flowId} flowKey={flowKey ?? flowId} onDone="detail" />
       </div>
+
+      {validated && !note && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--ok)", display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontWeight: 700 }}>✓</span> Validated — ready to confirm. No need to re-validate unless you edit the flow.
+        </div>
+      )}
 
       {note && (
         <div

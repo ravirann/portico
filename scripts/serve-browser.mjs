@@ -10,9 +10,31 @@
 import { createRequire } from "module";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { createServer } from "node:net";
 
 const require = createRequire(resolve("packages/engine") + "/");
 const { chromium } = require("playwright");
+
+/**
+ * Ask the OS for a currently-free localhost TCP port. Used when no explicit
+ * --port is given so each session gets its OWN CDP endpoint — hardcoding one
+ * port (the old default 9222) made every connector's browser collide on the
+ * same endpoint, so the session→browser binding drifted and authoring could
+ * attach to the wrong (or wrong-portal) window. There's a tiny window between
+ * closing this probe and Chromium binding the port; on a single host that's
+ * acceptable, and a busy port simply fails the launch loudly rather than
+ * silently mis-binding.
+ */
+function findFreePort() {
+  return new Promise((res, rej) => {
+    const srv = createServer();
+    srv.on("error", rej);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => res(port));
+    });
+  });
+}
 
 const args = process.argv.slice(2);
 const arg = (flag, def) => {
@@ -21,7 +43,10 @@ const arg = (flag, def) => {
 };
 const baseUrl = arg("--base-url", "");
 const profileArg = arg("--profile", "default");
-const port = Number(arg("--port", "9222"));
+// Honor an explicit --port (back-compat); otherwise allocate a free one so
+// multiple sessions never fight over a single hardcoded port.
+const portArg = arg("--port", "");
+const port = portArg ? Number(portArg) : await findFreePort();
 const tenant = arg("--tenant", "default");
 const connector = arg("--connector", "");
 const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
@@ -55,7 +80,10 @@ const context = await chromium.launchPersistentContext(userDataDir, {
 const page = context.pages()[0] ?? (await context.newPage());
 if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 
-const cdpEndpoint = `http://localhost:${port}`;
+// Use 127.0.0.1, NOT "localhost": Chrome's --remote-debugging-port binds IPv4
+// only, but "localhost" can resolve to ::1 (IPv6) first — where an unrelated
+// listener (e.g. Docker's *:port) may answer, so a probe hits the wrong service.
+const cdpEndpoint = `http://127.0.0.1:${port}`;
 if (store) {
   store.createBrowserSession({
     id: sessionId,
@@ -72,7 +100,7 @@ console.log(`  profile: .libretto/profiles/${profileName}.userdata`);
 if (store) console.log(`  session:  ${sessionId} (tenant: ${tenant})`);
 console.log("\n  1) Log into the portal in this window.");
 console.log("  2) Leave it open.");
-console.log("  3) In another terminal, run flows with:  --cdp http://localhost:" + port);
+console.log("  3) In another terminal, run flows with:  --cdp http://127.0.0.1:" + port);
 console.log("\n  (Ctrl-C here to close the browser.)\n");
 
 // Keep the tracked session (and the portal's own session) from idling out:

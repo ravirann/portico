@@ -1,12 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ConnectorOption } from "./new-flow-editor";
 import type { ActiveSession } from "./record-flow";
 
 // Same key rules as record/hand-authoring (start & end alphanumeric).
 const KEY_RE = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
+// Where the in-flight async authoring job id is persisted, so leaving the page
+// and coming back resumes the same run.
+const LS_JOB_KEY = "portico:authorJob";
+
+/** HH:MM:SS from an ISO timestamp, for the timeline. */
+function fmtTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return "";
+  }
+}
 const slugify = (s: string) => s.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
 
 /** Prepend https:// when the user typed a bare domain (no scheme). */
@@ -66,8 +78,82 @@ export function AgentAuthor({
   const [goal, setGoal] = useState("");
   const [startUrl, setStartUrl] = useState("");
   const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
+  // The active async authoring job. Authoring runs detached and reports into the
+  // store; the component polls it, so the user can leave the page and come back.
+  const [jobId, setJobId] = useState<string | null>(null);
   const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [events, setEvents] = useState<{ ts: string; message: string }[]>([]);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const busy = jobId !== null;
+
+  // Keep the timeline scrolled to the newest event as it streams in.
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [events]);
+
+  // Resume an in-flight run after a reload / navigating back to this page.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(LS_JOB_KEY);
+      const id = saved ? (JSON.parse(saved) as { jobId?: string }).jobId : undefined;
+      if (id) {
+        setJobId(id);
+        setNote({ kind: "ok", text: "Resuming your authoring run…" });
+      }
+    } catch {
+      /* ignore malformed storage */
+    }
+  }, []);
+
+  // Poll the job while one is active. Done → open the draft; failed → show why.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let missing = 0;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/flows/author?jobId=${encodeURIComponent(jobId)}`);
+        const job = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (cancelled) return;
+        // A stale saved id whose row no longer exists reports `missing`; give the
+        // process a few seconds to create its row, then clear if it never does.
+        if (job.missing) {
+          if (++missing >= 5) {
+            localStorage.removeItem(LS_JOB_KEY);
+            setJobId(null);
+            setNote(null);
+          }
+          return;
+        }
+        missing = 0;
+        if (Array.isArray(job.events)) setEvents(job.events as { ts: string; message: string }[]);
+        const status = String(job.status ?? "running");
+        if (status === "done" && typeof job.draftFlowId === "string") {
+          localStorage.removeItem(LS_JOB_KEY);
+          setJobId(null);
+          router.push(`/flows/${job.draftFlowId}?review=1`);
+          return;
+        }
+        if (status === "failed") {
+          localStorage.removeItem(LS_JOB_KEY);
+          setJobId(null);
+          setNote({ kind: "error", text: String(job.error ?? "Authoring failed.") });
+          return;
+        }
+        // Running — the timeline is the live display; keep the note for errors only.
+        setNote(null);
+      } catch {
+        /* transient network blip — keep polling */
+      }
+    };
+    void poll();
+    const timer = setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [jobId, router]);
 
   const keyValid = key === "" || KEY_RE.test(key);
   const hasSession = sessions.length > 0;
@@ -89,8 +175,7 @@ export function AgentAuthor({
   const canSubmit = !disabledReason && !busy;
 
   async function author() {
-    setBusy(true);
-    setNote({ kind: "ok", text: "Agent is driving the portal toward your goal — this can take a minute…" });
+    setNote({ kind: "ok", text: "Starting the agent…" });
     try {
       const res = await fetch("/api/flows/author", {
         method: "POST",
@@ -98,16 +183,21 @@ export function AgentAuthor({
         body: JSON.stringify({ goal: goal.trim(), startUrl: normalizedUrl, connector: connector || undefined, key: key.trim() || undefined }),
       });
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-      if (!res.ok || data.error || !data.draftId) {
-        setNote({ kind: "error", text: String(data.error ?? "Authoring failed.") });
+      if (!res.ok || data.error || !data.jobId) {
+        setNote({ kind: "error", text: String(data.error ?? "Authoring failed to start.") });
         return;
       }
-      // Straight into the verification review, same as a recorded draft.
-      router.push(`/flows/${String(data.draftId)}?review=1`);
+      // The run is now detached; persist the job id and let the poller take over.
+      // Leaving the page is safe — returning resumes the same run.
+      const id = String(data.jobId);
+      try {
+        localStorage.setItem(LS_JOB_KEY, JSON.stringify({ jobId: id, connector }));
+      } catch {
+        /* private mode — still works this session via state */
+      }
+      setJobId(id);
     } catch (e) {
       setNote({ kind: "error", text: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -170,6 +260,47 @@ export function AgentAuthor({
         />
       </div>
 
+      {(busy || events.length > 0) && (
+        <div style={{ border: "1px solid var(--line)", borderRadius: "var(--radius-sm)", background: "var(--wash)", overflow: "hidden" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "8px 12px",
+              borderBottom: "1px solid var(--line)",
+              fontSize: 11,
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: "var(--ink-3)",
+            }}
+          >
+            <span>Authoring timeline</span>
+            {busy && <span style={{ color: "var(--accent)", textTransform: "none", letterSpacing: 0 }}>● live</span>}
+          </div>
+          <div
+            ref={timelineRef}
+            style={{ maxHeight: 240, overflowY: "auto", padding: "8px 12px", display: "flex", flexDirection: "column", gap: 4 }}
+          >
+            {events.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--ink-3)" }}>Waiting for the first step…</div>
+            ) : (
+              events.map((e, i) => (
+                <div key={i} style={{ display: "flex", gap: 10, fontSize: 12, lineHeight: 1.5, alignItems: "baseline" }}>
+                  <span className="mono" style={{ color: "var(--ink-3)", fontSize: 10.5, flexShrink: 0, minWidth: 58 }}>
+                    {fmtTime(e.ts)}
+                  </span>
+                  <span style={{ color: "var(--ink-2)", minWidth: 0, wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                    {e.message}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {note && (
         <div
           className="review-result"
@@ -187,8 +318,28 @@ export function AgentAuthor({
         <button className="btn btn-primary" onClick={author} disabled={!canSubmit} title={disabledReason ?? undefined}>
           {busy ? "Authoring…" : "Author with agent"}
         </button>
+        {busy && (
+          <button
+            className="btn"
+            onClick={() => {
+              try {
+                localStorage.removeItem(LS_JOB_KEY);
+              } catch {
+                /* ignore */
+              }
+              setJobId(null);
+              setNote(null);
+            }}
+          >
+            Stop watching
+          </button>
+        )}
         <span style={{ fontSize: 11.5, color: disabledReason && !busy ? "var(--fail)" : "var(--ink-3)" }}>
-          {disabledReason && !busy ? disabledReason : "Produces a read-only draft you review before it can run."}
+          {busy
+            ? "Runs in the background — you can leave this page and come back; it keeps going."
+            : disabledReason && !busy
+              ? disabledReason
+              : "Produces a read-only draft you review before it can run."}
         </span>
       </div>
     </div>

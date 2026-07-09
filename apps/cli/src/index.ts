@@ -18,8 +18,9 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions, sampleInputsFromFlow } from "@portico/engine";
+import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions, sampleInputsFromFlow, deriveTier } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
@@ -113,6 +114,41 @@ function emit(value: unknown, code = 0): void {
   process.stdout.write(JSON.stringify(value), () => process.exit(code));
 }
 
+/**
+ * A currently-free localhost TCP port. Each browser session gets its own CDP
+ * endpoint this way, instead of every session colliding on a hardcoded 9222 —
+ * that collision let `pickLiveSession` attach authoring/runs to the wrong (or
+ * wrong-portal) browser. The picked port is passed down to serve-browser so the
+ * CLI's session row and the launcher agree on the endpoint.
+ */
+function findFreePort(): Promise<number> {
+  return new Promise((res, rej) => {
+    const srv = createServer();
+    srv.on("error", rej);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close(() => res(port));
+    });
+  });
+}
+
+/** Normalize a profile name to the on-disk userDataDir key, matching
+ *  serve-browser.mjs exactly, so store rows and the launcher agree. */
+function normalizeProfile(p: string | undefined): string {
+  return (p ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
+}
+
+/** True when a CDP endpoint answers its version probe (the browser is alive). */
+async function isCdpLive(endpoint: string): Promise<boolean> {
+  try {
+    const r = await fetch(endpoint.replace(/\/+$/, "") + "/json/version", { signal: AbortSignal.timeout(2000) });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   // Load a repo-root .env (credentials/secrets) if present; env vars set
   // directly still work. Node 20.6+/24 ships process.loadEnvFile.
@@ -150,6 +186,23 @@ async function main() {
     const out = flow ? { ...flow, validation: store.latestValidation(flow.id) ?? null } : null;
     store.close();
     return emit(out);
+  }
+  // Async authoring job status — polled by the console so authoring survives a
+  // page reload (the author-cli process writes progress/result to the row).
+  if (cmd === "author-job-get") {
+    if (!flowPath) { console.error("usage: portico author-job-get <jobId>"); process.exit(2); }
+    const store = new Store();
+    const job = store.getAuthorJob(flowPath);
+    // Bundle the progress timeline so one poll gets both the status and the log.
+    const out = job ? { ...job, events: store.listAuthorJobEvents(flowPath) } : null;
+    store.close();
+    return emit(out);
+  }
+  if (cmd === "author-jobs") {
+    const store = new Store();
+    const jobs = store.listAuthorJobs(opts.connector, 20);
+    store.close();
+    return emit(jobs);
   }
   // Delete a flow version (default) or every version of its key (--all-versions).
   // Validations cascade in the store; the removal is recorded in the audit log.
@@ -293,10 +346,34 @@ async function main() {
 
   if (cmd === "session-start") {
     const tenant = opts.tenant ?? "default";
-    const port = opts.port ?? 9222;
-    const scriptArgs = ["--port", String(port), "--tenant", tenant];
+    // The profile keys the on-disk userDataDir. Default it to the connector so
+    // each connector gets its OWN persistent profile — logins persist per
+    // connector and connectors never share a cookie jar (isolation).
+    const profile = normalizeProfile(opts.profile ?? opts.connector);
+
+    // Chromium allows only ONE browser per userDataDir; launching a second on
+    // the same profile makes the two fight over the singleton lock, which
+    // corrupts the session and silently logs the user out. So if a LIVE browser
+    // already exists for this profile, REUSE it instead of launching a duplicate.
+    {
+      const store = new Store();
+      const dupes = store
+        .listBrowserSessions(tenant)
+        .filter((s) => s.status === "active" && s.cdpEndpoint && normalizeProfile(s.profile) === profile);
+      for (const s of dupes) {
+        if (await isCdpLive(s.cdpEndpoint!)) {
+          store.close();
+          return emit({ id: s.id, cdpEndpoint: s.cdpEndpoint, connector: s.connector, reused: true });
+        }
+      }
+      store.close();
+    }
+
+    // Allocate a free port unless one was explicitly requested, and pass it
+    // down so serve-browser binds the SAME port the session row records.
+    const port = opts.port ?? (await findFreePort());
+    const scriptArgs = ["--port", String(port), "--tenant", tenant, "--profile", profile];
     if (opts.baseUrl) scriptArgs.push("--base-url", opts.baseUrl);
-    if (opts.profile) scriptArgs.push("--profile", opts.profile);
     if (opts.connector) scriptArgs.push("--connector", opts.connector);
 
     const child = spawn(process.execPath, ["scripts/serve-browser.mjs", ...scriptArgs], {
@@ -310,12 +387,14 @@ async function main() {
     // its own generated id once its browser is up — a harmless double-entry,
     // not a conflict, since ids never collide).
     const id = "sess_" + Date.now().toString(16) + Math.random().toString(16).slice(2, 8);
-    const cdpEndpoint = `http://localhost:${port}`;
+    // 127.0.0.1, not "localhost": Chrome binds the debug port on IPv4 only, and
+    // "localhost" may resolve to ::1 (IPv6) first where another service can answer.
+    const cdpEndpoint = `http://127.0.0.1:${port}`;
     const store = new Store();
     store.createBrowserSession({
       id,
       tenant,
-      profile: opts.profile,
+      profile,
       cdpEndpoint,
       startedAt: new Date().toISOString(),
       pid: child.pid,
@@ -739,7 +818,7 @@ async function main() {
     store.createRun({
       id: runId, connector: connectorKey ?? instanceName ?? "cli", instance: instanceName,
       flow: flow.key, engine: engine.name,
-      tier: "dom", status: result.status, mode,
+      tier: deriveTier(result.traces), status: result.status, mode,
       startedAt: new Date(startedAt).toISOString(), durationMs,
       steps, output: result.output, failure: result.failure, rrwebRef: result.rrwebRef,
     });

@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { compileRecording, type Recording } from "./compile-recording.js";
-import type { Step } from "@portico/flow-spec";
+import type { Step } from "./index.js";
 
 const recording: Recording = {
   baseUrl: "https://mychart.example.org/MyChart/SignIn",

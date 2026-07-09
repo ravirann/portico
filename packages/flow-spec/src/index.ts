@@ -147,3 +147,9 @@ export interface Target {
 }
 
 export const FLOW_SPEC_VERSION = 1 as const;
+
+// Pure recording→flow compiler (no engine/runtime deps) — lives here so BOTH the
+// engine and the isolated author package (which can't import @portico/engine)
+// can compile a captured demonstration into a deterministic action-replay flow.
+export { compileRecording, collapseTogglePairs } from "./compile-recording.js";
+export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";

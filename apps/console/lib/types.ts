@@ -95,3 +95,28 @@ export interface SessionView {
   /** The connector KEY this session is for (scopes it in the console). */
   connector?: string;
 }
+
+export type AuthorJobStatus = "running" | "done" | "failed";
+
+/** One line in an authoring job's progress timeline. */
+export interface AuthorJobEvent {
+  ts: string;
+  message: string;
+}
+
+/** An async agent-authoring job as the console sees it (polled from the store). */
+export interface AuthorJobView {
+  id: string;
+  connector?: string;
+  goal: string;
+  startUrl: string;
+  flowKey?: string;
+  status: AuthorJobStatus;
+  draftFlowId?: string;
+  progress?: string;
+  error?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  /** Progress timeline (bundled by author-job-get). */
+  events?: AuthorJobEvent[];
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evaluateValidation, expectedOutputKeys, missingFlowInputs, sampleInputsFromFlow } from "./validate-flow.js";
+import { evaluateValidation, expectedOutputKeys, requiredOutputKeys, missingFlowInputs, sampleInputsFromFlow } from "./validate-flow.js";
 import type { Flow } from "@portico/flow-spec";
 
 const flow: Flow = {
@@ -46,6 +46,46 @@ test("empty array output counts as empty", () => {
   const r = evaluateValidation(flow, { status: "completed", output: { slots_raw: [], chosen: { a: 1 } } });
   assert.equal(r.passed, false);
   assert.ok(r.reasons.some((x) => x.includes("slots_raw")));
+});
+
+test("requiredOutputKeys keeps select/extract + the WAITED intercept, drops opportunistic ones", () => {
+  assert.deepEqual(requiredOutputKeys(flow).sort(), ["chosen", "slots_raw"]);
+});
+
+test("opportunistic (non-waited) wizard intercepts do NOT gate validation — the URMC scheduling case", () => {
+  // Three intercepts captured while the agent clicked through the scheduler, but
+  // the deterministic flow only navigates + waits on the primary. GetSpecialtyData
+  // and Menu fire only on interactions the flow does not replay, so their being
+  // empty on a dry-run must not fail validation.
+  const wizard: Flow = {
+    key: "urmc-consult-scheduling",
+    version: 1,
+    steps: [
+      { type: "intercept", intercept: { url_contains: "/Scheduling/GetSchedulingWorkflowData", as: "data_raw" } },
+      { type: "intercept", intercept: { url_contains: "/Scheduling/GetSpecialtyData", as: "data_1" } },
+      { type: "intercept", intercept: { url_contains: "/Menu", as: "data_2" } },
+      { type: "navigate", url: "https://mychart.urmc.rochester.edu/MyChart/Scheduling" },
+      { type: "wait", wait: { for: "data_raw" } },
+    ],
+  };
+  const r = evaluateValidation(wizard, { status: "completed", output: { data_raw: { Workflow: 1 }, data_1: {}, data_2: undefined } });
+  assert.equal(r.passed, true);
+  assert.deepEqual(r.reasons, []);
+});
+
+test("a harvest with NO wait still requires every intercept (no signal to narrow)", () => {
+  const noWait: Flow = {
+    key: "k",
+    version: 1,
+    steps: [
+      { type: "intercept", intercept: { url_contains: "/a", as: "a" } },
+      { type: "intercept", intercept: { url_contains: "/b", as: "b" } },
+      { type: "navigate", url: "https://x" },
+    ],
+  };
+  const r = evaluateValidation(noWait, { status: "completed", output: { a: { x: 1 }, b: {} } });
+  assert.equal(r.passed, false);
+  assert.ok(r.reasons.some((x) => x.includes("b")));
 });
 
 test("a flow with no data outputs cannot be validated green", () => {

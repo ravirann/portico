@@ -202,8 +202,14 @@ test("act templates the locator's accessible name from inputs (not a literal {{.
   };
   const { plan } = compileFlow(flow, target);
   let seenName: string | undefined;
-  const fakeLocator = { waitFor: async () => {}, click: async () => {} };
-  const page = { getByRole: (_role: string, opts: { name: string }) => { seenName = opts.name; return fakeLocator; } };
+  const fakeLocator: Record<string, unknown> = { waitFor: async () => {}, click: async () => {} };
+  fakeLocator.or = () => fakeLocator;
+  fakeLocator.first = () => fakeLocator;
+  const page = {
+    getByRole: (_role: string, opts: { name: string }) => { seenName = opts.name; return fakeLocator; },
+    getByLabel: () => fakeLocator,
+    getByText: () => fakeLocator,
+  };
   const rt = {
     page,
     rawPage: page,
@@ -273,13 +279,19 @@ function locatorRt(inputs: Record<string, string> = {}) {
 
 const chainOf = (loc: unknown) => (loc as { chain: string }).chain;
 
-test("resolveActLocator: role+name stays strict (no .first())", () => {
+test("resolveActLocator: role+name is the FIRST (strict) candidate, then resilient fallbacks", () => {
   const r = resolveActLocator(locatorRt(), {
     type: "act",
     locator: { semantic: { role: "button", name: "8183054609", intent: "the claim number" } },
   });
-  assert.equal(chainOf(r.locator), "role:button:8183054609");
-  assert.equal(r.fallback, undefined);
+  // 1st candidate is the exact strict role+name — unchanged behavior, so flows
+  // that already match keep matching it.
+  assert.equal(chainOf(r.candidates[0]), "role:button:8183054609");
+  // A later candidate is the role-AGNOSTIC cascade (button OR link OR …), which
+  // is what rescues a link captured as a button.
+  assert.ok(r.candidates.some((c) => chainOf(c).includes(".or(role:link:8183054609")));
+  // And a text fallback exists as the last resort.
+  assert.ok(r.candidates.some((c) => chainOf(c).startsWith("label:8183054609.or(text:8183054609")));
 });
 
 test("resolveActLocator: a role-less name resolves to a robust first-match text locator", () => {
@@ -287,9 +299,9 @@ test("resolveActLocator: a role-less name resolves to a robust first-match text 
     type: "act",
     locator: { semantic: { name: "Prasanna Kumar D E", intent: "Prasanna Kumar D E" } },
   });
-  // label-first for form fields, visible text otherwise; .first() because a
-  // role-less text match nests (row + inner span) and strict mode would fail.
-  assert.equal(chainOf(r.locator), "label:Prasanna Kumar D E.or(text:Prasanna Kumar D E).first()");
+  // No role captured → the ONLY candidate is the label/text first-match locator.
+  assert.equal(r.candidates.length, 1);
+  assert.equal(chainOf(r.candidates[0]), "label:Prasanna Kumar D E.or(text:Prasanna Kumar D E).first()");
 });
 
 test("resolveActLocator: a role-less templated name is rendered before matching", () => {
@@ -297,25 +309,25 @@ test("resolveActLocator: a role-less templated name is rendered before matching"
     type: "act",
     locator: { semantic: { name: "{{patient}}", intent: "the patient row" } },
   });
-  assert.equal(chainOf(r.locator), "label:Prasanna Kumar D E.or(text:Prasanna Kumar D E).first()");
+  assert.equal(chainOf(r.candidates[0]), "label:Prasanna Kumar D E.or(text:Prasanna Kumar D E).first()");
 });
 
-test("resolveActLocator: cached + semantic → cached primary with the semantic locator as fallback", () => {
+test("resolveActLocator: cached is the first candidate, the semantic descriptor follows as fallback", () => {
   const r = resolveActLocator(locatorRt(), {
     type: "act",
     locator: { cached: "[data-testid='claims-tab']", semantic: { role: "button", name: "Claims", intent: "Claims tab" } },
   });
-  assert.equal(chainOf(r.locator), "css:[data-testid='claims-tab']");
-  assert.equal(chainOf(r.fallback), "role:button:Claims");
+  assert.equal(chainOf(r.candidates[0]), "css:[data-testid='claims-tab']");
+  assert.equal(chainOf(r.candidates[1]), "role:button:Claims"); // strict semantic next
 });
 
-test("resolveActLocator: cached with intent-only semantic has no fallback (nothing to re-find by)", () => {
+test("resolveActLocator: cached with intent-only semantic has just the cached candidate", () => {
   const r = resolveActLocator(locatorRt(), {
     type: "act",
     locator: { cached: "#scheduling-continue", semantic: { intent: "scheduling-continue" } },
   });
-  assert.equal(chainOf(r.locator), "css:#scheduling-continue");
-  assert.equal(r.fallback, undefined);
+  assert.equal(r.candidates.length, 1);
+  assert.equal(chainOf(r.candidates[0]), "css:#scheduling-continue");
 });
 
 test("resolveActLocator: no cached, no role, no name → fails loud", () => {
@@ -339,11 +351,17 @@ test("act self-heals from a stale cached selector to the semantic descriptor (no
   };
   const { plan } = compileFlow(flow, target);
   const clicked: string[] = [];
+  const chain = (onClick?: () => void): Record<string, unknown> => {
+    const loc: Record<string, unknown> = { waitFor: async () => {}, click: async () => onClick?.(), or: () => loc, first: () => loc };
+    return loc;
+  };
   const page = {
     // The stale cached selector fails at the visibility gate, exactly like a
     // real Playwright locator whose element no longer exists.
     locator: (sel: string) => ({ waitFor: async () => { throw new Error(`stale: ${sel}`); }, click: async () => { throw new Error(`stale: ${sel}`); } }),
-    getByRole: (_role: string, opts: { name: string }) => ({ waitFor: async () => {}, click: async () => { clicked.push(opts.name); } }),
+    getByRole: (_role: string, opts: { name: string }) => chain(() => clicked.push(opts.name)),
+    getByLabel: () => chain(),
+    getByText: () => chain(),
   };
   const rt = {
     page,
@@ -514,15 +532,19 @@ test("act honors the step's retry policy: transient failure, then success", asyn
   };
   const { plan } = compileFlow(flow, target);
   let attempts = 0;
-  const page = {
-    getByRole: (_role: string, _opts: { name: string }) => ({
+  const mkLoc = (): Record<string, unknown> => {
+    const loc: Record<string, unknown> = {
       waitFor: async () => {},
       click: async () => {
         attempts++;
         if (attempts < 2) throw new Error("element detached mid-click");
       },
-    }),
+      or: () => loc,
+      first: () => loc,
+    };
+    return loc;
   };
+  const page = { getByRole: () => mkLoc(), getByLabel: () => mkLoc(), getByText: () => mkLoc() };
   const rt = {
     page,
     rawPage: page,

@@ -18,14 +18,19 @@ export { resolveHealModel, healModelConfigured } from "./model.js";
 export type { HealModel } from "./model.js";
 export { resolveProfile, refreshProfile } from "./auth-profile.js";
 export { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
-export { compileRecording, collapseTogglePairs } from "./compile-recording.js";
-export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";
+// compileRecording moved to @portico/flow-spec (shared, pure) — re-exported here
+// for back-compat so existing `import { compileRecording } from "@portico/engine"`
+// call sites keep working.
+export { compileRecording, collapseTogglePairs } from "@portico/flow-spec";
+export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "@portico/flow-spec";
 export { evaluateValidation, expectedOutputKeys, missingFlowInputs, sampleInputsFromFlow } from "./validate-flow.js";
 export type { ValidationResult, RunResultLike } from "./validate-flow.js";
 export { refineFlow, applyNameRefinements, applyRefinements } from "./refine-flow.js";
 export type { NameRefinement, FlowRefinements } from "./refine-flow.js";
 export { sessionHealth, registerSession, keepAliveSession, endSession, listSessions } from "./session-manager.js";
 export type { SessionHealth, TrackedSession, SessionStore } from "./session-manager.js";
+export { deriveTier } from "./tier.js";
+export type { Tier } from "./tier.js";
 
 import type { EngineAdapter } from "./types.js";
 import { LibrettoAdapter } from "./adapters/libretto.js";

@@ -22,7 +22,7 @@
  */
 
 import type { Flow, Step } from "@portico/flow-spec";
-import type { Recording } from "./compile-recording.js";
+import type { Recording } from "@portico/flow-spec";
 import { generateObject, type LanguageModel } from "ai";
 import { z } from "zod";
 

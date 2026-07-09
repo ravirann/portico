@@ -42,13 +42,17 @@ export async function pickLiveSession(
 ): Promise<PickedSession | { error: string }> {
   const active = sessions.filter((s) => s.status === "active" && s.cdpEndpoint);
 
-  const matching = connector ? active.filter((s) => s.connector === connector) : [];
-  const unscoped = active.filter((s) => !s.connector && !matching.includes(s));
-  // Connector-scoped flows may ONLY use their own connector's sessions or
-  // unscoped ones — never another connector's logged-in browser.
-  const rest = connector ? [] : active.filter((s) => !matching.includes(s) && !unscoped.includes(s));
+  // STRICT connector binding: a connector-scoped flow uses ONLY its own
+  // connector's sessions — never another connector's, and never an unscoped one.
+  // This is what stops two connectors from sharing (or fighting over) the same
+  // browser: even if an unscoped/other session is live, it is never a candidate.
+  // A flow with NO connector may use unscoped sessions first, then any as a last
+  // resort (an explicit "global" run).
+  const candidates = connector
+    ? active.filter((s) => s.connector === connector)
+    : [...active.filter((s) => !s.connector), ...active.filter((s) => s.connector)];
 
-  for (const session of [...matching, ...unscoped, ...rest]) {
+  for (const session of candidates) {
     if (await isLive(session.cdpEndpoint!)) {
       return { session, cdpEndpoint: session.cdpEndpoint! };
     }

@@ -2,45 +2,13 @@ import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { NextResponse } from "next/server";
 import { pickLiveSession } from "@/lib/sessions";
+import { getAuthorJob } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const REPO_ROOT = resolve(process.cwd(), "../..");
 const AUTHOR_SCRIPT = resolve(REPO_ROOT, "packages/author/author-cli.mjs");
-
-/**
- * Spawn the standalone author script (which carries the heavy Stagehand deps),
- * capturing the single JSON line it prints on stdout. Kept separate from
- * lib/actions runCli because it targets a different entry and needs a long
- * timeout (the agent drives a real portal).
- */
-function runAuthor(args: string[], timeoutMs = 300000): Promise<{ ok: boolean; json: Record<string, unknown> | null }> {
-  return new Promise((res) => {
-    const child = spawn("node", ["--import", "tsx", AUTHOR_SCRIPT, ...args], { cwd: REPO_ROOT, env: process.env });
-    let out = "";
-    child.stdout.on("data", (d) => (out += d));
-    const timer = setTimeout(() => {
-      child.kill();
-      res({ ok: false, json: { error: "Authoring timed out" } });
-    }, timeoutMs);
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      const line = out.trim().split("\n").filter(Boolean).pop() ?? "";
-      let json: Record<string, unknown> | null = null;
-      try {
-        json = line.startsWith("{") ? JSON.parse(line) : null;
-      } catch {
-        json = null;
-      }
-      res({ ok: code === 0 && !(json && "error" in json), json });
-    });
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      res({ ok: false, json: { error: e.message } });
-    });
-  });
-}
 
 interface AuthorBody {
   goal?: string;
@@ -50,10 +18,11 @@ interface AuthorBody {
 }
 
 /**
- * Agent-author a draft flow: an LLM agent drives `goal` on the connector's live
- * CDP session once, and the run is frozen into a deterministic draft (CLI
- * `author` → @portico/author). Returns { draftId, key, version, ... } on
- * success. Long-running (the agent drives a real portal) — up to 5 minutes.
+ * Start agent-authoring ASYNCHRONOUSLY: spawn the (long-running) author process
+ * DETACHED and return a `jobId` immediately. The process writes progress and the
+ * final draft/error to the `author_jobs` row (via --job), which the console
+ * polls — so the user can leave the page and come back to an in-progress or
+ * finished run. GET ?jobId=… returns the current job state.
  */
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as AuthorBody;
@@ -68,10 +37,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: picked.error }, { status: 400 });
   }
 
-  const args = ["--goal", goal, "--start-url", startUrl, "--cdp", picked.cdpEndpoint];
+  const jobId = `ajob_${Date.now().toString(36)}${Math.random().toString(16).slice(2, 8)}`;
+  const args = ["--import", "tsx", AUTHOR_SCRIPT, "--goal", goal, "--start-url", startUrl, "--cdp", picked.cdpEndpoint, "--job", jobId];
   if (body.key?.trim()) args.push("--key", body.key.trim());
   if (body.connector) args.push("--connector", body.connector);
 
-  const { ok, json } = await runAuthor(args);
-  return NextResponse.json(json ?? { error: "No response from the author process" }, { status: ok ? 200 : 400 });
+  // Detached + unref'd so it outlives this request: the user can navigate away
+  // and the run keeps going, reporting into the author_jobs row.
+  const child = spawn("node", args, { cwd: REPO_ROOT, env: process.env, detached: true, stdio: "ignore" });
+  child.unref();
+
+  return NextResponse.json({ jobId, key: body.key?.trim() || undefined }, { status: 202 });
+}
+
+export async function GET(req: Request) {
+  const id = new URL(req.url).searchParams.get("jobId");
+  if (!id) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
+  const job = getAuthorJob(id);
+  // The row appears a beat after the process starts — report "running" until then
+  // so the client shows progress instead of an error. `missing: true` lets the
+  // client distinguish "just starting" (clears within a poll or two) from a
+  // STALE saved id whose row never existed (client gives up after a few tries).
+  if (!job) return NextResponse.json({ id, status: "running", progress: "Starting…", missing: true });
+  return NextResponse.json(job);
 }

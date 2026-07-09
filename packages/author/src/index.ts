@@ -19,10 +19,12 @@
 import { Stagehand } from "@browserbasehq/stagehand";
 import { chromium } from "playwright";
 import type { BrowserContext } from "playwright";
-import type { Flow, Step } from "@portico/flow-spec";
-import { rewriteGoal, type GoalPlan, type GoalParameter } from "./rewrite.js";
+import type { Flow, Step, ClickEvent, NetworkEntry } from "@portico/flow-spec";
+import { compileRecording } from "@portico/flow-spec";
+import { rewriteGoal, countPlanSteps, type GoalPlan, type GoalParameter } from "./rewrite.js";
+import { extractAgentActions, reconcileClicks, type AgentActionRecord, type ReconcileMeta } from "./agent-actions.js";
 
-export { rewriteGoal, normalizePlan } from "./rewrite.js";
+export { rewriteGoal, normalizePlan, countPlanSteps } from "./rewrite.js";
 export type { GoalPlan, GoalParameter } from "./rewrite.js";
 
 export interface AuthorOptions {
@@ -37,7 +39,12 @@ export interface AuthorOptions {
   apiKey: string;
   /** Flow key for the compiled artifact. Default "authored-flow". */
   key?: string;
-  /** Max agent steps before giving up. Default 12. */
+  /**
+   * Floor for the agent's step budget. Default 12, but the effective budget
+   * is always at least this AND a higher intent/goal-length-based floor (see
+   * authorFlow) — set this only to raise the budget further, e.g. for an
+   * unusually long SOP.
+   */
   maxSteps?: number;
   /** Emit progress lines. */
   onLog?: (line: string) => void;
@@ -75,7 +82,17 @@ export interface AuthorResult {
     finalUrl: string;
     agentSuccess: boolean;
     agentMessage: string;
+    /** Raw Stagehand agent action stream (opaque, for full-fidelity audit). */
     actions: unknown[];
+    /** The agent's own deliberate interactions, distilled (intent + xpath). */
+    agentActions: AgentActionRecord[];
+    /** How the two capture streams were merged into the replayed steps. */
+    reconciliation: {
+      usedAgentStream: boolean;
+      steps: number;
+      droppedNoise: number;
+      meta: ReconcileMeta[];
+    };
     dataEndpoints: string[];
     /** Search/mutation requests captured with bodies (for write-flow authoring). */
     writeRequests: CapturedRequest[];
@@ -85,6 +102,110 @@ export interface AuthorResult {
 }
 
 const log = (opts: AuthorOptions, s: string) => opts.onLog?.(s);
+
+/** Page title / URL that reads as a sign-in screen (portal-agnostic). */
+const LOGIN_TITLE_RE = /\b(log[\s-]?in|sign[\s-]?in|logon|log[\s-]?on|authenticate|single sign|sso)\b/i;
+const LOGIN_URL_RE = /\/(login|log-in|signin|sign-in|logon|log-on|auth|sso|oauth|prelogin|account\/login)\b/i;
+/** Requests that only fire in a pre-login / guest funnel (Epic's Anonymous /
+ *  LoadForPrelogin / OpenScheduling, and the generic prelogin/guest paths). */
+const PRELOGIN_REQUEST_RE = /\/(anonymous|prelogin|loadforprelogin|openscheduling|guest)\b/i;
+/**
+ * Requests that only fire ON or AROUND a sign-in / pre-login screen — the login
+ * widget, passkey/MFA params, the prelogin proxy switch. Matched as a substring
+ * (NOT slash-anchored) so vendor-cased names like "LoadForPrelogin" and
+ * "GetPasskeyGetParams" are caught generically without hardcoding one portal's
+ * exact route. If ANY of these fired during a run, the session dropped to the
+ * login flow — it was never authenticated — which is a decisive auth-wall signal
+ * on its own (unlike the softer "guest funnel" paths above).
+ */
+const LOGIN_API_RE =
+  /(authentication\/login|prelogin|loadforprelogin|passkey|two[-_ ]?factor|multi[-_ ]?factor|\/login\b|\/signin\b|\/sso\b|\/oauth\b)/i;
+
+/**
+ * Decide whether the agent finished on a NOT-LOGGED-IN state — a sign-in wall or
+ * a pre-login/guest funnel — rather than inside the authenticated portal. This
+ * is the precondition gate: if the attached session isn't authenticated, the
+ * captured run is worthless (it froze the login page / guest funnel), so
+ * authoring must fail LOUDLY with an actionable message instead of compiling a
+ * dead flow that only fails later at validation.
+ *
+ * Kept pure (no browser) so it's unit-tested; `authorFlow` supplies the DOM
+ * signal. Conservative by design — a lone password field mid-flow (e.g. a
+ * change-password step) won't trip it; the signals must corroborate.
+ */
+/**
+ * Whether `authorFlow` should navigate the attached tab to the start URL.
+ *
+ * The human logs into the portal in the live session and parks on an
+ * authenticated page (e.g. .../MyChart/Home). Force-navigating that tab to the
+ * start URL — especially a BARE ROOT — can DESTROY the session: some portals
+ * (Epic MyChart, verified) clear their auth cookies when you hit the marketing
+ * root, silently logging you out before the agent even starts. So when the tab
+ * is already on the start URL's ORIGIN, keep it and let the agent navigate
+ * within the app; only navigate from a blank/new tab or a different origin.
+ *
+ * Pure and unit-tested; the browser-facing call sits in authorFlow.
+ */
+export function shouldNavigateToStart(currentUrl: string | undefined, startUrl: string): boolean {
+  let startOrigin: string;
+  try {
+    startOrigin = new URL(startUrl).origin;
+  } catch {
+    return true; // can't parse the target — fall back to navigating
+  }
+  const cur = (currentUrl ?? "").trim();
+  // A blank / internal page means the session hasn't landed anywhere yet.
+  if (!cur || cur === "about:blank" || /^(chrome|chrome-error|edge|about):/i.test(cur)) return true;
+  let curOrigin: string;
+  try {
+    curOrigin = new URL(cur).origin;
+  } catch {
+    return true;
+  }
+  // Same origin → the human is already in the portal; don't risk a destructive
+  // (or session-dropping) navigation. Different origin → we must go there.
+  return curOrigin !== startOrigin;
+}
+
+export function detectAuthWall(input: {
+  finalUrl: string;
+  title: string;
+  hasPasswordField: boolean;
+  requests: Array<{ pathname: string }>;
+}): { blocked: boolean; reason: string } {
+  const titleLogin = LOGIN_TITLE_RE.test(input.title ?? "");
+  const urlLogin = LOGIN_URL_RE.test(input.finalUrl ?? "");
+  const reqs = input.requests ?? [];
+  const preloginHits = reqs.filter((r) => PRELOGIN_REQUEST_RE.test(r.pathname)).length;
+  // Login/auth-widget calls are the decisive signal: if the sign-in flow ran at
+  // all, the session was not authenticated — no need to corroborate.
+  const loginApiHits = reqs.filter((r) => LOGIN_API_RE.test(r.pathname)).length;
+
+  // Block when: the login/auth flow ran (decisive on its own); OR a visible
+  // password field is corroborated by a login-ish title/URL or a pre-login
+  // funnel; OR a login title AND login URL together (SPA login whose password
+  // hides behind a "Sign in" button); OR a pre-login funnel on a login page.
+  const blocked =
+    loginApiHits > 0 ||
+    (input.hasPasswordField && (titleLogin || urlLogin || preloginHits > 0)) ||
+    (titleLogin && urlLogin) ||
+    (preloginHits > 0 && (titleLogin || urlLogin));
+  if (!blocked) return { blocked: false, reason: "" };
+
+  const where = `"${input.title || "untitled"}" at ${input.finalUrl}`;
+  const detail =
+    loginApiHits > 0
+      ? ` The run passed through the sign-in / pre-login flow (${loginApiHits} auth request${loginApiHits === 1 ? "" : "s"}), so it never reached an authenticated session.`
+      : preloginHits > 0
+        ? ` The agent only reached pre-login endpoints (${preloginHits} guest/anonymous request${preloginHits === 1 ? "" : "s"}).`
+        : "";
+  return {
+    blocked: true,
+    reason:
+      `The attached browser session isn't logged in — it ended on / passed through a sign-in screen (${where}).${detail} ` +
+      `Finish signing into the portal in that session's window (Sessions page) until you see the account dashboard, leave it open, then re-author.`,
+  };
+}
 
 /**
  * Stagehand's CDP client needs the browser-level WebSocket debugger URL, while
@@ -609,6 +730,129 @@ export function compileAgentRun(
 }
 
 /**
+ * In-page capture-phase click hook (string so this package needs no DOM lib).
+ * For each meaningful click it calls the exposed `__porticoOnClick` binding,
+ * which pushes the interaction to Node IMMEDIATELY — so it survives the full-page
+ * navigations legacy portals (Epic MyChart) use, with no in-page buffer to lose.
+ * Mirrors the record-attach recorder's shape so `compileRecording` can consume it.
+ */
+const CLICK_CAPTURE_SCRIPT = `(() => {
+  if (window.__porticoHook) return; window.__porticoHook = true;
+  // Absolute XPath in Stagehand's form (xpath=/html[1]/body[1]/…) so a captured
+  // click can be correlated with the agent's own resolved selector at authoring.
+  function xp(el){
+    var parts=[];
+    for(; el && el.nodeType===1; el=el.parentElement){
+      var ix=1, sib=el.previousElementSibling;
+      while(sib){ if(sib.tagName===el.tagName) ix++; sib=sib.previousElementSibling; }
+      parts.unshift(el.tagName.toLowerCase()+"["+ix+"]");
+    }
+    return parts.length ? "xpath=/"+parts.join("/") : "";
+  }
+  document.addEventListener("click", (e) => {
+    try {
+      var t = e.target;
+      var el = (t && t.closest && t.closest("button,a[href],[role=button],[role=option],[role=menuitem],[role=menuitemradio],[role=tab],[role=radio],[role=checkbox],[role=switch],[role=link],summary,label")) || t;
+      if (!el || !el.getAttribute) return;
+      var text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 90);
+      if (window.__porticoOnClick) window.__porticoOnClick({
+        tag: el.tagName, role: el.getAttribute("role"), ariaLabel: el.getAttribute("aria-label"),
+        text: text, id: el.id || null, name: el.getAttribute("name"),
+        testid: el.getAttribute("data-testid") || el.getAttribute("data-test-id") || null,
+        href: el.getAttribute("href"), url: location.href, xpath: xp(el)
+      });
+    } catch (err) {}
+  }, true);
+})();`;
+
+/**
+ * A real, replayable control's accessible name is CONCISE. When a click resolves
+ * to a big container (or a dashboard notification card), its captured label is a
+ * long blob of concatenated inner text — not something a semantic locator can
+ * match on a fresh run. Empirically real controls sit well under this; container
+ * mis-captures run 75+ chars. Above it, drop the click as noise.
+ */
+const MAX_CONTROL_LABEL = 72;
+
+/**
+ * Keep only the captured clicks that are real, replayable SOP interactions:
+ * a concise accessible name, and not a sign-in step. Drops container/notification
+ * blobs (over-long labels) and login clicks — the noise that would make a frozen
+ * `act` step fail on replay. Order-preserving.
+ *
+ * NOTE: "Continue" is deliberately NOT treated as a login token — it is a common
+ * page-advancing control inside authenticated scheduling wizards ("Continue to
+ * Scheduling"), and dropping it would break the replay by skipping a real step.
+ * Actual login pages can't reach compilation anyway (the auth-wall gate blocks
+ * logged-out runs), so the genuine auth tokens below are enough.
+ */
+export function replayableClicks(clicks: ClickEvent[]): ClickEvent[] {
+  return clicks.filter((c) => {
+    const label = (c.ariaLabel ?? c.text ?? c.name ?? c.testid ?? "").toString().trim();
+    if (!label || label.length > MAX_CONTROL_LABEL) return false;
+    return !/\b(log ?in|sign ?in|password|username|passkey)\b/i.test(label);
+  });
+}
+
+/**
+ * A time of day or numeric date is ALWAYS ephemeral — "8:00 AM", "3/15",
+ * "Oct 12". These forms never appear in a control's stable name.
+ */
+const TIME_OR_NUMDATE_RE =
+  /\b\d{1,2}:\d{2}\s*(a\.?m\.?|p\.?m\.?)?\b|\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\.?\s+\d{1,2}\b/i;
+
+/** A full weekday or month WORD (excludes "may" — too common in English). */
+const WEEKDAY_MONTH_RE =
+  /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december)\b/i;
+
+/**
+ * Weekday / month / date / time control labels are EPHEMERAL: the specific slot
+ * the agent picked ("Monday", "October 12", "8:00 AM") will NOT exist on replay,
+ * so freezing it as a literal `act` step breaks every future run. Portal-agnostic
+ * — dates and times look the same on every scheduler.
+ *
+ * A bare weekday/month word alone is NOT enough to call something ephemeral, or
+ * we'd wrongly truncate at real controls whose NAME contains one — provider and
+ * insurer names like "Dr. April Johnson", "June Health Clinic", "Friday Health
+ * Plans". So a weekday/month word only counts when the label is essentially just
+ * that date (the word plus day-numbers / ordinals / year / punctuation and
+ * nothing else) — a date-picker cell, not a proper name that happens to contain
+ * a month.
+ */
+export function isEphemeralSlotLabel(label: string): boolean {
+  const s = (label ?? "").trim();
+  if (!s) return false;
+  if (TIME_OR_NUMDATE_RE.test(s)) return true;
+  if (!WEEKDAY_MONTH_RE.test(s)) return false;
+  // Strip every date-ish token; if nothing meaningful remains, it's a date cell.
+  const residue = s
+    .replace(new RegExp(WEEKDAY_MONTH_RE.source, "gi"), " ")
+    .replace(/\b\d{1,4}(st|nd|rd|th)?\b/gi, " ") // day numbers, ordinals, year
+    .replace(/\b(the|of|at|on)\b/gi, " ")
+    .replace(/[.,\-–—:/]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return residue.length === 0;
+}
+
+/**
+ * Truncate the click sequence at the first ephemeral date/time selection — the
+ * point where the wizard turns dynamic. Everything before it is a deterministic
+ * path TO the slot screen (which the flow then harvests); the slot itself, and
+ * anything after it, depends on a given run's availability and must never be
+ * frozen as literal clicks. Returns the kept prefix and whether it truncated.
+ */
+export function stopAtEphemeralSlot(clicks: ClickEvent[]): { clicks: ClickEvent[]; truncated: boolean } {
+  const out: ClickEvent[] = [];
+  for (const c of clicks) {
+    const label = (c.ariaLabel ?? c.text ?? c.name ?? c.testid ?? "").toString();
+    if (isEphemeralSlotLabel(label)) return { clicks: out, truncated: true };
+    out.push(c);
+  }
+  return { clicks: out, truncated: false };
+}
+
+/**
  * Drive `goal` on the live (already-authenticated) browser with Stagehand,
  * capture the network + final URL, and compile a deterministic flow.
  *
@@ -622,6 +866,11 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
   // Latest response body per pathname (non-boot JSON, capped) — lets the compiler
   // resolve where a mutation's ids came from in a lookup response, for chaining.
   const responseBodies = new Map<string, string>();
+  // Durable action + network capture for compiling an action-replay SOP flow:
+  // every meaningful click the agent makes (pushed live via a page binding) and
+  // every JSON data response, in the shape `compileRecording` consumes.
+  const clicks: ClickEvent[] = [];
+  const network: NetworkEntry[] = [];
 
   // Independent Playwright CDP client on the SAME browser — observes every JSON
   // response the agent's actions trigger, without depending on Stagehand's page
@@ -664,11 +913,36 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
       .then((buf) => {
         const pathname = pathnameOf(url);
         responses.push({ url, pathname, bytes: buf.length, contentType: ct });
+        const small = buf.length <= 262144;
         // Keep small non-boot JSON bodies for id-chaining (latest wins).
-        if (buf.length <= 262144 && !BOOT_NOISE_RE.test(pathname)) responseBodies.set(pathname, buf.toString("utf8"));
+        if (small && !BOOT_NOISE_RE.test(pathname)) responseBodies.set(pathname, buf.toString("utf8"));
+        // Record for the action-replay compiler (it picks the intercept target
+        // from these JSON data responses; a body preview helps it detect slots).
+        network.push({
+          method: req.method(),
+          url,
+          resourceType: req.resourceType(),
+          status: resp.status(),
+          contentType: ct,
+          responseBodyPreview: small ? buf.toString("utf8").slice(0, 4000) : null,
+          responseBodyBytes: buf.length,
+        });
       })
       .catch(() => responses.push({ url, pathname: pathnameOf(url), bytes: Number(resp.headers()["content-length"] ?? 0), contentType: ct }));
   });
+
+  // Live click capture: a page binding pushes each interaction to Node the moment
+  // it happens, and an init script installs the capture-phase listener on every
+  // page the agent loads. Best-effort — if the CDP context rejects either, we
+  // simply fall back to the navigate+harvest compiler.
+  try {
+    await observerCtx.exposeBinding("__porticoOnClick", (_src, click: ClickEvent) => {
+      if (click && typeof click === "object") clicks.push(click);
+    });
+    await observerCtx.addInitScript(CLICK_CAPTURE_SCRIPT);
+  } catch {
+    /* binding already present or unsupported — action-replay just won't trigger */
+  }
 
   const wsUrl = await resolveCdpWsUrl(opts.cdpUrl);
   const sh = new Stagehand({
@@ -699,19 +973,85 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
     log(opts, "attaching agent to the live session…");
     await sh.init();
     const page = sh.context.activePage() ?? sh.context.pages()[0] ?? (await sh.context.newPage());
-    await page.goto(opts.startUrl);
+    // Preserve an already-authenticated tab: force-navigating a logged-in
+    // session to the start URL (a bare root especially) can drop the session —
+    // Epic MyChart clears its auth cookies on a root hit. Only navigate from a
+    // blank tab or a different origin; otherwise start where the human logged in
+    // and let the agent move within the app.
+    if (shouldNavigateToStart(page.url(), opts.startUrl)) {
+      log(opts, `navigating to start URL: ${opts.startUrl}`);
+      await page.goto(opts.startUrl);
+    } else {
+      log(opts, `already on the portal (${page.url()}) — preserving the authenticated page instead of navigating to the start URL`);
+    }
+    // The authenticated entry point the agent starts from — the action-replay
+    // flow re-enters here (NOT the bare root, which would drop the session), then
+    // replays the click sequence. addInitScript only covers pages loaded AFTER
+    // it was set, so install the click listener into THIS already-loaded page too.
+    const replayBaseUrl = sh.context.activePage()?.url() ?? page.url();
+    try {
+      await (sh.context.activePage() ?? page).evaluate(CLICK_CAPTURE_SCRIPT);
+    } catch {
+      /* best-effort — future pages still get it via addInitScript */
+    }
 
     log(opts, `agent working toward the refined goal`);
     const agent = sh.agent();
-    // A write needs more room than a read; give the agent headroom, and always
-    // at least the caller's budget.
-    const budget = Math.max(opts.maxSteps ?? 12, plan.intent === "update" ? 24 : 12);
+    // A multi-step wizard SOP (click category → sub-type → location → time
+    // slot → review, …) needs real headroom: the agent burns several turns per
+    // logical step (observe → click → wait), so a flat 12-step cap was cutting
+    // it off after the first click or two (the goal-adherence bug this guards
+    // against). Floors: an update already got 24; reads/navigations now get a
+    // substantially higher floor too. On top of the floor, scale with the
+    // refined goal's own numbered-step count (~6 agent turns per logical step)
+    // so a longer SOP gets proportionally more room — and always keep at least
+    // the caller's explicit budget.
+    const STEPS_PER_INSTRUCTION = 6;
+    const floor = plan.intent === "update" ? 24 : 30;
+    const scaled = countPlanSteps(plan.refinedGoal) * STEPS_PER_INSTRUCTION;
+    const budget = Math.max(opts.maxSteps ?? 12, floor, scaled);
     const result = await agent.execute({ instruction: plan.refinedGoal, maxSteps: budget });
 
     const finalUrl = sh.context.activePage()?.url() ?? page.url();
     log(opts, `agent ${result.success ? "reached" : "stopped at"}: ${finalUrl}`);
     // Let in-flight response-body reads (async) settle before we compile.
     await new Promise((r) => setTimeout(r, 1500));
+
+    // Precondition gate: refuse to compile a run captured while NOT logged in.
+    // A logged-out session yields a login page / guest funnel, which would
+    // freeze into a dead flow that only fails later at validation. Detect it
+    // here and fail loudly with an actionable message. The DOM signal (visible
+    // password field + title) comes from the live page; the classification is
+    // the pure, unit-tested detectAuthWall.
+    let authTitle = "";
+    let hasPasswordField = false;
+    try {
+      const pg = sh.context.activePage() ?? page;
+      const sig = await pg.evaluate(() => {
+        // Reference the DOM through globalThis so this package needs no "dom"
+        // lib (it stays isolated from a browser type surface); the callback
+        // runs in the page, where document exists.
+        const doc = (globalThis as unknown as {
+          document?: {
+            title?: string;
+            querySelectorAll: (s: string) => ArrayLike<{ getClientRects: () => { length: number } }>;
+          };
+        }).document;
+        if (!doc) return { title: "", hasPasswordField: false };
+        const nodes = Array.from(doc.querySelectorAll('input[type="password"]'));
+        const visible = nodes.some((el) => el.getClientRects().length > 0);
+        return { title: doc.title || "", hasPasswordField: visible };
+      });
+      authTitle = sig.title;
+      hasPasswordField = sig.hasPasswordField;
+    } catch {
+      /* best-effort DOM read — fall back to URL/request signals only */
+    }
+    const authWall = detectAuthWall({ finalUrl, title: authTitle, hasPasswordField, requests });
+    if (authWall.blocked) {
+      log(opts, `authentication gate: ${authWall.reason}`);
+      throw new Error(authWall.reason);
+    }
 
     // Snapshot localStorage so a captured mutation's auth/tenant headers can be
     // mapped to the page keys they live in (userToken, selectedClinicId, …) and
@@ -731,17 +1071,65 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
       /* best-effort — writes without discoverable auth keep headers verbatim */
     }
 
-    const flow = compileAgentRun(
-      opts.goal,
-      finalUrl,
-      responses,
-      opts.key ?? "authored-flow",
-      requests,
-      responseBodies,
-      localStorageSnapshot,
-      plan.parameters,
-      plan.intent,
-    );
+    // Compiler choice:
+    //  • An UPDATE keeps the deterministic api-write path (compileAgentRun) — it
+    //    chains ids from the lookup and reads auth headers fresh; replaying a
+    //    "Save" click is riskier than a frozen PUT.
+    //  • A read/navigation SOP where the agent drove a MULTI-STEP wizard compiles
+    //    to an ACTION-REPLAY flow (compileRecording) that reproduces the click
+    //    sequence, so the frozen flow actually FOLLOWS the SOP instead of just
+    //    navigating to a URL and harvesting (the URMC scheduling gap).
+    //  • Otherwise (a single deep-link that loads the data) → navigate+harvest.
+    const key = opts.key ?? "authored-flow";
+    // Two-source reconciliation: correlate the agent's OWN action stream (intent +
+    // resolved element) with the raw DOM clicks, so the replay follows what the
+    // agent DELIBERATELY did (dropping dashboard/notification noise the agent never
+    // touched) with resilient role+name locators. Falls back to the raw hook clicks
+    // when the agent stream is thin or doesn't correlate — no regression. Kill via
+    // PORTICO_AUTHOR_NO_RECONCILE=1.
+    const agentActions = extractAgentActions(result.actions);
+    const reconcile = process.env.PORTICO_AUTHOR_NO_RECONCILE
+      ? { steps: clicks, meta: [] as ReconcileMeta[], usedAgentStream: false, droppedNoise: 0 }
+      : reconcileClicks(clicks, agentActions);
+    if (reconcile.usedAgentStream) {
+      const agentOnly = reconcile.meta.filter((m) => m.source === "agent-only").length;
+      log(
+        opts,
+        `reconciled ${clicks.length} DOM click(s) against ${agentActions.length} agent action(s) → ${reconcile.steps.length} intentional step(s) ` +
+          `(${agentOnly} agent-only, ~${reconcile.droppedNoise} noise dropped)`,
+      );
+    } else if (agentActions.length > 0) {
+      log(opts, `agent action stream present (${agentActions.length}) but not correlated — using DOM-hook clicks`);
+    }
+    const replaySource = reconcile.usedAgentStream ? reconcile.steps : clicks;
+    // Filter noise, then STOP at the first dynamic date/time selection: the slot
+    // the agent clicked ("Monday …") won't exist next run, so the flow replays
+    // the deterministic path to the slot screen and harvests the slots there.
+    const { clicks: replay, truncated } = stopAtEphemeralSlot(replayableClicks(replaySource));
+    if (truncated) {
+      log(opts, "reached the dynamic time-slot screen — stopping the deterministic replay there and harvesting the available slots (a specific past date is never frozen as a click)");
+    }
+    let flow: Flow;
+    if (plan.intent !== "update" && replay.length >= 2) {
+      log(opts, `compiling ACTION-REPLAY SOP flow from ${replay.length} interactions (source: ${reconcile.usedAgentStream ? "agent+DOM reconciled" : "DOM clicks"}, ${clicks.length} raw captured)`);
+      // emitSelect:false — the recorder's slot-pick step hardcodes one portal's
+      // response shape; an authored flow harvests the data and stops at the SOP.
+      flow = compileRecording({ baseUrl: replayBaseUrl, clicks: replay, network }, { key, emitSelect: false });
+      flow.description = `Agent-authored (action replay) from the goal: ${opts.goal}`;
+    } else {
+      log(opts, `compiling navigate+harvest flow (${replay.length} interactions, intent=${plan.intent})`);
+      flow = compileAgentRun(
+        opts.goal,
+        finalUrl,
+        responses,
+        key,
+        requests,
+        responseBodies,
+        localStorageSnapshot,
+        plan.parameters,
+        plan.intent,
+      );
+    }
     return {
       flow,
       evidence: {
@@ -750,6 +1138,13 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
         agentSuccess: result.success,
         agentMessage: result.message,
         actions: result.actions ?? [],
+        agentActions,
+        reconciliation: {
+          usedAgentStream: reconcile.usedAgentStream,
+          steps: reconcile.steps.length,
+          droppedNoise: reconcile.droppedNoise,
+          meta: reconcile.meta,
+        },
         dataEndpoints: [...new Set(responses.map((r) => r.pathname))],
         writeRequests: dedupeRequests(requests),
         plan,

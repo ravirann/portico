@@ -19,6 +19,9 @@ import { migrate } from "./schema.js";
 import type {
   AuditEvent,
   AuditFilter,
+  AuthorJobEvent,
+  AuthorJobRecord,
+  AuthorJobStatus,
   BrowserSessionRecord,
   ConfigEntry,
   ConnectorRecord,
@@ -141,6 +144,21 @@ interface RecordingRow {
   clicks: number | null;
   requests: number | null;
   error: string | null;
+  started_at: string;
+  updated_at: string;
+}
+
+interface AuthorJobRow {
+  id: string;
+  connector: string | null;
+  goal: string;
+  start_url: string;
+  flow_key: string | null;
+  status: string;
+  draft_flow_id: string | null;
+  progress: string | null;
+  error: string | null;
+  pid: number | null;
   started_at: string;
   updated_at: string;
 }
@@ -746,6 +764,108 @@ export class Store {
     if (row.requests != null) rec.requests = row.requests;
     if (row.error != null) rec.error = row.error;
     return rec;
+  }
+
+  // ---- async agent-authoring jobs ---------------------------------------
+
+  createAuthorJob(j: {
+    id: string;
+    connector?: string;
+    goal: string;
+    startUrl: string;
+    flowKey?: string;
+    pid?: number;
+    startedAt: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO author_jobs
+           (id, connector, goal, start_url, flow_key, status, pid, started_at, updated_at)
+         VALUES
+           (@id, @connector, @goal, @start_url, @flow_key, 'running', @pid, @started_at, @updated_at)`,
+      )
+      .run({
+        id: j.id,
+        connector: j.connector ?? null,
+        goal: j.goal,
+        start_url: j.startUrl,
+        flow_key: j.flowKey ?? null,
+        pid: j.pid ?? null,
+        started_at: j.startedAt,
+        updated_at: now,
+      });
+  }
+
+  getAuthorJob(id: string): AuthorJobRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM author_jobs WHERE id = ?").get(id) as AuthorJobRow | undefined;
+    return row ? this.hydrateAuthorJob(row) : undefined;
+  }
+
+  /** Recent authoring jobs, newest first (optionally scoped to a connector). */
+  listAuthorJobs(connector?: string, limit = 20): AuthorJobRecord[] {
+    const clause = connector != null ? "WHERE connector = @connector" : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM author_jobs ${clause} ORDER BY started_at DESC LIMIT @limit`)
+      .all(connector != null ? { connector, limit } : { limit }) as AuthorJobRow[];
+    return rows.map((r) => this.hydrateAuthorJob(r));
+  }
+
+  /** Patch a job's mutable fields (status/progress/result). Unset fields kept. */
+  updateAuthorJob(
+    id: string,
+    patch: { status?: AuthorJobStatus; draftFlowId?: string; progress?: string; error?: string },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE author_jobs SET
+           status        = COALESCE(@status, status),
+           draft_flow_id = COALESCE(@draft_flow_id, draft_flow_id),
+           progress      = COALESCE(@progress, progress),
+           error         = COALESCE(@error, error),
+           updated_at    = @updated_at
+         WHERE id = @id`,
+      )
+      .run({
+        id,
+        status: patch.status ?? null,
+        draft_flow_id: patch.draftFlowId ?? null,
+        progress: patch.progress ?? null,
+        error: patch.error ?? null,
+        updated_at: new Date().toISOString(),
+      });
+  }
+
+  /** Append one line to a job's progress timeline (kept for live view + review). */
+  appendAuthorJobEvent(jobId: string, message: string): void {
+    this.db
+      .prepare("INSERT INTO author_job_events (job_id, ts, message) VALUES (?, ?, ?)")
+      .run(jobId, new Date().toISOString(), message);
+  }
+
+  /** A job's progress timeline, oldest first. */
+  listAuthorJobEvents(jobId: string, limit = 1000): AuthorJobEvent[] {
+    return this.db
+      .prepare("SELECT ts, message FROM author_job_events WHERE job_id = ? ORDER BY id ASC LIMIT ?")
+      .all(jobId, limit) as AuthorJobEvent[];
+  }
+
+  private hydrateAuthorJob(row: AuthorJobRow): AuthorJobRecord {
+    const job: AuthorJobRecord = {
+      id: row.id,
+      goal: row.goal,
+      startUrl: row.start_url,
+      status: row.status as AuthorJobStatus,
+      startedAt: row.started_at,
+      updatedAt: row.updated_at,
+    };
+    if (row.connector != null) job.connector = row.connector;
+    if (row.flow_key != null) job.flowKey = row.flow_key;
+    if (row.draft_flow_id != null) job.draftFlowId = row.draft_flow_id;
+    if (row.progress != null) job.progress = row.progress;
+    if (row.error != null) job.error = row.error;
+    if (row.pid != null) job.pid = row.pid;
+    return job;
   }
 
   // ---- app config (LLM settings + connector variables) ------------------

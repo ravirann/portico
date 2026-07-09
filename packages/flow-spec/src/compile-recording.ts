@@ -32,7 +32,7 @@
  *                    body looks like it carries slot/time data.
  */
 
-import type { Flow, Step } from "@portico/flow-spec";
+import type { Flow, Step } from "./index.js";
 
 export interface ClickEvent {
   tag?: string;
@@ -44,6 +44,10 @@ export interface ClickEvent {
   testid?: string | null;
   href?: string | null;
   url?: string; // page URL when clicked
+  /** Absolute XPath of the clicked element (`xpath=/html[1]/…`). Not compiled
+   *  into a step — used only to correlate a DOM click with the agent's own
+   *  action stream during authoring (see packages/author agent-actions). */
+  xpath?: string | null;
 }
 
 export interface NetworkEntry {
@@ -67,6 +71,14 @@ export interface CompileRecordingOptions {
   key?: string;
   /** Hint for the data endpoint, e.g. "GetSlots" or "slot". */
   interceptKeyword?: string;
+  /**
+   * Emit the `select` "pick earliest slot" step when the data looks slot-shaped.
+   * Default true (the recorder path). Set FALSE for agent-authored flows: the
+   * select's `Solutions.0.Slots` path is specific to one portal's response shape,
+   * so guessing it on an arbitrary portal produces a step that fails on data that
+   * doesn't share that structure. Authored flows harvest the data and stop.
+   */
+  emitSelect?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -316,11 +328,20 @@ function paramHintFor(name: string, opts: { isAction?: boolean } = {}): string |
   return undefined;
 }
 
-/** "button" when the click's own role says so, or its tag is button-like (BUTTON/A). */
+/**
+ * The ARIA role to match on. An explicit `role` attribute wins; otherwise map
+ * from the tag. Crucially an `<a>` has the implicit role **link**, NOT button —
+ * coercing links to "button" makes `getByRole("button", …)` match nothing, so
+ * the act can never find the control (the real cause of a hung replay). Only
+ * genuine buttons get "button".
+ */
 function roleFor(click: ClickEvent): string | undefined {
-  const roleIsButton = (click.role ?? "").toLowerCase() === "button";
+  const explicit = (click.role ?? "").toLowerCase();
+  if (["button", "link", "tab", "menuitem", "option", "radio", "checkbox"].includes(explicit)) return explicit;
   const tag = (click.tag ?? "").toUpperCase();
-  return roleIsButton || tag === "BUTTON" || tag === "A" ? "button" : undefined;
+  if (tag === "BUTTON") return "button";
+  if (tag === "A") return "link";
+  return undefined;
 }
 
 /** A CSS id selector, falling back to `[id='…']` for ids with awkward characters. */
@@ -490,7 +511,7 @@ export function compileRecording(rec: Recording, opts: CompileRecordingOptions =
 
   if (chosen) {
     steps.push({ type: "wait", label: "Wait for data", wait: { for: "data_raw", timeout_ms: 20000 } });
-    if (looksLikeSlotData(chosen.responseBodyPreview)) {
+    if (opts.emitSelect !== false && looksLikeSlotData(chosen.responseBodyPreview)) {
       steps.push({
         type: "select",
         label: "Pick earliest",

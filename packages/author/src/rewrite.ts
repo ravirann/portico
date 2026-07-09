@@ -50,9 +50,22 @@ const SYSTEM = [
   "",
   "Return JSON with exactly these fields:",
   '  refinedGoal: string — an explicit, NUMBERED, step-by-step instruction the',
-  "    agent will follow. Be concrete about: navigating, searching (say WHAT to",
-  "    type and WHERE), opening the right record, making the change, and — for",
-  "    updates — explicitly CLICKING SAVE/CONFIRM at the end. Never invent data.",
+  "    agent will follow, covering EVERY step implied by the user's goal, IN",
+  "    ORDER, from the first action through the LAST one the goal names — a",
+  "    5-part goal becomes numbered steps 1 through 5, never just 1-2. Number",
+  "    each discrete action (1. ... 2. ... 3. ... and so on through the final",
+  "    step). Be concrete about: navigating, searching (say WHAT to type and",
+  "    WHERE), opening the right record/option at EACH step, making every",
+  "    selection the goal names (e.g. a category, a location, a date, a time",
+  "    slot), and — for updates — explicitly CLICKING SAVE/CONFIRM at the end.",
+  "    Never invent data. After the numbered list, ALWAYS append one closing",
+  "    sentence that explicitly instructs the agent: do NOT stop after only the",
+  "    first step or two — the task is INCOMPLETE until the LAST numbered",
+  "    step's end state (e.g. the final screen the goal names, such as a",
+  "    review/confirmation step) is reached and visible on screen; keep going",
+  "    through every remaining step before declaring success. Keep refinedGoal",
+  "    portal-agnostic — describe the generic steps from the user's goal, never",
+  "    a specific vendor's exact UI text or layout.",
   '  intent: one of "read","search","extract","update","navigate" — "update" if',
   "    the goal changes/saves anything, else the closest read-only intent.",
   "  entities: string[] — the domain objects involved (e.g. [\"customer\"]).",
@@ -63,7 +76,9 @@ const SYSTEM = [
   "  expectedOutputs: string[] — what data the finished flow should have captured",
   "    (e.g. [\"customer record\",\"updated language\"]).",
   "",
-  "Keep refinedGoal focused ONLY on the user's goal — do not add unrelated steps.",
+  "Keep refinedGoal focused ONLY on the user's goal — do not add unrelated",
+  "steps, but never omit, merge, or truncate a step the goal describes; every",
+  "step the user named must appear as its own numbered instruction.",
 ].join("\n");
 
 interface RewriteOptions {
@@ -79,6 +94,40 @@ interface RewriteOptions {
 /** A safe pass-through plan when planning is unavailable. */
 function passthrough(rawGoal: string): GoalPlan {
   return { refinedGoal: rawGoal, intent: "read", entities: [], parameters: [], expectedOutputs: [], rawGoal };
+}
+
+/**
+ * Appends an explicit "don't stop early" reinforcement to a model-produced
+ * refinedGoal. The SYSTEM prompt already asks the model for this, but a
+ * multi-step SOP is exactly the case where a browser agent tends to quit
+ * after the first click or two, so this belts-and-suspenders it instead of
+ * trusting prompt compliance alone. Idempotent: skipped when the model's own
+ * text already carries an equivalent instruction.
+ */
+function reinforceCompletion(refinedGoal: string): string {
+  if (/do not stop|don't stop|not (yet )?(finished|complete|done) until/i.test(refinedGoal)) {
+    return refinedGoal;
+  }
+  return (
+    `${refinedGoal}\n\n` +
+    "IMPORTANT: Perform every numbered step above, IN ORDER, without skipping any. " +
+    "After each action, check whether further numbered steps remain — if so, continue " +
+    "immediately; do NOT stop just because the first one or two actions succeeded. " +
+    "This task is INCOMPLETE until the LAST numbered step's end state is visible on " +
+    "screen; only then is the goal done."
+  );
+}
+
+/**
+ * Rough count of imperative steps in a refined goal, read off its numbered
+ * list ("1. ... 2. ... 3. ..."). The author uses this to scale the agent's
+ * step budget so a longer SOP gets proportionally more turns instead of a
+ * flat cap that lets it quit after the first step or two. Returns 0 when no
+ * numbering is present (caller falls back to a flat floor).
+ */
+export function countPlanSteps(refinedGoal: string): number {
+  const matches = refinedGoal.match(/(?:^|\n)\s*\d+[.)]\s+\S/g);
+  return matches ? matches.length : 0;
 }
 
 /**
@@ -133,8 +182,9 @@ export function normalizePlan(p: Partial<GoalPlan>, rawGoal: string): GoalPlan {
         }))
         .filter((x) => x.name.length > 0)
     : [];
+  const modelRefinedGoal = typeof p.refinedGoal === "string" ? p.refinedGoal.trim() : "";
   return {
-    refinedGoal: typeof p.refinedGoal === "string" && p.refinedGoal.trim() ? p.refinedGoal.trim() : rawGoal,
+    refinedGoal: modelRefinedGoal ? reinforceCompletion(modelRefinedGoal) : rawGoal,
     intent,
     entities: Array.isArray(p.entities) ? p.entities.filter((e): e is string => typeof e === "string") : [],
     parameters,

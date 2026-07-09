@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import type { RunView, FlowView, SessionView, ConnectorRecord, ConfigEntry } from "./types.js";
+import type { RunView, FlowView, SessionView, ConnectorRecord, ConfigEntry, AuthorJobView } from "./types.js";
 
 /** Durable run store, read via the CLI (which owns native SQLite) so nothing
  *  native enters the Next bundle. Runs are persisted by the CLI on every run,
@@ -14,6 +14,10 @@ function query(args: string[]): unknown {
     cwd: REPO_ROOT,
     encoding: "utf8",
     timeout: 15000,
+    // list-runs carries every run's full step array and grows past 1 MB, which
+    // silently TRUNCATED stdout at spawnSync's default maxBuffer → the JSON parse
+    // failed → the page rendered an empty list. Give it generous headroom.
+    maxBuffer: 128 * 1024 * 1024,
   });
   const out = (r.stdout ?? "").trim();
   if (!out) return null;
@@ -63,6 +67,12 @@ export function readConnectors(): ConnectorRecord[] {
 export function readConnector(idOrKey: string): ConnectorRecord | undefined {
   const r = query(["get-connector", idOrKey, "--json"]);
   return r ? (r as ConnectorRecord) : undefined;
+}
+
+/** An async authoring job's current state (progress/result), for polling. */
+export function getAuthorJob(id: string): AuthorJobView | null {
+  const r = query(["author-job-get", id]);
+  return r && typeof r === "object" ? (r as AuthorJobView) : null;
 }
 
 /** Scoped config entries (LLM settings + variables). Optionally filtered by

@@ -161,6 +161,31 @@ export interface RecordingRecord {
   updatedAt: string;
 }
 
+export type AuthorJobStatus = "running" | "done" | "failed";
+
+/** One line in an authoring job's progress timeline. */
+export interface AuthorJobEvent {
+  ts: string;
+  message: string;
+}
+
+/** An async agent-authoring job — the author process runs detached and reports
+ *  progress/result here so the console can poll and survive a page reload. */
+export interface AuthorJobRecord {
+  id: string;
+  connector?: string;
+  goal: string;
+  startUrl: string;
+  flowKey?: string;
+  status: AuthorJobStatus;
+  draftFlowId?: string;
+  progress?: string;
+  error?: string;
+  pid?: number;
+  startedAt: string;
+  updatedAt: string;
+}
+
 /** Scope-namespaced app configuration (LLM settings, connector variables). */
 export interface ConfigEntry {
   id: string;

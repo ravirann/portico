@@ -97,6 +97,34 @@ export function expectedOutputKeys(flow: Flow): string[] {
   return [...keys];
 }
 
+/**
+ * The output keys a validation dry-run must actually populate.
+ *
+ * `select`/`extract` outputs are ACTIVELY produced by steps the flow replays, so
+ * they're always required. `intercept` outputs are OPPORTUNISTIC harvests — they
+ * fire only when the page makes that request. In a navigate+wait harvest flow
+ * only the navigation-triggered endpoint reliably fires; extra intercepts the
+ * agent captured while clicking through a MULTI-STEP wizard (e.g. selecting a
+ * specialty) are triggered by interactions the deterministic flow does not
+ * replay, so they must NOT gate validation. Among intercepts, require the one(s)
+ * the flow explicitly WAITS for — its committed product. If nothing is waited on
+ * (no signal to narrow), fall back to requiring every intercept (strict).
+ */
+export function requiredOutputKeys(flow: Flow): string[] {
+  const required = new Set<string>();
+  const intercepts: string[] = [];
+  const waited = new Set<string>();
+  for (const step of flow.steps) {
+    if (step.type === "select" && step.select?.as) required.add(step.select.as);
+    if (step.type === "extract" && step.extract?.key) required.add(step.extract.key);
+    if (step.type === "intercept" && step.intercept?.as) intercepts.push(step.intercept.as);
+    if (step.wait?.for) waited.add(step.wait.for);
+  }
+  const waitedIntercepts = intercepts.filter((k) => waited.has(k));
+  for (const k of waitedIntercepts.length > 0 ? waitedIntercepts : intercepts) required.add(k);
+  return [...required];
+}
+
 /** True when a value counts as "empty" (missing, "", [], or {}). */
 function isEmpty(v: unknown): boolean {
   if (v == null) return true;
@@ -108,8 +136,10 @@ function isEmpty(v: unknown): boolean {
 
 /**
  * Decide whether a dry-run of `flow` is green. Passes only when the run
- * completed AND every expected data output is present and non-empty. Any other
- * state (failed/paused, or a missing/empty output) fails with a specific reason.
+ * completed AND every REQUIRED data output (see requiredOutputKeys — the flow's
+ * committed products, not opportunistic wizard-step harvests) is present and
+ * non-empty. Any other state (failed/paused, or a missing/empty required
+ * output) fails with a specific reason.
  */
 export function evaluateValidation(flow: Flow, result: RunResultLike): ValidationResult {
   const reasons: string[] = [];
@@ -120,11 +150,10 @@ export function evaluateValidation(flow: Flow, result: RunResultLike): Validatio
   }
 
   const output = result.output ?? {};
-  const expected = expectedOutputKeys(flow);
-  if (expected.length === 0) {
+  if (expectedOutputKeys(flow).length === 0) {
     reasons.push("flow declares no data outputs (nothing to validate) — add an intercept/select/extract");
   }
-  for (const key of expected) {
+  for (const key of requiredOutputKeys(flow)) {
     if (isEmpty(output[key])) reasons.push(`expected output "${key}" is missing or empty`);
   }
 

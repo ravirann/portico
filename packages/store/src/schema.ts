@@ -168,6 +168,43 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id, started_at DESC);
     `,
   },
+  {
+    // Async agent-authoring jobs — the author process runs detached and reports
+    // progress/result here, so the console can poll and the user can leave and
+    // come back to an in-progress or finished run.
+    version: 7,
+    sql: `
+      CREATE TABLE IF NOT EXISTS author_jobs (
+        id            TEXT PRIMARY KEY,
+        connector     TEXT,
+        goal          TEXT NOT NULL,
+        start_url     TEXT NOT NULL,
+        flow_key      TEXT,
+        status        TEXT NOT NULL,        -- 'running' | 'done' | 'failed'
+        draft_flow_id TEXT,
+        progress      TEXT,                 -- latest human-readable progress line
+        error         TEXT,
+        pid           INTEGER,
+        started_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_author_jobs_started ON author_jobs(started_at DESC);
+    `,
+  },
+  {
+    // Per-job progress timeline — every log line from the author process, kept
+    // for a live view AND later debugging/review.
+    version: 8,
+    sql: `
+      CREATE TABLE IF NOT EXISTS author_job_events (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id   TEXT NOT NULL,
+        ts       TEXT NOT NULL,
+        message  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_author_job_events_job ON author_job_events(job_id, id);
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

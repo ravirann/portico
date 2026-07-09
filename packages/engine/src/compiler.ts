@@ -329,35 +329,60 @@ async function runNavigate(rt: StepRuntime, step: Step, target: Target): Promise
   return { status: "ok" };
 }
 
+/**
+ * Race a promise against a hard deadline. The self-heal recovery path can make
+ * unbounded LLM calls (or loop) when an element genuinely can't be found, which
+ * turns a step FAILURE into an indefinite HANG — the run never completes and the
+ * validation gate never returns a verdict. A hard ceiling converts that into a
+ * fast, legible failure ("couldn't act on X in N ms") the caller can surface.
+ */
+async function withHardTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} exceeded ${ms}ms — failing fast instead of hanging`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   const value = step.value != null ? rt.template(step.value) : undefined;
   const timeout = step.timeoutMs ?? 15000;
-  const attempt = (target: Locator, t: number) => async () => {
-    // Explicit visibility gate before interacting: Playwright's own auto-wait
-    // would also wait, but waiting here (a) fails with a clear "never became
-    // visible" instead of a generic click timeout, and (b) applies the strict
-    // ambiguity contract early — a role+name resolving to 2+ elements throws
-    // here, before anything is clicked.
-    await target.waitFor({ state: "visible", timeout: t });
-    if (value !== undefined) await target.fill(value, { timeout: t });
-    else await target.click({ timeout: t });
-  };
-  // Cached-first, semantic self-heal: when the step carries BOTH a cached
-  // selector and a semantic descriptor, try the cached one briefly, then
-  // re-find the element by meaning. Deterministic — no model call — so it is
-  // allowed on the promoted hot path. Locators are re-resolved per retry so a
-  // re-render between attempts is picked up fresh.
+  const probe = Math.min(timeout, 5000);
+  // Try the ordered resilient candidates in turn: the first that becomes visible
+  // is acted on. Most-specific first (cached / strict role+name), loosening to a
+  // role-agnostic name match and finally text — so a link captured as a button
+  // (or a drifted role) still resolves, WITHOUT changing which element an
+  // already-working flow picks (its precise candidate matches first). Candidates
+  // are re-resolved per retry so a re-render between attempts is picked up fresh.
   const doIt = async () => {
-    const { locator, fallback } = resolveActLocator(rt, step);
-    if (!fallback) return attempt(locator, timeout)();
-    try {
-      await attempt(locator, Math.min(timeout, 5000))();
-    } catch {
-      await attempt(fallback, timeout)();
+    const { candidates, desc } = resolveActLocator(rt, step);
+    let lastErr: unknown;
+    for (let i = 0; i < candidates.length; i++) {
+      const loc = candidates[i]!;
+      // Earlier (more specific) candidates get a short probe; the last gets the
+      // full timeout so a slow-hydrating correct element isn't skipped.
+      const t = i === candidates.length - 1 ? timeout : probe;
+      try {
+        await loc.waitFor({ state: "visible", timeout: t });
+        if (value !== undefined) await loc.fill(value, { timeout });
+        else await loc.click({ timeout });
+        return;
+      } catch (err) {
+        lastErr = err;
+      }
     }
+    throw lastErr ?? new Error(`no locator candidate matched for "${desc}"`);
   };
   const settled = async () => {
-    await withStepRetry(step, { max: 2, backoffMs: 500 }, doIt);
+    // One retry (not two): the candidate cascade already IS the fallback layer,
+    // so a second full sweep mostly just doubles a genuine failure's wall-clock.
+    await withStepRetry(step, { max: 1, backoffMs: 500 }, doIt);
     // Clicks trigger SPA transitions (detail views, tab switches) — give the
     // render a short quiet window so the next step doesn't race it.
     if (value === undefined) await waitForDomQuiet(rt.rawPage, { quietMs: 300, timeoutMs: 3000 });
@@ -375,7 +400,13 @@ async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
     await settled();
     return { status: "ok" };
   } catch {
-    await attemptWithRecovery(rt.rawPage, doIt, undefined, rt.heal.languageModel);
+    // Self-heal recovery, hard-bounded: without a ceiling an unfindable element
+    // makes the LLM recovery hang and the whole run never completes.
+    await withHardTimeout(
+      attemptWithRecovery(rt.rawPage, doIt, undefined, rt.heal.languageModel),
+      (step.timeoutMs ?? 15000) + 15000,
+      `self-heal for "${desc}"`,
+    );
     return { status: "healed", detail: "recovered via Libretto popup/overlay recovery", healedFrom: desc, healedTo: desc };
   }
 }
@@ -741,32 +772,70 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
 export function resolveActLocator(
   rt: StepRuntime,
   step: Step,
-): { locator: Locator; desc: string; fallback?: Locator } {
+): { candidates: Locator[]; desc: string } {
   const s = step.locator?.semantic;
   const desc = s?.intent ?? step.label ?? "element";
-  const semantic = s ? buildSemanticLocator(rt, s) : undefined;
 
+  // Ordered, most-specific-first candidate list (a layered fallback — the
+  // community-standard cure for brittle single locators). A cached selector is
+  // the first candidate; the semantic descriptor contributes the rest.
+  const candidates: Locator[] = [];
   const cached = step.locator?.cached;
-  if (cached) {
-    return { locator: rt.page.locator(rt.template(cached)), desc: cached, fallback: semantic };
-  }
-  if (semantic) return { locator: semantic, desc };
+  if (cached) candidates.push(rt.page.locator(rt.template(cached)));
+  if (s) candidates.push(...buildSemanticCandidates(rt, s));
 
-  throw new Error(
-    `act step "${step.label ?? "?"}" has no cached selector and no usable semantic ` +
-      `descriptor (need role and/or name). Intent: "${desc}".`,
-  );
+  if (candidates.length === 0) {
+    throw new Error(
+      `act step "${step.label ?? "?"}" has no cached selector and no usable semantic ` +
+        `descriptor (need role and/or name). Intent: "${desc}".`,
+    );
+  }
+  return { candidates, desc };
 }
 
-/** The semantic (heal-path) locator chain; undefined when neither role nor name exists. */
-function buildSemanticLocator(rt: StepRuntime, s: NonNullable<Step["locator"]>["semantic"]): Locator | undefined {
+/** Interactive ARIA roles a labelled control might carry. The cascade tries the
+ *  captured role first, then these, so a control captured with the WRONG role —
+ *  most commonly a link (`<a>`, implicit role "link") recorded as a button —
+ *  still resolves instead of matching nothing. */
+const INTERACTIVE_ROLES = [
+  "button", "link", "menuitem", "menuitemradio", "menuitemcheckbox",
+  "tab", "option", "radio", "checkbox", "switch", "treeitem",
+] as const;
+
+/** A short, stable leading fragment of a (possibly long) accessible name.
+ *  Accessible-name matching is substring-based (the query must be contained in
+ *  the element's name), so a long captured label matches more reliably as a
+ *  short fragment than verbatim. Trims to ≤30 chars at a word boundary. */
+function shortLabel(name: string): string {
+  const words = name.trim().split(/\s+/);
+  let out = "";
+  for (const w of words) {
+    if (out && out.length + 1 + w.length > 30) break;
+    out = out ? `${out} ${w}` : w;
+  }
+  return out.replace(/[,;:.–—-]+$/, "").trim() || name;
+}
+
+/**
+ * Ordered resilient locator candidates for a semantic descriptor. Tried
+ * most-specific first, so flows that already work are unaffected (their precise
+ * candidate matches first) while a drifted/wrong role or an over-long captured
+ * label still resolves via a looser candidate:
+ *   1. strict role+name (exact captured role) — the current behavior, unchanged
+ *   2. role-AGNOSTIC name match (button|link|menuitem|…) — fixes a link captured
+ *      as a button (the real "can't click the tile" cause)
+ *   3. role-agnostic on a SHORT name fragment — survives a captured label longer
+ *      than the element's actual accessible name
+ *   4. label/text fallback — role-blind last resort (and the PRIMARY match for a
+ *      role-less name, e.g. a person's row)
+ */
+function buildSemanticCandidates(rt: StepRuntime, s: NonNullable<Step["locator"]>["semantic"]): Locator[] {
   // The accessible name may be an input reference (e.g. "{{specialty}}") — render
   // it before matching, exactly like act values and api params.
   const name = s.name != null ? rt.template(s.name) : undefined;
   // A templated name that rendered EMPTY means the run is missing an input.
-  // Fail loud with the input's name — falling through would degrade a
-  // role+name locator to role-only `.first()`, i.e. "click the first button
-  // on the page": a silent wrong-click, the worst possible failure mode.
+  // Fail loud with the input's name — falling through would degrade the locator
+  // to "click the first thing on the page": a silent wrong-click.
   if (s.name && /\{\{/.test(s.name) && name !== undefined && name.trim() === "") {
     const refs = [...s.name.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map((m) => m[1]).join(", ");
     throw new Error(
@@ -774,19 +843,32 @@ function buildSemanticLocator(rt: StepRuntime, s: NonNullable<Step["locator"]>["
         `Pass --input ${refs}=… (or fill it in the console's Run form).`,
     );
   }
-  if (s.role && name) {
-    // Named: strict (no .first()) — ambiguity is a bug, not a coin-flip.
-    return rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0], { name, exact: false });
+
+  const page = rt.page;
+  const byRole = (role: string, nm: string) =>
+    page.getByRole(role as Parameters<Page["getByRole"]>[0], { name: nm, exact: false });
+  const roleAgnostic = (nm: string): Locator => {
+    let loc = byRole(INTERACTIVE_ROLES[0], nm);
+    for (let i = 1; i < INTERACTIVE_ROLES.length; i++) loc = loc.or(byRole(INTERACTIVE_ROLES[i]!, nm));
+    return loc.first();
+  };
+  const byText = (nm: string): Locator =>
+    page.getByLabel(nm, { exact: false }).or(page.getByText(nm, { exact: false })).first();
+
+  const out: Locator[] = [];
+  if (name && name.trim()) {
+    const short = shortLabel(name);
+    if (s.role) {
+      out.push(byRole(s.role, name)); // 1. strict role+name (unchanged)
+      out.push(roleAgnostic(name)); // 2. role-agnostic, full name
+      if (short !== name) out.push(roleAgnostic(short)); // 3. role-agnostic, short fragment
+    }
+    out.push(byText(name)); // 4. text (primary for a role-less name)
+    if (short !== name) out.push(byText(short));
+  } else if (s.role) {
+    out.push(page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first());
   }
-  if (name) {
-    // Named (no role): label first (form fields), else visible text — with
-    // `.first()`, because a role-less text match nests (row + inner span) and
-    // strict mode would fail loud on elements that are not actually ambiguous.
-    const byLabel = rt.page.getByLabel(name, { exact: false });
-    return byLabel.or(rt.page.getByText(name, { exact: false })).first();
-  }
-  if (s.role) return rt.page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first();
-  return undefined;
+  return out;
 }
 
 function renderTemplate(
