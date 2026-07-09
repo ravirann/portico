@@ -89,6 +89,25 @@ test("login inputs and the final slot-time click are filtered out of the acts", 
   assert.equal(acts.length, 4);
 });
 
+test("a generic layout-container id (#main) is NOT frozen as a cached selector", () => {
+  // A click mis-resolved to the page main region must not cache "#main" — that
+  // would match the whole region on replay. The step stays semantic-only (heals).
+  const rec: Recording = {
+    baseUrl: "https://x/",
+    clicks: [
+      { tag: "BUTTON", role: "button", text: "Schedule an Appointment", id: "sched-btn" }, // real stable id
+      { tag: "DIV", role: "button", text: "Southview Internal Medicine", id: "main" }, // container mis-capture
+    ],
+    network: [],
+  };
+  const acts = compileRecording(rec).steps.filter((s) => s.type === "act");
+  const southview = acts.find((s) => (s.locator?.semantic.name ?? "").includes("Southview"))!;
+  assert.equal(southview.locator?.cached, undefined); // #main rejected
+  // A genuinely stable id is still cached.
+  const sched = acts.find((s) => (s.locator?.semantic.name ?? "").includes("Schedule"))!;
+  assert.equal(sched.locator?.cached, "#sched-btn");
+});
+
 test("first act keeps the FULL label as name (whitespace-collapsed), with the raw label as intent", () => {
   const flow = compileRecording(recording);
   const acts = flow.steps.filter((s) => s.type === "act");

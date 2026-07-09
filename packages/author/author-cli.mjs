@@ -11,6 +11,7 @@
 // All human/agent logs go to stderr so stdout stays a clean JSON line.
 import { createRequire } from "module";
 import { resolve } from "node:path";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { authorFlow } from "./src/index.ts";
 
 const require = createRequire(resolve("apps/cli") + "/");
@@ -108,6 +109,28 @@ try {
   setJob({ status: "failed", error: msg });
   store.close();
   die(msg);
+}
+
+// Always dump the full capture evidence (raw DOM clicks + agent action stream +
+// reconciliation) to a gitignored file, so an authored flow that came out wrong
+// can be diagnosed from exactly what was captured — no re-run guessing. Contains
+// live DOM text, so it stays under data/ (gitignored). Best-effort.
+try {
+  mkdirSync(resolve("data"), { recursive: true });
+  const dump = {
+    at: new Date().toISOString(),
+    goal, key, draftKey: key,
+    finalUrl: result.evidence.finalUrl,
+    agentSuccess: result.evidence.agentSuccess,
+    rawClicks: result.evidence.rawClicks,
+    agentActions: result.evidence.agentActions,
+    reconciliation: result.evidence.reconciliation,
+    compiledStepCount: result.flow.steps.length,
+  };
+  writeFileSync(resolve("data/author-evidence-latest.json"), JSON.stringify(dump, null, 2));
+  console.error("· wrote capture evidence → data/author-evidence-latest.json");
+} catch (e) {
+  console.error("· (could not write evidence dump):", e instanceof Error ? e.message : e);
 }
 
 const version = (store.listFlowVersions(key)[0]?.version ?? 0) + 1;

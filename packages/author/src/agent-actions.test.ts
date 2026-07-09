@@ -172,6 +172,24 @@ test("conciseLabel strips leading verbs/articles and trailing control-nouns", ()
   assert.equal(conciseLabel("Schedule an Appointment"), "Schedule an Appointment");
 });
 
+test("conciseLabel peels LLM description scaffolding into a matchable label (the real URMC failures)", () => {
+  // These are the exact agent descriptions that compiled into unmatchable names.
+  // After cleaning, each must be a substring of the element's real visible text.
+  assert.equal(
+    conciseLabel("Primary Care button, includes adult, pediatric, and geriatric care"),
+    "Primary Care includes adult, pediatric, and geriatric care",
+  );
+  assert.equal(
+    conciseLabel("Button for scheduling a New Patient Adult Visit (18 and over) - Primary"),
+    "New Patient Adult Visit (18 and over) - Primary",
+  );
+  assert.equal(
+    conciseLabel("button: Southview Internal Medicine 995 Senator Keating Blvd, Ste 200 Cl"),
+    "Southview Internal Medicine 995 Senator Keating Blvd, Ste 200 Cl",
+  );
+  assert.equal(conciseLabel("Continue button at the bottom of the locations step"), "Continue");
+});
+
 test("END-TO-END: noisy hooks + agent stream → the compiled flow follows the SOP and stops at the slot screen", () => {
   // Exactly what authorFlow composes: reconcile → replayableClicks → stopAtEphemeralSlot
   // → compileRecording. The hook captured noise + an ephemeral date; the agent

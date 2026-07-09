@@ -355,7 +355,15 @@ function cssForId(id: string): string {
  * `:r…:` useId, `ember…`, `mui-…`), long digit runs, uuid-ish hex chunks —
  * change on every render/deploy, so caching them guarantees a stale selector.
  */
+// Generic layout/landmark ids that identify a PAGE REGION, not a specific
+// control. A click mis-resolved to one of these (e.g. `#main`) must never be
+// frozen as a cached selector — it would match the whole region on replay.
+const CONTAINER_IDS = new Set([
+  "main", "root", "app", "app-root", "__next", "content", "container", "page",
+  "wrapper", "body", "header", "footer", "nav", "sidebar", "layout", "shell",
+]);
 function isStableId(id: string): boolean {
+  if (CONTAINER_IDS.has(id.toLowerCase())) return false;
   if (/^(radix-|:r|ember|mui-)/i.test(id)) return false;
   if (/\d{4,}/.test(id)) return false; // long digit run — counter/timestamp
   if (/[0-9a-f]{8,}/i.test(id)) return false; // uuid-ish hex chunk

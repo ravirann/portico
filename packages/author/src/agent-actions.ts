@@ -163,16 +163,31 @@ export function labelOfClick(c: ClickEvent): string {
   return (c.ariaLabel ?? c.text ?? c.name ?? c.testid ?? "").toString().trim();
 }
 
-/** Strip leading verbs/articles and trailing control-nouns from an agent
- *  instruction so it reads like an element name. */
+/**
+ * Turn an agent instruction/description into a clean element NAME — a substring
+ * of the element's real visible text, which the engine's getByText/getByRole
+ * cascade can match. The Stagehand `description` is an LLM sentence that wraps
+ * the real label in scaffolding ("button: Southview…", "Primary Care button,
+ * includes…", "Button for scheduling a New Patient Visit", "Continue button at
+ * the bottom of the locations step"). We peel that scaffolding off so what
+ * remains is the label the page actually renders.
+ */
 export function conciseLabel(s: string): string {
-  return (s || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^(please\s+)?(click|select|choose|press|tap|open|go\s+to|navigate\s+to)\s+(on\s+)?(the\s+)?/i, "")
-    .replace(/\s+(button|link|option|tab|menu\s*item|checkbox|radio)$/i, "")
-    .slice(0, 72)
-    .trim();
+  let out = (s || "").replace(/\s+/g, " ").trim();
+  // Leading element-type qualifier the model prepends: "button:", "link - ", "the icon —".
+  out = out.replace(/^(the\s+)?(button|link|icon|field|tab|option|menu\s*item|checkbox|radio|element|control)\s*[:\-–—]\s*/i, "");
+  // Leading imperative verb + article: "click the", "select", "choose the".
+  out = out.replace(/^(please\s+)?(click|select|choose|press|tap|open|go\s+to|navigate\s+to|expand|toggle)\s+(on\s+)?(the\s+)?/i, "");
+  // Leading "button/link for <verb>ing a/an/the …" description wrapper.
+  out = out.replace(/^(the\s+)?(button|link|control|option)\s+(for|to)\s+[a-z]+ing\s+(a|an|the)?\s*/i, "");
+  // Trailing positional/type descriptor: "… button at the bottom of the locations step".
+  out = out.replace(/\s+(button|link|icon|tab|option|control)\s+(at|in|on|near|of)\s+the\s+.+$/i, "");
+  // A lone leading or trailing element-type noun.
+  out = out.replace(/^(button|link|icon|tab|option|checkbox|radio)\s+/i, "");
+  out = out.replace(/[\s,]+(button|link|icon|tab|option|menu\s*item|checkbox|radio)\s*$/i, "");
+  // A mid-phrase ", button," splitting a real label ("Primary Care button, includes…").
+  out = out.replace(/[,\s]+button[,\s]+/i, " ");
+  return out.replace(/\s+/g, " ").trim().slice(0, 72).trim();
 }
 
 /** Earliest hook click at/after `cursor` matching this agent action; xpath

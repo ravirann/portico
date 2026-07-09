@@ -86,12 +86,15 @@ export interface AuthorResult {
     actions: unknown[];
     /** The agent's own deliberate interactions, distilled (intent + xpath). */
     agentActions: AgentActionRecord[];
+    /** Every raw DOM click the hook captured, before reconciliation (diagnostics). */
+    rawClicks: ClickEvent[];
     /** How the two capture streams were merged into the replayed steps. */
     reconciliation: {
       usedAgentStream: boolean;
       steps: number;
       droppedNoise: number;
       meta: ReconcileMeta[];
+      compiledSteps: Array<{ text?: string | null; role?: string | null; id?: string | null; testid?: string | null; xpath?: string | null }>;
     };
     dataEndpoints: string[];
     /** Search/mutation requests captured with bodies (for write-flow authoring). */
@@ -1139,11 +1142,16 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
         agentMessage: result.message,
         actions: result.actions ?? [],
         agentActions,
+        /** Every raw DOM click the hook captured (before reconcile) — the ground
+         *  truth for diagnosing capture gaps (missed clicks / container blobs). */
+        rawClicks: clicks,
         reconciliation: {
           usedAgentStream: reconcile.usedAgentStream,
           steps: reconcile.steps.length,
           droppedNoise: reconcile.droppedNoise,
           meta: reconcile.meta,
+          /** The reconciled steps that were compiled (post-filter). */
+          compiledSteps: replay.map((c) => ({ text: c.ariaLabel ?? c.text, role: c.role, id: c.id, testid: c.testid, xpath: c.xpath })),
         },
         dataEndpoints: [...new Set(responses.map((r) => r.pathname))],
         writeRequests: dedupeRequests(requests),
