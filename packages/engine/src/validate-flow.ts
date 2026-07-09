@@ -22,6 +22,25 @@ export interface ValidationResult {
 }
 
 /**
+ * Sample input values for a VALIDATION dry-run, derived from each declared
+ * input. The declaration is a hint like "string — e.g. 9717352594" (the author
+ * pipeline embeds an example); this lifts that example. If a user replaced the
+ * hint with a bare value ("9717352594"), that value is used directly. This is
+ * what lets Validate actually EXERCISE a flow instead of failing on missing
+ * inputs — validation becomes a real dry-run with realistic values.
+ */
+export function sampleInputsFromFlow(flow: Flow): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, decl] of Object.entries(flow.inputs ?? {})) {
+    const s = String(decl ?? "").trim();
+    const m = /e\.g\.\s*(.+)$/i.exec(s);
+    const value = (m?.[1] ?? s).trim();
+    if (value) out[name] = value;
+  }
+  return out;
+}
+
+/**
  * Declared flow inputs that the flow's steps actually reference but the run
  * did not provide (missing or blank). Checked BEFORE launching a browser: a
  * templated locator name like "{{customer_name}}" that renders to "" either

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evaluateValidation, expectedOutputKeys, missingFlowInputs } from "./validate-flow.js";
+import { evaluateValidation, expectedOutputKeys, missingFlowInputs, sampleInputsFromFlow } from "./validate-flow.js";
 import type { Flow } from "@portico/flow-spec";
 
 const flow: Flow = {
@@ -90,4 +90,16 @@ test("missingFlowInputs ignores output refs, secrets, and flows with no declared
   const declared: Flow = { ...flow, inputs: { location: "string" } };
   // "location" is declared but never referenced; the {{location_resolved}} ref is a prior-step output.
   assert.deepEqual(missingFlowInputs(declared, {}), []);
+});
+
+test("sampleInputsFromFlow lifts examples from hints and tolerates bare values", () => {
+  const flow: Flow = {
+    key: "f", version: 1,
+    inputs: { phone_number: "string — e.g. 9717352594", lop: "hindi", note: "string" },
+    steps: [],
+  };
+  const s = sampleInputsFromFlow(flow);
+  assert.equal(s.phone_number, "9717352594"); // lifted from "e.g."
+  assert.equal(s.lop, "hindi");               // bare value used directly
+  assert.equal(s.note, "string");             // hint with no example → the hint (harmless)
 });

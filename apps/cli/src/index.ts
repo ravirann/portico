@@ -19,7 +19,7 @@ import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions } from "@portico/engine";
+import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions, sampleInputsFromFlow } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
@@ -653,6 +653,10 @@ async function main() {
     flowId = rec.id;
     flow = parseYaml(rec.yaml) as Flow;
     connectorKey = rec.connector ?? opts.connector;
+    // Validation is a real dry-run: fill any unprovided inputs from the flow's
+    // declared examples so it EXERCISES the flow instead of failing on missing
+    // inputs. An explicit --input still wins.
+    opts.inputs = { ...sampleInputsFromFlow(flow), ...opts.inputs };
   } else {
     flow = parseYaml(readFileSync(flowPath, "utf8")) as Flow;
     connectorKey = opts.connector ?? (flow as unknown as { connector?: string }).connector;

@@ -19,3 +19,9 @@ data/
 .DS_Store
 .next/
 _shoot.mjs
+
+# Internal planning docs & portal-specific example flows (kept out of the remote)
+docs/REBUILD-PROPOSAL.md
+docs/INVESTOR-DEMO.md
+packages/author/README.md
+docs/examples/

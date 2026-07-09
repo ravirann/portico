@@ -20,7 +20,7 @@ export { resolveProfile, refreshProfile } from "./auth-profile.js";
 export { jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 export { compileRecording, collapseTogglePairs } from "./compile-recording.js";
 export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";
-export { evaluateValidation, expectedOutputKeys, missingFlowInputs } from "./validate-flow.js";
+export { evaluateValidation, expectedOutputKeys, missingFlowInputs, sampleInputsFromFlow } from "./validate-flow.js";
 export type { ValidationResult, RunResultLike } from "./validate-flow.js";
 export { refineFlow, applyNameRefinements, applyRefinements } from "./refine-flow.js";
 export type { NameRefinement, FlowRefinements } from "./refine-flow.js";
