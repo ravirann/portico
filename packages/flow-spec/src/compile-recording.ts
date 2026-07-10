@@ -114,10 +114,11 @@ function pickLargestOrLast(pool: NetworkEntry[]): NetworkEntry {
 
 /**
  * Choose the network entry to `intercept`, tiered from most to least specific:
- * an explicit keyword hint, then a path that looks data-shaped, then (as a
- * last resort) simply the biggest JSON response seen. Returns undefined when
- * nothing in the recording looks like a JSON data endpoint at all — the
- * caller then skips intercept/wait/select entirely.
+ * an explicit keyword hint, then a response whose body actually looks
+ * slot-shaped, then a path that looks data-shaped, then (as a last resort)
+ * simply the biggest JSON response seen. Returns undefined when nothing in
+ * the recording looks like a JSON data endpoint at all — the caller then
+ * skips intercept/wait/select entirely.
  */
 function selectInterceptCandidate(network: NetworkEntry[], keyword?: string): NetworkEntry | undefined {
   const jsonCandidates = network.filter(isJsonDataEntry);
@@ -130,10 +131,19 @@ function selectInterceptCandidate(network: NetworkEntry[], keyword?: string): Ne
     if (matches.length > 0) return pickLargestOrLast(matches);
   }
 
-  const pathMatches = jsonCandidates.filter((entry) => DATA_PATH_RE.test(pathnameOf(entry.url)));
+  // A drill-to-slots run typically captures BOTH an early bootstrap/config
+  // payload and the slot-availability response, and the bootstrap payload is
+  // usually the larger of the two. But it's not the data the flow should wait
+  // on — the end-state slot data is the product; a bootstrap blob is just
+  // bigger, not better. When any candidate's body actually looks slot-shaped,
+  // narrow the field to those before the path/size tiers below decide among them.
+  const slotShaped = jsonCandidates.filter((entry) => looksLikeSlotData(entry.responseBodyPreview));
+  const pool = slotShaped.length > 0 ? slotShaped : jsonCandidates;
+
+  const pathMatches = pool.filter((entry) => DATA_PATH_RE.test(pathnameOf(entry.url)));
   if (pathMatches.length > 0) return pickLargestOrLast(pathMatches);
 
-  return pickLargestOrLast(jsonCandidates);
+  return pickLargestOrLast(pool);
 }
 
 /** The URL's pathname, tolerating relative/malformed URLs (falls back to the pre-`?` string). */

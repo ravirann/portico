@@ -217,6 +217,112 @@ test("a recording with no JSON data endpoint compiles to navigate + acts only", 
 });
 
 // ---------------------------------------------------------------------------
+// Intercept-candidate selection: slot-shaped beats merely-large
+// ---------------------------------------------------------------------------
+
+test("a slot-shaped response is preferred over a larger non-slot-shaped JSON response", () => {
+  // The common drill-to-slots shape: a large bootstrap/config payload fetched
+  // on page load, and a much smaller slot-availability response. The bootstrap
+  // payload must NOT win just because it's the biggest body.
+  const rec: Recording = {
+    baseUrl: "https://portal.example.org/scheduling",
+    clicks: [{ tag: "BUTTON", role: "button", text: "Continue" }],
+    network: [
+      {
+        method: "GET",
+        url: "https://portal.example.org/api/BootstrapData",
+        resourceType: "xhr",
+        status: 200,
+        contentType: "application/json",
+        responseBodyPreview: '{"config":{"theme":"blue","features":["a","b","c"]}}',
+        responseBodyBytes: 50000,
+      },
+      {
+        method: "GET",
+        url: "https://portal.example.org/api/GetOpenSlots",
+        resourceType: "xhr",
+        status: 200,
+        contentType: "application/json",
+        responseBodyPreview: '{"Solutions":[{"Slots":[{"DisplayDateTimeUtc":"2026-08-01T14:00:00Z"}]}]}',
+        responseBodyBytes: 900,
+      },
+    ],
+  };
+  const flow = compileRecording(rec);
+  const intercept = flow.steps.find((s) => s.type === "intercept")!;
+  assert.ok(intercept.intercept!.url_contains.includes("GetOpenSlots"));
+});
+
+test("an explicit interceptKeyword hint still wins even when a slot-shaped candidate exists", () => {
+  const rec: Recording = {
+    baseUrl: "https://portal.example.org/scheduling",
+    clicks: [{ tag: "BUTTON", role: "button", text: "Continue" }],
+    network: [
+      {
+        method: "GET",
+        url: "https://portal.example.org/api/BootstrapData",
+        resourceType: "xhr",
+        status: 200,
+        contentType: "application/json",
+        responseBodyPreview: '{"config":{"theme":"blue"}}',
+        responseBodyBytes: 50000,
+      },
+      {
+        method: "GET",
+        url: "https://portal.example.org/api/GetOpenSlots",
+        resourceType: "xhr",
+        status: 200,
+        contentType: "application/json",
+        responseBodyPreview: '{"Solutions":[{"Slots":[{"DisplayDateTimeUtc":"2026-08-01T14:00:00Z"}]}]}',
+        responseBodyBytes: 900,
+      },
+      {
+        method: "GET",
+        url: "https://portal.example.org/api/SearchProviders",
+        resourceType: "xhr",
+        status: 200,
+        contentType: "application/json",
+        responseBodyPreview: '{"providers":[]}',
+        responseBodyBytes: 500,
+      },
+    ],
+  };
+  const flow = compileRecording(rec, { interceptKeyword: "SearchProviders" });
+  const intercept = flow.steps.find((s) => s.type === "intercept")!;
+  assert.ok(intercept.intercept!.url_contains.includes("SearchProviders"));
+});
+
+test("with no slot-shaped candidate, the largest JSON response still wins (unchanged fallback)", () => {
+  const rec: Recording = {
+    baseUrl: "https://portal.example.org/scheduling",
+    clicks: [{ tag: "BUTTON", role: "button", text: "Continue" }],
+    network: [
+      {
+        method: "GET",
+        url: "https://portal.example.org/api/BootstrapData",
+        resourceType: "xhr",
+        status: 200,
+        contentType: "application/json",
+        responseBodyPreview: '{"config":{"theme":"blue"}}',
+        responseBodyBytes: 50000,
+      },
+      {
+        method: "GET",
+        url: "https://portal.example.org/api/Metrics",
+        resourceType: "xhr",
+        status: 200,
+        contentType: "application/json",
+        responseBodyPreview: '{"count":1}',
+        responseBodyBytes: 900,
+      },
+    ],
+  };
+  const flow = compileRecording(rec);
+  const intercept = flow.steps.find((s) => s.type === "intercept")!;
+  assert.ok(intercept.intercept!.url_contains.includes("BootstrapData"));
+});
+
+// ---------------------------------------------------------------------------
 // Claims-lookup regression: the broken pulse.clinikk.com artifact
 // ---------------------------------------------------------------------------
 
