@@ -38,6 +38,10 @@ credentials. The self-heal and authoring rows in `deploy/.env.example` are
 optional — only needed if you want AI-assisted recovery/authoring, and off the
 hot path of a promoted flow either way.
 
+For flow/instance credentials (`PORTICO_SECRET_*`, plus the optional
+`PORTICO_SECRETS_FILE` for keeping them encrypted at rest with age/SOPS), see
+docs/SECRETS.md.
+
 To follow logs: `docker compose -f deploy/docker-compose.yml logs -f`.
 To stop: `docker compose -f deploy/docker-compose.yml down` (add `-v` only if
 you also want to delete the persisted data volume, see below).
