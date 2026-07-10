@@ -22,34 +22,34 @@ Flow registry · run timelines with inline per-step screenshots · session
 management (launch/attach, connector-scoped) · self-heal / fail-safe
 classification · connectors. 🟡 remaining: escalation queue, tenant-aware config.
 
-## Phase 3 — Authoring & AI-assisted recovery 🟡
+## Phase 3 — Authoring & AI-assisted recovery ✅
 
-**Done:** self-heal (locator repair, cached) · schema-validated extraction ·
+Self-heal (locator repair, cached) · schema-validated extraction ·
 human-in-the-loop review · **agent authoring by demonstration + two-source
 reconciliation (exact-xpath join), validated end-to-end against a live portal
-([ADR-0002](decisions/0002-agent-authoring.md)).**
+([ADR-0002](decisions/0002-agent-authoring.md))** · eval suite scoring
+authoring quality over capture fixtures (in CI) · model/prompt provenance
+recorded on every authored flow (`flows.provenance_json`).
 
-**Next (to finish the phase):**
-- Eval suite — score authoring + heal quality (clean-name rate, no container-id
-  / blob, reconciliation confidence) over saved capture fixtures, run in CI so
-  regressions are caught automatically.
-- Prompt / model-version tracking — record the model + prompt version on each
-  authored flow and heal event, for reproducibility.
-- Generalize beyond one portal — a second EHR/insurer fixture in the
-  `generalize` suite, to prove the reconciliation is portal-agnostic.
+⬜ stretch: a second EHR/insurer fixture in the `generalize` suite.
 
-## Phase 4 — Production readiness (OSS, self-host, local-first) ⬜
+## Phase 4 — Production readiness (OSS, self-host, local-first) ✅
 
-- **One-command local self-host** — `docker-compose` (console + engine + store),
-  a Dockerfile per app, and a deploy guide. No cloud dependency.
-- **Secrets** — envelope encryption today (in-process, KMS-free); document a
-  local OSS option (age / SOPS) for at-rest key management.
-- **Audit** — append-only `audit_events` exists; add export + a console view.
-- **RBAC** — roles (viewer / operator / admin) enforced in the console + API.
-- **Multi-tenant isolation hardening** — tenant scoping exists in the store;
-  Postgres + row-level security as the scale path (SQLite stays the local default).
-- **Worker concurrency** — bounded parallel runs across the session pool.
-- **Connector pack / plugin system** — package a connector + its flows + auth.
+- ✅ **One-command local self-host** — `deploy/docker-compose.yml` + Dockerfile
+  (Playwright base, explicit COPY allowlist) + [docs/DEPLOY.md](DEPLOY.md).
+- ✅ **Secrets** — `FileSecretProvider` chained ahead of env
+  (`PORTICO_SECRETS_FILE`); age/SOPS at-rest patterns in [docs/SECRETS.md](SECRETS.md).
+- ✅ **Audit** — `list-audit --json|--csv` export + read-only `/audit` console view.
+- ✅ **RBAC** — opt-in viewer/operator/admin via `PORTICO_RBAC_TOKENS`
+  (unset = open local single-user, unchanged); middleware + `/login`.
+- ✅ **Multi-tenant scale path** — designed in
+  [ADR-0003](decisions/0003-postgres-rls.md) (Proposed): async `Store` seam,
+  `PgStore` + per-transaction RLS. SQLite stays the permanent local default;
+  implementation deliberately deferred until a hosted multi-tenant tier needs it.
+- ✅ **Worker concurrency** — store-backed `run_queue` +
+  `enqueue` / `queue` / `worker --concurrency N` (atomic claims, audit events).
+- ✅ **Connector pack template** — `connectors/TEMPLATE/` +
+  [docs/ADAPTER-SDK.md](ADAPTER-SDK.md).
 
 ## Phase 5 — Ecosystem (OSS) ⬜
 
