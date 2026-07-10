@@ -542,6 +542,16 @@ async function runResolve(rt: StepRuntime, step: Step): Promise<StepOutcome> {
 async function runRead(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   const spec = step.read;
   if (!spec) throw new Error(`read step "${step.label ?? "?"}" is missing its read config`);
+  // Reads evaluate in page context. On about:blank — nothing has navigated yet —
+  // the origin is opaque and storage access throws a cryptic SecurityError
+  // ("Access is denied for this document"); name the real problem instead.
+  if (rt.rawPage.url() === "about:blank") {
+    throw new Error(
+      `read "${spec.as}" ran before any navigation — the page is still on about:blank, ` +
+        `where storage/DOM access is denied. Add a navigate step before it, or set the ` +
+        `target's base_url so the runner opens the app first.`,
+    );
+  }
   const value = await rt.rawPage.evaluate(spec.expression);
   rt.output[spec.as] = value;
   const preview = Array.isArray(value) ? `${value.length} items` : String(value ?? "").slice(0, 24);

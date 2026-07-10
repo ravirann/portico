@@ -651,6 +651,20 @@ export function compileAgentRun(
           label: `Wait for ${outputKeyFor(lookups[0]!.pathname)}`,
           wait: { for: outputKeyFor(lookups[0]!.pathname), timeout_ms: 20000 },
         });
+      } else {
+        // No lookup deep-link opens the app, so navigate to its origin first:
+        // a fresh run page sits on about:blank — an OPAQUE origin where the
+        // localStorage auth reads (and in-page api fetches) below throw
+        // SecurityError. The origin, not finalUrl, so a per-run id path isn't
+        // frozen into the flow; localStorage is origin-scoped either way.
+        const origin = (() => {
+          try {
+            return new URL(finalUrl).origin;
+          } catch {
+            return finalUrl;
+          }
+        })();
+        steps.push({ type: "navigate", label: "Open the app", url: origin });
       }
       steps.push(...authReadSteps, ...mutationSteps);
       return {

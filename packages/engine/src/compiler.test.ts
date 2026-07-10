@@ -576,3 +576,23 @@ test("a templated locator name that renders empty fails loud naming the missing 
   } as Parameters<typeof resolveActLocator>[1];
   assert.throws(() => resolveActLocator(rt, step), /did not provide input "customer_name"/);
 });
+
+test("a read step before any navigation fails legibly instead of a storage SecurityError", async () => {
+  const flow = {
+    key: "read-first",
+    version: 1,
+    description: "",
+    steps: [
+      {
+        type: "read",
+        label: "Read userToken from the page",
+        read: { expression: "localStorage.getItem('userToken')", as: "user_token" },
+      },
+    ],
+  } as unknown as Flow;
+  const { plan } = compileFlow(flow, target);
+  // A page that never navigated — Playwright reports about:blank (opaque origin,
+  // where evaluating a storage read would throw the cryptic SecurityError).
+  const rt = { rawPage: { url: () => "about:blank" }, output: {} } as unknown as StepRuntime;
+  await assert.rejects(plan[0]!.run(rt), /before any navigation/);
+});

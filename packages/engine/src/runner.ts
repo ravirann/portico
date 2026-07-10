@@ -22,7 +22,7 @@ import type { BrowserContext, Page } from "playwright";
 import { redact } from "@portico/vault";
 import type { Flow, Target } from "@portico/flow-spec";
 import type { EngineRunOptions, EngineRunResult, StepTrace } from "./types.js";
-import { compileFlow, emitWorkflowModule, type StepRuntime } from "./compiler.js";
+import { compileFlow, emitWorkflowModule, waitForDomQuiet, type StepRuntime } from "./compiler.js";
 import { missingFlowInputs } from "./validate-flow.js";
 import { resolveHealModel } from "./model.js";
 import { resolveProfile } from "./auth-profile.js";
@@ -152,6 +152,49 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
 
   try {
     const start = opts.resumeFrom ?? 0;
+
+    // startUrl parity with the canonical workflow() path (which opens
+    // target.base_url before the handler runs): a fresh page sits on
+    // about:blank — an OPAQUE origin where storage reads and in-page fetch
+    // throw SecurityError. If the (resumed) plan touches the page before its
+    // first `navigate` — e.g. an authored write flow that opens with
+    // localStorage auth reads — establish the app origin first.
+    const NON_PAGE_STEPS = new Set(["intercept", "guard", "human", "resolve", "select", "wait"]);
+    const firstPageStep = plan.slice(start).find((s) => !NON_PAGE_STEPS.has(s.type));
+    if (firstPageStep && firstPageStep.type !== "navigate" && target.base_url) {
+      try {
+        await rawPage.goto(target.base_url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await waitForDomQuiet(rawPage, { quietMs: 500, timeoutMs: 8000 });
+      } catch (err) {
+        const startedAt = now();
+        const reason = scrub(
+          `start navigation to ${target.base_url} failed before step ${firstPageStep.index} could run: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+        const trace: StepTrace = {
+          index: firstPageStep.index,
+          type: firstPageStep.type,
+          label: firstPageStep.label,
+          status: "failed",
+          detail: reason,
+          startedAt,
+          endedAt: now(),
+        };
+        traces.push(trace);
+        opts.onStep?.(trace);
+        const rrwebRef = await recorder.finalize("failed");
+        return {
+          status: "failed",
+          output,
+          traces,
+          rrwebRef,
+          failure: { stepIndex: firstPageStep.index, reason, resumable: true },
+          unvalidatedOutputKeys: [...unvalidated],
+          authProfile: profileName,
+        };
+      }
+    }
+
     for (let i = start; i < plan.length; i++) {
       const step = plan[i]!;
       // Traces/screenshots key on the step's ORIGINAL flow index — the compiler
