@@ -6,7 +6,7 @@ import { test } from "node:test";
 import BetterSqlite3 from "better-sqlite3";
 
 import * as storeModule from "./index.js";
-import { Store } from "./index.js";
+import { Store, hashMemberToken } from "./index.js";
 import type { RunView, StepView } from "./index.js";
 
 function freshStore(): { store: Store; dir: string } {
@@ -820,6 +820,125 @@ test("browser_sessions: pid persists through createBrowserSession + getBrowserSe
     store.setBrowserSessionPid("bsess-no-pid", 999);
     got = store.getBrowserSession("bsess-no-pid");
     assert.equal(got?.pid, 999);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("members: createMember then listMembers is newest-first and never exposes a token hash", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.createMember({ id: "mem-1", name: "Alice", role: "admin", tokenHash: hashMemberToken("raw-token-1") });
+    store.createMember({ id: "mem-2", name: "Bob", role: "viewer", tokenHash: hashMemberToken("raw-token-2") });
+
+    const members = store.listMembers();
+    assert.deepEqual(members.map((m) => m.id), ["mem-2", "mem-1"]); // newest first
+
+    const bob = members[0]!;
+    assert.equal(bob.name, "Bob");
+    assert.equal(bob.role, "viewer");
+    assert.equal(bob.disabled, false);
+    assert.ok(bob.createdAt);
+    assert.equal(bob.lastLoginAt, undefined);
+
+    // no member ever carries a token/tokenHash field, in any casing.
+    for (const m of members) {
+      assert.equal(Object.prototype.hasOwnProperty.call(m, "tokenHash"), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(m, "token_hash"), false);
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("members: findMemberByTokenHash round-trips a raw token via hashMemberToken", () => {
+  const { store, dir } = freshStore();
+  try {
+    const rawToken = "pk_test-raw-token-abc123";
+    store.createMember({ id: "mem-3", name: "Carol", role: "operator", tokenHash: hashMemberToken(rawToken) });
+
+    const found = store.findMemberByTokenHash(hashMemberToken(rawToken));
+    assert.ok(found);
+    assert.equal(found.id, "mem-3");
+    assert.equal(found.name, "Carol");
+    assert.equal(found.role, "operator");
+    assert.equal(found.disabled, false);
+
+    assert.equal(store.findMemberByTokenHash(hashMemberToken("some-other-token")), undefined);
+    assert.equal(store.findMemberByTokenHash("not-a-real-hash"), undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("members: createMember throws a clear error on a duplicate token hash", () => {
+  const { store, dir } = freshStore();
+  try {
+    const tokenHash = hashMemberToken("shared-raw-token");
+    store.createMember({ id: "mem-4", name: "Dave", role: "viewer", tokenHash });
+
+    assert.throws(() => store.createMember({ id: "mem-5", name: "Eve", role: "viewer", tokenHash }), /token/i);
+
+    // the rejected insert left no partial row behind.
+    assert.equal(store.listMembers().length, 1);
+    assert.equal(store.listMembers()[0]?.id, "mem-4");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("members: setMemberDisabled flips state; findMemberByTokenHash still returns disabled rows", () => {
+  const { store, dir } = freshStore();
+  try {
+    const tokenHash = hashMemberToken("token-for-disable-test");
+    store.createMember({ id: "mem-6", name: "Frank", role: "operator", tokenHash });
+
+    store.setMemberDisabled("mem-6", true);
+    const found = store.findMemberByTokenHash(tokenHash);
+    assert.ok(found); // disabled rows are still returned — caller decides
+    assert.equal(found.disabled, true);
+    assert.equal(store.listMembers().find((m) => m.id === "mem-6")?.disabled, true);
+
+    store.setMemberDisabled("mem-6", false);
+    assert.equal(store.findMemberByTokenHash(tokenHash)?.disabled, false);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("members: countMembers excludes disabled members by default", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.createMember({ id: "mem-7", name: "Gina", role: "viewer", tokenHash: hashMemberToken("t7") });
+    store.createMember({ id: "mem-8", name: "Hank", role: "viewer", tokenHash: hashMemberToken("t8") });
+    store.createMember({ id: "mem-9", name: "Ivy", role: "viewer", tokenHash: hashMemberToken("t9") });
+    store.setMemberDisabled("mem-9", true);
+
+    assert.equal(store.countMembers(), 2);
+    assert.equal(store.countMembers(false), 2);
+    assert.equal(store.countMembers(true), 3);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("members: touchMemberLogin sets last_login_at; unknown id is a no-op", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.createMember({ id: "mem-10", name: "Jill", role: "admin", tokenHash: hashMemberToken("t10") });
+    assert.equal(store.listMembers()[0]?.lastLoginAt, undefined);
+
+    store.touchMemberLogin("mem-10");
+    const got = store.listMembers().find((m) => m.id === "mem-10");
+    assert.ok(got?.lastLoginAt);
+
+    store.touchMemberLogin("missing-member"); // no-op, must not throw
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

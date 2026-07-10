@@ -11,6 +11,7 @@
  */
 
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Artifacts } from "./artifacts.js";
@@ -26,6 +27,8 @@ import type {
   ConfigEntry,
   ConnectorRecord,
   FlowRecord,
+  MemberRecord,
+  MemberRole,
   RecordingRecord,
   RecordingStatus,
   RunQueueRecord,
@@ -37,6 +40,16 @@ import type {
   StoredAuditEvent,
   ValidationRecord,
 } from "./types.js";
+
+/**
+ * sha256 hex of a raw member bearer token. This is the ONLY form of a token
+ * that is ever persisted (`members.token_hash`) or compared against — raw
+ * tokens are generated in-process by the CLI's `member-add`, printed to the
+ * operator exactly once, and never stored or logged anywhere.
+ */
+export function hashMemberToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
 
 export interface StoreOptions {
   /** SQLite file path. Defaults to "data/portico.db". */
@@ -177,6 +190,16 @@ interface RunQueueRow {
   enqueued_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+interface MemberRow {
+  id: string;
+  name: string;
+  role: string;
+  token_hash: string;
+  disabled: number;
+  created_at: string;
+  last_login_at: string | null;
 }
 
 export class Store {
@@ -1116,6 +1139,86 @@ export class Store {
     if (row.started_at != null) rec.startedAt = row.started_at;
     if (row.finished_at != null) rec.finishedAt = row.finished_at;
     return rec;
+  }
+
+  // ---- members (durable auth principals) ---------------------------------
+
+  /**
+   * Insert a new member. Throws a clear error if `tokenHash` collides with an
+   * existing member's hash (`token_hash` is UNIQUE) instead of letting a raw
+   * SQLite constraint error leak through — a collision should never be
+   * silently swallowed or misread as "member already exists by id".
+   */
+  createMember(m: { id: string; name: string; role: MemberRole; tokenHash: string }): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO members (id, name, role, token_hash, disabled, created_at)
+           VALUES (@id, @name, @role, @token_hash, 0, @created_at)`,
+        )
+        .run({
+          id: m.id,
+          name: m.name,
+          role: m.role,
+          token_hash: m.tokenHash,
+          created_at: new Date().toISOString(),
+        });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("UNIQUE constraint failed") && msg.includes("token_hash")) {
+        throw new Error("createMember: a member with this token already exists (duplicate token hash)");
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * All members, newest first. Never exposes `token_hash` — stripped in
+   * `hydrateMember` below, and `MemberRecord` has no field for it at all.
+   */
+  listMembers(): MemberRecord[] {
+    const rows = this.db.prepare("SELECT * FROM members ORDER BY created_at DESC, rowid DESC").all() as MemberRow[];
+    return rows.map((r) => this.hydrateMember(r));
+  }
+
+  /**
+   * Look up a member by their token's sha256 hash (see `hashMemberToken`).
+   * Returns disabled members too — the caller (e.g. the CLI's `auth-check`)
+   * decides whether a disabled match still counts as authenticated.
+   */
+  findMemberByTokenHash(tokenHash: string): (MemberRecord & { disabled: boolean }) | undefined {
+    const row = this.db.prepare("SELECT * FROM members WHERE token_hash = ?").get(tokenHash) as MemberRow | undefined;
+    if (!row) return undefined;
+    return this.hydrateMember(row);
+  }
+
+  /** Enable/disable a member. No-op if the id is unknown. */
+  setMemberDisabled(id: string, disabled: boolean): void {
+    this.db.prepare("UPDATE members SET disabled = ? WHERE id = ?").run(disabled ? 1 : 0, id);
+  }
+
+  /** Stamp a member's `last_login_at` with now. No-op if the id is unknown. */
+  touchMemberLogin(id: string): void {
+    this.db.prepare("UPDATE members SET last_login_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
+
+  /** Count members, excluding disabled ones unless `includeDisabled` is set. */
+  countMembers(includeDisabled = false): number {
+    const clause = includeDisabled ? "" : "WHERE disabled = 0";
+    const row = this.db.prepare(`SELECT COUNT(*) as n FROM members ${clause}`).get() as { n: number };
+    return row.n;
+  }
+
+  private hydrateMember(row: MemberRow): MemberRecord {
+    const member: MemberRecord = {
+      id: row.id,
+      name: row.name,
+      role: row.role as MemberRole,
+      disabled: row.disabled === 1,
+      createdAt: row.created_at,
+    };
+    if (row.last_login_at != null) member.lastLoginAt = row.last_login_at;
+    return member;
   }
 
   // ---- artifacts --------------------------------------------------------

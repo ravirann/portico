@@ -227,3 +227,21 @@ export interface RunQueueRecord {
   startedAt?: string;
   finishedAt?: string;
 }
+
+export type MemberRole = "viewer" | "operator" | "admin";
+
+/**
+ * A durable auth principal (console login / API bearer-token holder).
+ * Intentionally has NO `tokenHash` field — `listMembers`/`findMemberByTokenHash`
+ * hydrate rows without ever copying `members.token_hash` onto this type, so a
+ * leaked `MemberRecord` (e.g. serialized to JSON for the console) cannot leak a
+ * usable credential.
+ */
+export interface MemberRecord {
+  id: string;
+  name: string;
+  role: MemberRole;
+  disabled: boolean;
+  createdAt: string;
+  lastLoginAt?: string;
+}

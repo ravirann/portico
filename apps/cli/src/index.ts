@@ -20,12 +20,14 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
+import { randomBytes } from "node:crypto";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions, sampleInputsFromFlow, deriveTier } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
 import { defaultSecretProvider, resolveSecrets } from "@portico/vault";
-import { Store } from "@portico/store";
+import { Store, hashMemberToken } from "@portico/store";
+import type { MemberRole } from "@portico/store";
 
 // Repo root, resolved from this file's own location (not process.cwd()) so a
 // `worker` spawning a grandchild `run` process gets a stable cwd regardless of
@@ -67,6 +69,7 @@ interface CliOpts {
   status?: string;
   concurrency?: number;
   once: boolean;
+  role?: string;
 }
 
 function parseArgs(argv: string[]) {
@@ -113,6 +116,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--status") opts.status = rest[++i];
     else if (a === "--concurrency") opts.concurrency = Number(rest[++i]);
     else if (a === "--once") opts.once = true;
+    else if (a === "--role") opts.role = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -929,6 +933,117 @@ async function main() {
     process.exit(0);
   }
 
+  // ---- members (durable auth principals) ---------------------------------
+  // Bearer-token auth for the console/API. Raw tokens are generated
+  // in-process and printed exactly once (member-add); only their sha256 hash
+  // is ever persisted (members.token_hash) — see hashMemberToken in
+  // @portico/store. auth-check reads the raw token from an env var, NEVER
+  // from argv, since argv is visible to every other process on the host
+  // (e.g. `ps`).
+
+  if (cmd === "member-add") {
+    const role = opts.role as MemberRole | undefined;
+    if (!opts.name || !role) {
+      console.error("usage: portico member-add --name <name> --role <viewer|operator|admin> [--json]");
+      process.exit(2);
+    }
+    if (role !== "viewer" && role !== "operator" && role !== "admin") {
+      const msg = `invalid role "${role}" — must be one of: viewer, operator, admin`;
+      if (opts.json) return emit({ error: msg }, 2);
+      console.error(`✗ ${msg}`);
+      process.exit(2);
+    }
+    // pk_ prefix marks this as a Portico key at a glance (e.g. in leaked-secret
+    // scanners); 24 random bytes (base64url) gives ~192 bits of entropy.
+    const token = "pk_" + randomBytes(24).toString("base64url");
+    const id = `mem_${Math.random().toString(16).slice(2, 10)}`;
+    const store = new Store();
+    try {
+      store.createMember({ id, name: opts.name, role, tokenHash: hashMemberToken(token) });
+    } catch (e) {
+      store.close();
+      const msg = e instanceof Error ? e.message : String(e);
+      if (opts.json) return emit({ error: msg }, 1);
+      console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+    // No token in the audit trail — only the hash ever touches the store, and
+    // the audit event doesn't even get that much.
+    store.appendAudit({
+      ts: new Date().toISOString(), actor: "cli", action: "member.added",
+      target: id, detail: { name: opts.name, role },
+    });
+    store.close();
+    // This is the ONLY time the raw token is ever emitted — it is not
+    // recoverable afterward (only its hash is stored).
+    const out = { id, name: opts.name, role, token };
+    if (opts.json) return emit(out);
+    console.log(`✔ added member "${opts.name}" (${role}) — id=${id}`);
+    console.log(`  token: ${token}`);
+    console.log("  (save this now — it will not be shown again)");
+    process.exit(0);
+  }
+
+  if (cmd === "member-list") {
+    const store = new Store();
+    const members = store.listMembers();
+    store.close();
+    if (opts.json) return emit(members);
+    if (members.length === 0) {
+      console.log("(no members)");
+    } else {
+      console.log(`${"ID".padEnd(14)}  ${"NAME".padEnd(20)}  ${"ROLE".padEnd(10)}  ${"STATUS".padEnd(10)}  ${"CREATED".padEnd(24)}  LAST LOGIN`);
+      for (const m of members) {
+        console.log(
+          `${m.id.padEnd(14)}  ${m.name.slice(0, 20).padEnd(20)}  ${m.role.padEnd(10)}  ${(m.disabled ? "disabled" : "active").padEnd(10)}  ${m.createdAt.padEnd(24)}  ${m.lastLoginAt ?? "-"}`,
+        );
+      }
+    }
+    process.exit(0);
+  }
+
+  if (cmd === "member-disable" || cmd === "member-enable") {
+    if (!flowPath) { console.error(`usage: portico ${cmd} <id>`); process.exit(2); }
+    const disabled = cmd === "member-disable";
+    const store = new Store();
+    const existing = store.listMembers().find((m) => m.id === flowPath);
+    if (!existing) {
+      store.close();
+      const msg = `no member with id "${flowPath}"`;
+      if (opts.json) return emit({ error: msg }, 2);
+      console.error(`✗ ${msg}`);
+      process.exit(2);
+    }
+    store.setMemberDisabled(flowPath, disabled);
+    store.appendAudit({
+      ts: new Date().toISOString(), actor: "cli", action: disabled ? "member.disabled" : "member.enabled",
+      target: flowPath, detail: { name: existing.name },
+    });
+    store.close();
+    const out = { id: flowPath, name: existing.name, disabled };
+    if (opts.json) return emit(out);
+    console.log(`✔ ${disabled ? "disabled" : "enabled"} member "${existing.name}" (${flowPath})`);
+    process.exit(0);
+  }
+
+  // Reads the raw token from PORTICO_AUTH_CHECK_TOKEN — NOT argv, which leaks
+  // into `ps`/process-list output on shared hosts. Always exits 0 (the
+  // {ok:false} body IS the "not authenticated" signal, not a process failure)
+  // so callers only need to parse stdout, never the exit code.
+  if (cmd === "auth-check") {
+    const token = process.env.PORTICO_AUTH_CHECK_TOKEN;
+    if (!token) return emit({ ok: false });
+    const store = new Store();
+    const member = store.findMemberByTokenHash(hashMemberToken(token));
+    if (!member || member.disabled) {
+      store.close();
+      return emit({ ok: false });
+    }
+    store.touchMemberLogin(member.id);
+    store.close();
+    return emit({ ok: true, member: { id: member.id, name: member.name, role: member.role } });
+  }
+
   if ((cmd !== "run" && cmd !== "validate") || !flowPath) {
     console.error(
       "usage: portico <run <flow.yaml> | validate <flow-id> | confirm <flow-id> | compile <recording.json> | " +
@@ -936,7 +1051,8 @@ async function main() {
         "list-connectors | get-connector <idOrKey> | save-connector | delete-connector <id> | " +
         "config-get | config-set | session-start | session-kill <id> | " +
         "record-start --session <id> | record-stop <recId> | get-recording <recId> | list-recordings | " +
-        "enqueue <flowId> [--input k=v]... | queue [--status S] [--limit N] | worker [--concurrency N] [--once]>",
+        "enqueue <flowId> [--input k=v]... | queue [--status S] [--limit N] | worker [--concurrency N] [--once] | " +
+        "member-add --name <n> --role <viewer|operator|admin> | member-list | member-disable <id> | member-enable <id> | auth-check>",
     );
     process.exit(2);
   }

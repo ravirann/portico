@@ -239,6 +239,27 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_run_queue_status ON run_queue(status, enqueued_at);
     `,
   },
+  {
+    // Members — durable auth principals (console logins / API bearer-token
+    // holders). Only a sha256 hash of each member's token is ever stored
+    // (`token_hash`, see `hashMemberToken` in store.ts) — the raw token exists
+    // only in-process at `member-add` time and is printed once, never logged
+    // or persisted. `disabled` soft-disables a member (auth-check then fails)
+    // without losing their row/audit history.
+    version: 11,
+    sql: `
+      CREATE TABLE IF NOT EXISTS members (
+        id            TEXT PRIMARY KEY,
+        name          TEXT NOT NULL,
+        role          TEXT NOT NULL, -- 'viewer' | 'operator' | 'admin'
+        token_hash    TEXT NOT NULL UNIQUE,
+        disabled      INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL,
+        last_login_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_members_token_hash ON members(token_hash);
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

@@ -12,7 +12,7 @@
  * there is intentionally no update/delete for audit records anywhere.
  */
 
-export { Store } from "./store.js";
+export { Store, hashMemberToken } from "./store.js";
 export type { StoreOptions } from "./store.js";
 export { Artifacts } from "./artifacts.js";
 export { base64Cipher, aesGcmCipher, defaultCipher } from "./crypto.js";
@@ -27,6 +27,8 @@ export type {
   FlowRecord,
   FlowSource,
   FlowStatus,
+  MemberRecord,
+  MemberRole,
   RecordingRecord,
   RecordingStatus,
   RunMode,
