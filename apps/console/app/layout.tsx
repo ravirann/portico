@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Public_Sans, JetBrains_Mono } from "next/font/google";
+import { headers } from "next/headers";
 import { Shell } from "@/components/shell";
 import "./globals.css";
 
@@ -43,14 +44,22 @@ export const viewport: Viewport = {
 // Absent → no data-theme attribute → follows the OS via prefers-color-scheme.
 const themeScript = `(function(){try{var t=localStorage.getItem('portico-theme');if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();`;
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // Identity passthrough (see middleware.ts + lib/rbac.ts resolveIdentity):
+  // both headers are only ever present when RBAC is on and the request
+  // carried a valid token — middleware deletes them otherwise, so a client
+  // can't forge them. Shell renders its signed-in block iff both are set.
+  const requestHeaders = await headers();
+  const role = requestHeaders.get("x-portico-role") ?? undefined;
+  const user = requestHeaders.get("x-portico-user") ?? undefined;
+
   return (
     <html lang="en" suppressHydrationWarning className={`${publicSans.variable} ${mono.variable}`}>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body>
-        <Shell>{children}</Shell>
+        <Shell user={user} role={role}>{children}</Shell>
       </body>
     </html>
   );

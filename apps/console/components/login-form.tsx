@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 const fieldStyle: React.CSSProperties = {
   width: "100%",
@@ -32,10 +32,16 @@ const labelStyle: React.CSSProperties = {
  * The cookie is NOT httpOnly: nothing sets it server-side, so a script on
  * the page could in principle read it back. Accepted trade-off for a
  * minimal, backend-free login flow on a local, self-hosted console.
+ *
+ * Supports a `?token=` query param — the Members page's invite links
+ * (components/members-manager.tsx) are `/login?token=...` — to prefill the
+ * field. It only prefills: the human still has to click Continue, so
+ * pre-fetching or merely opening the link can't sign anyone in by itself.
  */
-export function LoginForm() {
+function LoginFormFields() {
   const router = useRouter();
-  const [token, setToken] = useState("");
+  const searchParams = useSearchParams();
+  const [token, setToken] = useState(() => searchParams.get("token") ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,5 +100,16 @@ export function LoginForm() {
         </button>
       </div>
     </form>
+  );
+}
+
+/** Suspense is required around anything calling useSearchParams (used above
+ *  for the ?token= prefill) — without it, a client-side navigation to
+ *  /login has no fallback to render while the search params resolve. */
+export function LoginForm() {
+  return (
+    <Suspense fallback={null}>
+      <LoginFormFields />
+    </Suspense>
   );
 }

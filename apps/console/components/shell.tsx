@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { IconAudit, IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings } from "./icons";
+import { IconAudit, IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings, IconUsers } from "./icons";
 import { ConnectorSwitcher } from "./connector-switcher";
+import { SignOutButton } from "./sign-out-button";
 
 type ThemeMode = "dark" | "light" | "system";
 
@@ -83,21 +84,48 @@ function ThemeSwitcher() {
   );
 }
 
-const NAV = [
+interface NavItem {
+  href: string;
+  label: string;
+  Icon: React.ComponentType<{ className?: string }>;
+  exact?: boolean;
+  /** Hidden from the rendered nav when RBAC is on and the signed-in role
+   *  isn't admin (see Shell below) — a viewer/operator following this link
+   *  would just be redirected home by middleware (lib/rbac.ts requiredRole).
+   *  Shown when RBAC is off entirely, since /members then renders its own
+   *  "RBAC is off" how-to-enable state instead of gating anything. */
+  adminOnly?: boolean;
+}
+
+const NAV: NavItem[] = [
   { href: "/", label: "Overview", Icon: IconDash, exact: true },
   { href: "/runs", label: "Runs", Icon: IconRuns },
   { href: "/flows", label: "Flows", Icon: IconFlows },
   { href: "/sessions", label: "Sessions", Icon: IconSessions },
   { href: "/connectors", label: "Connectors", Icon: IconConnectors },
   { href: "/audit", label: "Audit", Icon: IconAudit },
+  { href: "/members", label: "Members", Icon: IconUsers, adminOnly: true },
   { href: "/settings", label: "Settings", Icon: IconSettings },
   { href: "/help", label: "Help", Icon: IconHelp },
 ];
 
-export function Shell({ children }: { children: React.ReactNode }) {
+export function Shell({
+  children,
+  user,
+  role,
+}: {
+  children: React.ReactNode;
+  /** Signed-in identity, forwarded by middleware.ts as request headers and
+   *  read server-side in app/layout.tsx. Both are undefined whenever RBAC
+   *  is off (or the request carries no valid token) — in that case this
+   *  component renders exactly as it did before these props existed. */
+  user?: string;
+  role?: string;
+}) {
   const path = usePathname();
   const isActive = (href: string, exact?: boolean) =>
     exact ? path === href : path === href || path.startsWith(href + "/");
+  const visibleNav = NAV.filter((item) => !item.adminOnly || !role || role === "admin");
 
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
@@ -151,7 +179,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="nav-label">Workspace</div>
-        {NAV.map(({ href, label, Icon, exact }) => (
+        {visibleNav.map(({ href, label, Icon, exact }) => (
           <Link
             key={href}
             href={href}
@@ -169,6 +197,45 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <span className="pulse" />
             <span className="self-host-text">Self-hosted · local</span>
           </span>
+          {/* Who-am-I + sign out. Only ever present when RBAC is on and the
+              request carried a valid token (see app/layout.tsx); absent
+              entirely otherwise, so this is zero visual change for the
+              common RBAC-off, single-user setup. Hidden while the rail is
+              collapsed — the name + role chip + button have no room in a
+              64px rail — rather than trying to truncate them further. */}
+          {!collapsed && user && role && (
+            <div
+              style={{
+                marginTop: 12,
+                paddingTop: 12,
+                borderTop: "1px solid var(--line)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <span
+                  className="mono"
+                  title={user}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    color: "var(--ink)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {user}
+                </span>
+                <span className="chip">{role}</span>
+              </div>
+              <SignOutButton />
+            </div>
+          )}
         </div>
       </aside>
       <main className="main">{children}</main>

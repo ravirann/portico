@@ -2,7 +2,7 @@
  * Pure RBAC decision logic for the console — no Next.js imports, so this
  * loads and runs fine under `node --import tsx --test` without a Next
  * runtime (see rbac.test.ts). `middleware.ts` is a thin, Next-aware adapter
- * over `parseTokens` + `extractToken` + `decide`.
+ * over `parseTokens` + `extractToken` + `decide` + `resolveIdentity`.
  *
  * Design (user-facing version lives in docs/DEPLOY.md, "RBAC (optional)"):
  *  - Off by default. RBAC only turns on when PORTICO_RBAC_TOKENS is a
@@ -16,7 +16,22 @@
  *  - Admin-only: any method on /api/config (the Settings page's backing
  *    route — there is no literal /api/settings path in this app; see
  *    isSettingsApiRoute), any mutation (non-GET/HEAD) under /api/connectors*,
- *    and DELETE /api/flows/[id] (the flow-delete route).
+ *    DELETE /api/flows/[id] (the flow-delete route), and the /members page
+ *    (see isMembersPage) — the env-backed member-management helper at
+ *    app/members/page.tsx.
+ *  - Named tokens: each entry is `role:token` (name defaults to the role
+ *    string, e.g. plain "admin") or `role:name:token` (explicit display
+ *    name, e.g. "operator:ravi:tok123"). Both shapes coexist in the same
+ *    PORTICO_RBAC_TOKENS list. `resolveIdentity` turns a presented token
+ *    into the {role, name} pair middleware forwards to the app.
+ *  - Page vs API on denial: an API request that fails RBAC gets a 401
+ *    (no/unrecognized token) or 403 (recognized but insufficient role) JSON
+ *    response. A page navigation with no/unrecognized token redirects to
+ *    /login (nothing to authenticate against yet). A page navigation with a
+ *    *valid* token but insufficient role (currently: non-admin on /members)
+ *    redirects to / instead — the user is already signed in, so bouncing
+ *    them to /login would just have them re-present the same token and land
+ *    right back here; there's no dedicated 403 page.
  */
 
 export type Role = "viewer" | "operator" | "admin";
@@ -29,6 +44,22 @@ export interface RbacConfig {
   enabled: boolean;
   /** token -> role, valid entries only. */
   tokens: Map<string, Role>;
+  /** token -> display name, valid entries only, 1:1 with `tokens`. Kept as
+   *  a separate map (rather than widening `tokens`'s value type) so the
+   *  pre-existing `Map<string, Role>` shape — and every test asserting
+   *  against it directly — stays intact. Always populated: an entry with no
+   *  explicit name (the plain `role:token` form) gets the role string as
+   *  its name. */
+  names: Map<string, string>;
+}
+
+/** A presented token resolved to who it belongs to. Returned by
+ *  `resolveIdentity`; forwarded by middleware.ts as the `x-portico-role` /
+ *  `x-portico-user` request headers, which components/shell.tsx's signed-in
+ *  block reads (via app/layout.tsx). */
+export interface Identity {
+  role: Role;
+  name: string;
 }
 
 export interface DecideResult {
@@ -48,29 +79,38 @@ function isRole(value: string): value is Role {
 }
 
 /**
- * Parse `PORTICO_RBAC_TOKENS` — comma-separated `role:token` pairs, e.g.
- * `admin:tok_a1,operator:tok_o1,viewer:tok_v1`. A role may repeat for
- * multiple tokens. Malformed entries (no colon), unknown roles, and tokens
- * shorter than 8 characters are dropped with a warning to stderr; the rest
- * of the list still loads.
+ * Parse `PORTICO_RBAC_TOKENS` — comma-separated entries, each either
+ * `role:token` (e.g. `admin:tok_a1`) or `role:name:token` (e.g.
+ * `operator:ravi:tok_o1`) to also give that entry a display name. A role
+ * may repeat for multiple tokens. Malformed entries (no colon), unknown
+ * roles, and tokens shorter than 8 characters are dropped with a warning to
+ * stderr; the rest of the list still loads.
  */
 export function parseTokens(env: string | undefined | null): RbacConfig {
   const raw = (env ?? "").trim();
-  if (!raw) return { enabled: false, tokens: new Map() };
+  if (!raw) return { enabled: false, tokens: new Map(), names: new Map() };
 
   const tokens = new Map<string, Role>();
+  const names = new Map<string, string>();
   for (const rawEntry of raw.split(",")) {
     const entry = rawEntry.trim();
     if (!entry) continue;
 
-    const sep = entry.indexOf(":");
-    if (sep === -1) {
-      console.warn(`[portico-rbac] ignoring malformed PORTICO_RBAC_TOKENS entry (expected "role:token"): "${entry}"`);
+    // Two shapes share this list: "role:token" (name defaults to the role)
+    // and "role:name:token" (explicit display name). Both are split on ":"
+    // — 2 parts is the legacy shape, 3+ parts takes the first part as the
+    // role, the LAST part as the token, and joins whatever's in between
+    // back together as the name (so a name containing a stray ":" still
+    // parses instead of silently truncating).
+    const parts = entry.split(":").map((p) => p.trim());
+    if (parts.length < 2) {
+      console.warn(`[portico-rbac] ignoring malformed PORTICO_RBAC_TOKENS entry (expected "role:token" or "role:name:token"): "${entry}"`);
       continue;
     }
 
-    const role = entry.slice(0, sep).trim();
-    const token = entry.slice(sep + 1).trim();
+    const role = parts[0];
+    const token = parts[parts.length - 1];
+    const name = parts.length === 2 ? role : parts.slice(1, -1).join(":").trim() || role;
 
     if (!isRole(role)) {
       console.warn(`[portico-rbac] ignoring PORTICO_RBAC_TOKENS entry with unknown role "${role}" (expected viewer, operator, or admin)`);
@@ -82,9 +122,10 @@ export function parseTokens(env: string | undefined | null): RbacConfig {
     }
 
     tokens.set(token, role);
+    names.set(token, name);
   }
 
-  return { enabled: true, tokens };
+  return { enabled: true, tokens, names };
 }
 
 /**
@@ -102,6 +143,19 @@ export function extractToken(input: { authorization?: string | null; cookie?: st
   }
   const cookie = input.cookie?.trim();
   return cookie || null;
+}
+
+/**
+ * Resolve a presented token (already pulled out by `extractToken`) to the
+ * {role, name} identity it belongs to, or null if the token is missing or
+ * doesn't match any configured entry. Used by middleware.ts to build the
+ * x-portico-role / x-portico-user identity-passthrough headers.
+ */
+export function resolveIdentity(token: string | null, config: RbacConfig): Identity | null {
+  if (!token) return null;
+  const role = config.tokens.get(token);
+  if (!role) return null;
+  return { role, name: config.names.get(token) ?? role };
 }
 
 function normalizePath(path: string): string {
@@ -149,6 +203,16 @@ function isFlowDeleteRoute(path: string, method: string): boolean {
   return method === "DELETE" && /^\/api\/flows\/[^/]+$/.test(path);
 }
 
+/**
+ * app/members/page.tsx — the env-backed helper for managing
+ * PORTICO_RBAC_TOKENS (builds add/invite/revoke lines to copy elsewhere; no
+ * server mutations). Admin-only on every method, same reasoning as the
+ * settings route: it's the one page that surfaces every member's token.
+ */
+function isMembersPage(path: string): boolean {
+  return path === "/members" || path.startsWith("/members/");
+}
+
 /** Minimum role required to perform `method` on `path`. Exported for
  *  direct unit testing of the admin-only classification. */
 export function requiredRole(path: string, rawMethod: string): Role {
@@ -158,6 +222,7 @@ export function requiredRole(path: string, rawMethod: string): Role {
   if (isSettingsApiRoute(path)) return "admin";
   if (isFlowDeleteRoute(path, method)) return "admin";
   if (isConnectorsApiRoute(path) && !isRead) return "admin";
+  if (isMembersPage(path)) return "admin";
   return isRead ? "viewer" : "operator";
 }
 
@@ -178,12 +243,19 @@ export function decide(input: { path: string; method: string; token: string | nu
   const role = input.token ? input.config.tokens.get(input.token) : undefined;
 
   if (!role) {
+    // No token, or a token that doesn't match any configured entry — same
+    // treatment either way: nothing to authenticate against.
     return api ? { allow: false, status: 401 } : { allow: false, redirect: "/login" };
   }
 
   const required = requiredRole(path, input.method);
   if (ROLE_RANK[role] < ROLE_RANK[required]) {
-    return api ? { allow: false, status: 403 } : { allow: false, redirect: "/login" };
+    if (api) return { allow: false, status: 403 };
+    // A valid, recognized token — just not one with enough rank for this
+    // page (currently only /members). Redirecting to /login would be a
+    // dead end (they'd re-present the same token and bounce right back);
+    // send them home instead. See the module doc comment.
+    return { allow: false, redirect: "/" };
   }
 
   return { allow: true };
