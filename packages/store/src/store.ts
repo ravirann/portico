@@ -28,6 +28,8 @@ import type {
   FlowRecord,
   RecordingRecord,
   RecordingStatus,
+  RunQueueRecord,
+  RunQueueStatus,
   RunStatus,
   RunView,
   StepRecord,
@@ -162,6 +164,19 @@ interface AuthorJobRow {
   pid: number | null;
   started_at: string;
   updated_at: string;
+}
+
+interface RunQueueRow {
+  id: string;
+  flow_id: string;
+  inputs_json: string | null;
+  status: string;
+  run_id: string | null;
+  error: string | null;
+  worker: string | null;
+  enqueued_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export class Store {
@@ -1002,6 +1017,105 @@ export class Store {
       if (r.detail_json != null) e.detail = JSON.parse(r.detail_json);
       return e;
     });
+  }
+
+  // ---- run queue (bounded worker concurrency) ---------------------------
+
+  /** Enqueue a flow run for a `worker` loop to claim and execute later. */
+  enqueueRun(q: { id: string; flowId: string; inputs?: Record<string, string> }): void {
+    this.db
+      .prepare(
+        `INSERT INTO run_queue (id, flow_id, inputs_json, status, enqueued_at)
+         VALUES (@id, @flow_id, @inputs_json, 'queued', @enqueued_at)`,
+      )
+      .run({
+        id: q.id,
+        flow_id: q.flowId,
+        inputs_json: q.inputs ? JSON.stringify(q.inputs) : null,
+        enqueued_at: new Date().toISOString(),
+      });
+  }
+
+  /**
+   * Atomically claim the oldest 'queued' row for `worker`: SELECT the oldest
+   * queued row, flip it to 'running' with worker+started_at, and return it —
+   * all inside one IMMEDIATE transaction. better-sqlite3 is synchronous, and
+   * BEGIN IMMEDIATE takes the write lock up front (rather than upgrading a
+   * read snapshot later), so this is safe even across separate `worker`
+   * processes sharing this DB file: only one can hold the row at a time, and
+   * the rest simply see it's no longer 'queued'. Returns `undefined` once the
+   * queue is empty.
+   */
+  claimNextQueued(worker: string): RunQueueRecord | undefined {
+    const claim = this.db.transaction((w: string): RunQueueRow | undefined => {
+      const row = this.db
+        .prepare("SELECT * FROM run_queue WHERE status = 'queued' ORDER BY enqueued_at ASC, rowid ASC LIMIT 1")
+        .get() as RunQueueRow | undefined;
+      if (!row) return undefined;
+      const started_at = new Date().toISOString();
+      this.db
+        .prepare(
+          `UPDATE run_queue SET status = 'running', worker = @worker, started_at = @started_at
+           WHERE id = @id AND status = 'queued'`,
+        )
+        .run({ id: row.id, worker: w, started_at });
+      return { ...row, status: "running", worker: w, started_at };
+    });
+    const row = claim.immediate(worker);
+    return row ? this.hydrateRunQueue(row) : undefined;
+  }
+
+  /** Record a claimed row's terminal outcome. Unset fields (runId/error) are left null. */
+  finishQueued(id: string, patch: { status: "completed" | "failed"; runId?: string; error?: string }): void {
+    this.db
+      .prepare(
+        `UPDATE run_queue SET
+           status      = @status,
+           run_id      = COALESCE(@run_id, run_id),
+           error       = COALESCE(@error, error),
+           finished_at = @finished_at
+         WHERE id = @id`,
+      )
+      .run({
+        id,
+        status: patch.status,
+        run_id: patch.runId ?? null,
+        error: patch.error ?? null,
+        finished_at: new Date().toISOString(),
+      });
+  }
+
+  /** Queue rows, newest-enqueued first; optionally filtered by status. */
+  listQueue(opts: { status?: RunQueueStatus; limit?: number } = {}): RunQueueRecord[] {
+    const clause = opts.status != null ? "WHERE status = @status" : "";
+    const limit = opts.limit ?? DEFAULT_LIST_LIMIT;
+    const rows = this.db
+      .prepare(`SELECT * FROM run_queue ${clause} ORDER BY enqueued_at DESC, rowid DESC LIMIT @limit`)
+      .all(opts.status != null ? { status: opts.status, limit } : { limit }) as RunQueueRow[];
+    return rows.map((r) => this.hydrateRunQueue(r));
+  }
+
+  private hydrateRunQueue(row: RunQueueRow): RunQueueRecord {
+    const rec: RunQueueRecord = {
+      id: row.id,
+      flowId: row.flow_id,
+      status: row.status as RunQueueStatus,
+      enqueuedAt: row.enqueued_at,
+    };
+    if (row.inputs_json != null) {
+      // Tolerate malformed JSON (never crash a read over diagnostic metadata).
+      try {
+        rec.inputs = JSON.parse(row.inputs_json) as Record<string, string>;
+      } catch {
+        /* leave rec.inputs unset */
+      }
+    }
+    if (row.run_id != null) rec.runId = row.run_id;
+    if (row.error != null) rec.error = row.error;
+    if (row.worker != null) rec.worker = row.worker;
+    if (row.started_at != null) rec.startedAt = row.started_at;
+    if (row.finished_at != null) rec.finishedAt = row.finished_at;
+    return rec;
   }
 
   // ---- artifacts --------------------------------------------------------

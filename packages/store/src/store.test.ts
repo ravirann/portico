@@ -684,6 +684,120 @@ test("config: setConfig upserts by (scope, category, key); deleteConfig removes"
   }
 });
 
+test("run queue: enqueueRun then claimNextQueued returns the oldest row and flips it to running with worker set", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-1", flowId: "flows/a.yaml", inputs: { a: "1" } });
+    store.enqueueRun({ id: "q-2", flowId: "flows/b.yaml" });
+
+    const claimed = store.claimNextQueued("worker-1");
+    assert.ok(claimed);
+    assert.equal(claimed.id, "q-1"); // oldest enqueued wins
+    assert.equal(claimed.flowId, "flows/a.yaml");
+    assert.deepEqual(claimed.inputs, { a: "1" });
+    assert.equal(claimed.status, "running");
+    assert.equal(claimed.worker, "worker-1");
+    assert.ok(claimed.startedAt);
+
+    // the flip is durable — a fresh read agrees.
+    const row = store.listQueue({ status: "running" })[0];
+    assert.equal(row?.id, "q-1");
+    assert.equal(store.listQueue({ status: "queued" }).length, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run queue: a second claim skips the already-claimed row and returns undefined once empty", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-1", flowId: "flows/a.yaml" });
+    store.enqueueRun({ id: "q-2", flowId: "flows/b.yaml" });
+
+    const first = store.claimNextQueued("worker-1");
+    const second = store.claimNextQueued("worker-1");
+    assert.equal(first?.id, "q-1");
+    assert.equal(second?.id, "q-2");
+
+    // queue is now exhausted
+    assert.equal(store.claimNextQueued("worker-1"), undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run queue: sequential claims (simulating multiple workers) never return the same row", () => {
+  const { store, dir } = freshStore();
+  try {
+    for (let i = 0; i < 5; i++) store.enqueueRun({ id: `q-${i}`, flowId: `flows/${i}.yaml` });
+
+    const seen = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const row = store.claimNextQueued(`worker-${i}`);
+      assert.ok(row);
+      assert.equal(seen.has(row.id), false);
+      seen.add(row.id);
+    }
+    assert.equal(seen.size, 5);
+    assert.equal(store.claimNextQueued("worker-x"), undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run queue: finishQueued sets terminal fields for both completed and failed outcomes", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-1", flowId: "flows/a.yaml" });
+    store.enqueueRun({ id: "q-2", flowId: "flows/b.yaml" });
+    store.claimNextQueued("worker-1");
+    store.claimNextQueued("worker-1");
+
+    store.finishQueued("q-1", { status: "completed", runId: "run_abc" });
+    store.finishQueued("q-2", { status: "failed", error: "boom" });
+
+    const rows = store.listQueue();
+    const q1 = rows.find((r) => r.id === "q-1");
+    const q2 = rows.find((r) => r.id === "q-2");
+    assert.equal(q1?.status, "completed");
+    assert.equal(q1?.runId, "run_abc");
+    assert.ok(q1?.finishedAt);
+    assert.equal(q2?.status, "failed");
+    assert.equal(q2?.error, "boom");
+    assert.ok(q2?.finishedAt);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run queue: listQueue filters by status and orders newest-enqueued first", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-1", flowId: "flows/a.yaml" });
+    store.enqueueRun({ id: "q-2", flowId: "flows/b.yaml" });
+    store.enqueueRun({ id: "q-3", flowId: "flows/c.yaml" });
+    store.claimNextQueued("worker-1"); // claims q-1 (oldest) -> running
+
+    const all = store.listQueue();
+    assert.deepEqual(all.map((r) => r.id), ["q-3", "q-2", "q-1"]); // newest enqueued first
+
+    const queued = store.listQueue({ status: "queued" }).map((r) => r.id);
+    assert.deepEqual(queued, ["q-3", "q-2"]);
+
+    const running = store.listQueue({ status: "running" }).map((r) => r.id);
+    assert.deepEqual(running, ["q-1"]);
+
+    assert.equal(store.listQueue({ limit: 1 }).length, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("browser_sessions: pid persists through createBrowserSession + getBrowserSession", () => {
   const { store, dir } = freshStore();
   try {

@@ -214,6 +214,31 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE flows ADD COLUMN provenance_json TEXT;
     `,
   },
+  {
+    // Bounded worker concurrency — a durable run queue so a CLI `worker` loop
+    // can claim and execute queued flow runs with a bounded number of
+    // concurrent children, without a separate message broker. `enqueueRun`
+    // inserts 'queued' rows; `claimNextQueued` atomically flips the oldest
+    // queued row to 'running' inside an IMMEDIATE transaction so multiple
+    // worker processes sharing this DB file never claim the same row;
+    // `finishQueued` records the terminal outcome.
+    version: 10,
+    sql: `
+      CREATE TABLE IF NOT EXISTS run_queue (
+        id          TEXT PRIMARY KEY,
+        flow_id     TEXT NOT NULL,
+        inputs_json TEXT,
+        status      TEXT NOT NULL, -- 'queued' | 'running' | 'completed' | 'failed'
+        run_id      TEXT,
+        error       TEXT,
+        worker      TEXT,
+        enqueued_at TEXT NOT NULL,
+        started_at  TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_run_queue_status ON run_queue(status, enqueued_at);
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

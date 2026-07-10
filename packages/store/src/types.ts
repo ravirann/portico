@@ -205,3 +205,25 @@ export interface ConfigEntry {
   secret: boolean;
   updatedAt: string;
 }
+
+export type RunQueueStatus = "queued" | "running" | "completed" | "failed";
+
+/**
+ * A row in the durable run queue that backs the CLI `worker` loop — a
+ * poor-man's job queue on top of SQLite so bounded-concurrency processing
+ * works without a separate message broker. `flowId` is whatever `run` accepts
+ * as its positional argument (a flow YAML path today), stored verbatim so the
+ * worker can replay it unchanged in a spawned `run` child.
+ */
+export interface RunQueueRecord {
+  id: string;
+  flowId: string;
+  inputs?: Record<string, string>;
+  status: RunQueueStatus;
+  runId?: string;
+  error?: string;
+  worker?: string;
+  enqueuedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+}

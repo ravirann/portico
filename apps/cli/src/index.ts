@@ -15,7 +15,8 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
@@ -23,8 +24,15 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions, sampleInputsFromFlow, deriveTier } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
-import { EnvSecretProvider, resolveSecrets } from "@portico/vault";
+import { defaultSecretProvider, resolveSecrets } from "@portico/vault";
 import { Store } from "@portico/store";
+
+// Repo root, resolved from this file's own location (not process.cwd()) so a
+// `worker` spawning a grandchild `run` process gets a stable cwd regardless of
+// where `portico worker` itself was invoked from. apps/cli/src -> apps/cli ->
+// apps -> repo root is 3 levels up.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const CLI_ENTRY = resolve(REPO_ROOT, "apps/cli/src/index.ts");
 
 interface CliOpts {
   baseUrl?: string;
@@ -56,6 +64,9 @@ interface CliOpts {
   session?: string;
   goal?: string;
   startUrl?: string;
+  status?: string;
+  concurrency?: number;
+  once: boolean;
 }
 
 function parseArgs(argv: string[]) {
@@ -67,7 +78,7 @@ function parseArgs(argv: string[]) {
   let flowPath: string | undefined;
   // Default headless: the engine drives a real browser and most runs are
   // unattended. --headed opts into a visible window (for manual login/HITL).
-  const opts: CliOpts = { headless: true, json: false, live: false, secret: false, allVersions: false, csv: false, inputs: {} };
+  const opts: CliOpts = { headless: true, json: false, live: false, secret: false, allVersions: false, csv: false, once: false, inputs: {} };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--headless") opts.headless = true;
@@ -99,6 +110,9 @@ function parseArgs(argv: string[]) {
     else if (a === "--session") opts.session = rest[++i];
     else if (a === "--goal") opts.goal = rest[++i];
     else if (a === "--start-url") opts.startUrl = rest[++i];
+    else if (a === "--status") opts.status = rest[++i];
+    else if (a === "--concurrency") opts.concurrency = Number(rest[++i]);
+    else if (a === "--once") opts.once = true;
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -304,6 +318,162 @@ async function main() {
         );
       }
     }
+    process.exit(0);
+  }
+
+  // ---- run queue (bounded worker concurrency) ----------------------------
+  // A durable SQLite-backed queue so `worker` can process flow runs with a
+  // bounded number of concurrent children, without a separate broker.
+  // `enqueue` stores whatever `run` itself accepts as its positional arg (a
+  // flow YAML path) verbatim in `flowId`, so the worker can replay it as-is.
+
+  if (cmd === "enqueue") {
+    if (!flowPath) { console.error("usage: portico enqueue <flowId> [--input key=value]... [--json]"); process.exit(2); }
+    const store = new Store();
+    const id = `q_${Math.random().toString(16).slice(2, 10)}`;
+    const inputs = Object.keys(opts.inputs).length ? opts.inputs : undefined;
+    store.enqueueRun({ id, flowId: flowPath, inputs });
+    store.appendAudit({
+      ts: new Date().toISOString(), actor: "worker", action: "queue.enqueued",
+      target: flowPath, detail: { id },
+    });
+    store.close();
+    const out = { id, flowId: flowPath, status: "queued" as const };
+    if (opts.json) return emit(out);
+    console.log(`✔ enqueued "${flowPath}" as ${id} (status: queued)`);
+    process.exit(0);
+  }
+
+  if (cmd === "queue") {
+    const store = new Store();
+    const status = opts.status as "queued" | "running" | "completed" | "failed" | undefined;
+    const limit = opts.limit ?? 50;
+    const rows = store.listQueue({ status, limit });
+    store.close();
+
+    if (opts.json) return emit(rows);
+
+    if (rows.length === 0) {
+      console.log("(queue empty)");
+    } else {
+      console.log(
+        `${"ID".padEnd(12)}  ${"FLOW".padEnd(30)}  ${"STATUS".padEnd(10)}  ${"RUN".padEnd(12)}  ${"ENQUEUED".padEnd(24)}  ERROR`,
+      );
+      for (const r of rows) {
+        console.log(
+          `${r.id.padEnd(12)}  ${r.flowId.slice(0, 30).padEnd(30)}  ${r.status.padEnd(10)}  ${(r.runId ?? "-").padEnd(12)}  ${r.enqueuedAt.padEnd(24)}  ${(r.error ?? "").slice(0, 40)}`,
+        );
+      }
+    }
+    process.exit(0);
+  }
+
+  if (cmd === "worker") {
+    const concurrency = Math.min(8, Math.max(1, opts.concurrency ?? 2));
+    const workerName = `worker_${process.pid}_${Math.random().toString(16).slice(2, 8)}`;
+    const store = new Store();
+    const log = (...a: unknown[]) => { if (!opts.json) console.log(...a); };
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+    // Best-effort human-readable failure reason, truncated so it fits comfortably
+    // in the queue row's TEXT column.
+    function describeFailure(
+      parsed: { status?: string; error?: string; failure?: { reason?: string } } | null,
+      stderr: string,
+      code: number | null,
+    ): string {
+      const reason = parsed?.failure?.reason ?? parsed?.error;
+      const msg = reason || stderr.trim() || (parsed?.status ? `child reported status "${parsed.status}"` : `child exited with code ${code}`);
+      return msg.slice(0, 1000);
+    }
+
+    // Spawn `run <flowId> --headless --json` for one claimed row, mirroring the
+    // console's runCli spawn pattern (node --import tsx <CLI> ...), and record
+    // the row's terminal outcome once the child exits. Defensive about stdout:
+    // a flow run can leak plain log lines ahead of the final JSON payload, so
+    // scan backward for the LAST line that parses as JSON rather than trusting
+    // the very last line blindly.
+    function runQueuedFlow(row: { id: string; flowId: string; inputs?: Record<string, string> }): Promise<"completed" | "failed"> {
+      return new Promise((resolveChild) => {
+        const args = ["--import", "tsx", CLI_ENTRY, "run", row.flowId, "--headless", "--json"];
+        for (const [k, v] of Object.entries(row.inputs ?? {})) args.push("--input", `${k}=${v}`);
+        const child = spawn("node", args, { cwd: REPO_ROOT, env: process.env });
+        let out = "";
+        let err = "";
+        child.stdout.on("data", (d) => (out += d));
+        child.stderr.on("data", (d) => (err += d));
+
+        let settled = false;
+        const finishOnce = (code: number | null, spawnError?: Error) => {
+          if (settled) return;
+          settled = true;
+
+          let parsed: { id?: string; runId?: string; status?: string; error?: string; failure?: { reason?: string } } | null = null;
+          if (!spawnError) {
+            const lines = out.trim().split("\n").filter(Boolean);
+            for (let i = lines.length - 1; i >= 0; i--) {
+              const line = lines[i]!.trim();
+              if (!(line.startsWith("{") || line.startsWith("["))) continue;
+              try { parsed = JSON.parse(line); break; } catch { /* keep scanning backward */ }
+            }
+          }
+          const runId = parsed?.runId ?? parsed?.id;
+          const ok = !spawnError && code === 0 && parsed != null && parsed.status !== "failed";
+
+          if (ok) {
+            store.finishQueued(row.id, { status: "completed", runId });
+            store.appendAudit({
+              ts: new Date().toISOString(), actor: "worker", action: "queue.completed",
+              target: row.flowId, runId, detail: { id: row.id, worker: workerName },
+            });
+            log(`✔ ${row.id} (${row.flowId}) → completed${runId ? ` (run ${runId})` : ""}`);
+          } else {
+            const error = spawnError ? spawnError.message.slice(0, 1000) : describeFailure(parsed, err, code);
+            store.finishQueued(row.id, { status: "failed", runId, error });
+            store.appendAudit({
+              ts: new Date().toISOString(), actor: "worker", action: "queue.failed",
+              target: row.flowId, runId, detail: { id: row.id, worker: workerName, error },
+            });
+            log(`✗ ${row.id} (${row.flowId}) → failed: ${error}`);
+          }
+          resolveChild(ok ? "completed" : "failed");
+        };
+
+        child.on("close", (code) => finishOnce(code));
+        child.on("error", (e) => finishOnce(null, e instanceof Error ? e : new Error(String(e))));
+      });
+    }
+
+    let claimed = 0, completed = 0, failed = 0;
+    const active = new Map<string, Promise<void>>();
+
+    for (;;) {
+      // Claim only when a slot is free — never more concurrent children than `concurrency`.
+      while (active.size < concurrency) {
+        const row = store.claimNextQueued(workerName);
+        if (!row) break;
+        claimed++;
+        log(`▶ claimed ${row.id} (${row.flowId})`);
+        const p = runQueuedFlow(row).then((outcome) => {
+          if (outcome === "completed") completed++; else failed++;
+          active.delete(row.id);
+        });
+        active.set(row.id, p);
+      }
+
+      if (opts.once) {
+        // Testable mode: drain until nothing is queued and nothing is running.
+        if (active.size === 0) break;
+        await Promise.race(active.values());
+        continue;
+      }
+      await sleep(2000);
+    }
+
+    store.close();
+    const summary = { claimed, completed, failed };
+    if (opts.json) return emit(summary);
+    console.log(`worker done — claimed ${claimed}, completed ${completed}, failed ${failed}`);
     process.exit(0);
   }
 
@@ -765,7 +935,8 @@ async function main() {
         "list-flows | get-flow <id> | delete-flow <flowId> [--all-versions] | list-runs | get-run <id> | list-sessions | close-session <id> | " +
         "list-connectors | get-connector <idOrKey> | save-connector | delete-connector <id> | " +
         "config-get | config-set | session-start | session-kill <id> | " +
-        "record-start --session <id> | record-stop <recId> | get-recording <recId> | list-recordings>",
+        "record-start --session <id> | record-stop <recId> | get-recording <recId> | list-recordings | " +
+        "enqueue <flowId> [--input k=v]... | queue [--status S] [--limit N] | worker [--concurrency N] [--once]>",
     );
     process.exit(2);
   }
@@ -808,7 +979,7 @@ async function main() {
 
   const secretRefs: Record<string, string> = instance.secrets ?? {};
   const secrets = Object.keys(secretRefs).length
-    ? await resolveSecrets(new EnvSecretProvider(), secretRefs)
+    ? await resolveSecrets(defaultSecretProvider(), secretRefs)
     : {};
 
   // Activate self-heal / AI-extract from the DB LLM config (Settings) when set —
