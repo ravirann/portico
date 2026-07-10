@@ -193,12 +193,7 @@ export function Shell({
         ))}
 
         <div className="sidebar-foot">
-          {/* One compact row: deployment badge left, theme control right. */}
           <div className="foot-row">
-            <span className="self-host">
-              <span className="pulse" />
-              <span className="self-host-text">Self-hosted · local</span>
-            </span>
             <ThemeSwitcher />
           </div>
           {/* Who-am-I + sign out, one slim row. Only present when the request

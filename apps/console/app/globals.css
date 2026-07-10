@@ -171,10 +171,6 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 .sidebar-foot { margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--line); }
 /* One slim footer row: content left, control right. */
 .foot-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-.sidebar-foot .self-host {
-  display: inline-flex; align-items: center; gap: 7px;
-  font-size: 11.5px; color: var(--ink-3); min-width: 0;
-}
 /* Compact inline segmented control — shares the footer row with the
    deployment badge instead of a full-width block of its own. */
 .theme-switch {
@@ -224,8 +220,6 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   /* the narrow rail: stack the footer row, center what remains */
   .shell.collapsed .foot-row { flex-direction: column; gap: 8px; }
   .shell.collapsed .theme-switch { grid-template-columns: 1fr; }
-  .shell.collapsed .self-host-text { display: none; }
-  .shell.collapsed .self-host { justify-content: center; }
 }
 
 /* ---------- main ---------- */
