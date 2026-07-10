@@ -43,6 +43,7 @@ interface CliOpts {
   category?: string;
   secret: boolean;
   allVersions: boolean;
+  csv: boolean;
   value?: string;
   pid?: number;
   name?: string;
@@ -50,6 +51,7 @@ interface CliOpts {
   auth?: string;
   tenant?: string;
   port?: number;
+  limit?: number;
   yamlFile?: string;
   session?: string;
   goal?: string;
@@ -65,7 +67,7 @@ function parseArgs(argv: string[]) {
   let flowPath: string | undefined;
   // Default headless: the engine drives a real browser and most runs are
   // unattended. --headed opts into a visible window (for manual login/HITL).
-  const opts: CliOpts = { headless: true, json: false, live: false, secret: false, allVersions: false, inputs: {} };
+  const opts: CliOpts = { headless: true, json: false, live: false, secret: false, allVersions: false, csv: false, inputs: {} };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--headless") opts.headless = true;
@@ -74,6 +76,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--json") opts.json = true;
     else if (a === "--secret") opts.secret = true;
     else if (a === "--all-versions") opts.allVersions = true;
+    else if (a === "--csv") opts.csv = true;
     else if (a === "--base-url") opts.baseUrl = rest[++i];
     else if (a === "--instance") opts.instance = rest[++i];
     else if (a === "--profile") opts.profile = rest[++i];
@@ -91,6 +94,7 @@ function parseArgs(argv: string[]) {
     else if (a === "--auth") opts.auth = rest[++i];
     else if (a === "--tenant") opts.tenant = rest[++i];
     else if (a === "--port") opts.port = Number(rest[++i]);
+    else if (a === "--limit") opts.limit = Number(rest[++i]);
     else if (a === "--yaml-file") opts.yamlFile = rest[++i];
     else if (a === "--session") opts.session = rest[++i];
     else if (a === "--goal") opts.goal = rest[++i];
@@ -251,6 +255,55 @@ async function main() {
     store.close();
     if (opts.json) return emit({ id: flowPath, closed: true });
     console.log(`✔ closed session ${flowPath}`);
+    process.exit(0);
+  }
+
+  // ---- audit (read-only export for operators; audit_events stays append-only) --
+
+  if (cmd === "list-audit") {
+    const store = new Store();
+    const limit = opts.limit ?? 100;
+    const rows = store.listAudit({ limit });
+    store.close();
+
+    if (opts.json) return emit(rows);
+
+    if (opts.csv) {
+      const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+      const lines = ["id,ts,actor,action,runId,target,detail"];
+      for (const r of rows) {
+        lines.push(
+          [
+            String(r.id),
+            r.ts,
+            r.actor,
+            r.action,
+            r.runId ?? "",
+            r.target ?? "",
+            r.detail ? JSON.stringify(r.detail) : "",
+          ]
+            .map(esc)
+            .join(","),
+        );
+      }
+      console.log(lines.join("\n"));
+      process.exit(0);
+    }
+
+    // Compact table (default, human-facing).
+    if (rows.length === 0) {
+      console.log("(no audit events)");
+    } else {
+      console.log(
+        `${"TS".padEnd(24)}  ${"ACTOR".padEnd(10)}  ${"ACTION".padEnd(22)}  ${"RUN".padEnd(12)}  ${"TARGET".padEnd(28)}  DETAIL`,
+      );
+      for (const r of rows) {
+        const detail = r.detail ? JSON.stringify(r.detail) : "";
+        console.log(
+          `${r.ts.padEnd(24)}  ${r.actor.padEnd(10)}  ${r.action.padEnd(22)}  ${(r.runId ?? "-").padEnd(12)}  ${(r.target ?? "-").slice(0, 28).padEnd(28)}  ${detail.slice(0, 40)}`,
+        );
+      }
+    }
     process.exit(0);
   }
 

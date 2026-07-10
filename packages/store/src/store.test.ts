@@ -138,6 +138,47 @@ test("audit is append-only: no update/delete surface for audit", () => {
   }
 });
 
+test("appendAudit then listAudit returns newest-first with fields intact", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.appendAudit({
+      ts: "2026-07-08T10:00:00.000Z",
+      actor: "alice",
+      action: "flow.deleted",
+      target: "portal-availability",
+      detail: { versions: 2 },
+    });
+    store.appendAudit({
+      ts: "2026-07-08T10:05:00.000Z",
+      actor: "bob",
+      action: "run.completed",
+      runId: "run-9",
+      target: "https://example.test",
+      detail: { mode: "live" },
+    });
+
+    const rows = store.listAudit();
+    assert.equal(rows.length, 2);
+
+    // newest first
+    assert.equal(rows[0]?.action, "run.completed");
+    assert.equal(rows[1]?.action, "flow.deleted");
+
+    const newest = rows[0]!;
+    assert.equal(typeof newest.id, "number");
+    assert.equal(newest.ts, "2026-07-08T10:05:00.000Z");
+    assert.equal(newest.actor, "bob");
+    assert.equal(newest.runId, "run-9");
+    assert.equal(newest.target, "https://example.test");
+    assert.deepEqual(newest.detail, { mode: "live" });
+
+    assert.equal(store.listAudit({ limit: 1 }).length, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("session save/get round-trips through the base64 cipher and stores ciphertext", () => {
   const { store, dir } = freshStore();
   try {

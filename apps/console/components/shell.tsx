@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings } from "./icons";
+import { IconAudit, IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings } from "./icons";
 import { ConnectorSwitcher } from "./connector-switcher";
 
 type ThemeMode = "dark" | "light" | "system";
@@ -89,6 +89,7 @@ const NAV = [
   { href: "/flows", label: "Flows", Icon: IconFlows },
   { href: "/sessions", label: "Sessions", Icon: IconSessions },
   { href: "/connectors", label: "Connectors", Icon: IconConnectors },
+  { href: "/audit", label: "Audit", Icon: IconAudit },
   { href: "/settings", label: "Settings", Icon: IconSettings },
   { href: "/help", label: "Help", Icon: IconHelp },
 ];

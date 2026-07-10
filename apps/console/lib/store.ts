@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import type { RunView, FlowView, SessionView, ConnectorRecord, ConfigEntry, AuthorJobView } from "./types.js";
+import type { RunView, FlowView, SessionView, ConnectorRecord, ConfigEntry, AuthorJobView, AuditEventView } from "./types.js";
 
 /** Durable run store, read via the CLI (which owns native SQLite) so nothing
  *  native enters the Next bundle. Runs are persisted by the CLI on every run,
@@ -84,4 +84,12 @@ export function readConfig(opts: { scope?: string; category?: "llm" | "variable"
   args.push("--json");
   const r = query(args);
   return Array.isArray(r) ? (r as ConfigEntry[]) : [];
+}
+
+/** Recent audit events, read via the CLI (newest first). Audit is append-only
+ *  in the store — this is a read-only export for operators; there is no write
+ *  path from the console. */
+export function readAudit(limit = 100): AuditEventView[] {
+  const r = query(["list-audit", "--json", "--limit", String(limit)]);
+  return Array.isArray(r) ? (r as AuditEventView[]) : [];
 }

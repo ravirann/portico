@@ -120,3 +120,17 @@ export interface AuthorJobView {
   /** Progress timeline (bundled by author-job-get). */
   events?: AuthorJobEvent[];
 }
+
+/** An append-only audit record, as the console sees it (read via the CLI).
+ *  Mirrors packages/store/src/types.ts `StoredAuditEvent` — audit is
+ *  write-once, so there is no update/delete path, only appendAudit/listAudit
+ *  in the store and readAudit here. */
+export interface AuditEventView {
+  id: number;
+  ts: string; // ISO
+  actor: string;
+  action: string;
+  runId?: string;
+  target?: string;
+  detail?: Record<string, unknown>;
+}

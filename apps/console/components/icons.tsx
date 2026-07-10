@@ -47,3 +47,6 @@ export const IconHelp = (p: P) => (
 export const IconLayers = (p: P) => (
   <svg {...base} className={p.className}><path d="M8 2 2 5l6 3 6-3-6-3z" /><path d="M2 8l6 3 6-3" opacity="0.55" /><path d="M2 11l6 3 6-3" opacity="0.35" /></svg>
 );
+export const IconAudit = (p: P) => (
+  <svg {...base} className={p.className}><rect x="3" y="2" width="8.5" height="12" rx="1.2" /><path d="M5.2 5.2h4.1M5.2 7.6h4.1M5.2 10h2.3" /><path d="M10.5 11.5l1.3 1.3 2.5-2.8" /></svg>
+);
