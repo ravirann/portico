@@ -189,3 +189,56 @@ test("extractToken prefers the Authorization bearer header over the cookie", () 
   assert.equal(extractToken({ authorization: null, cookie: null }), null);
   assert.equal(extractToken({ authorization: "Basic xyz", cookie: "def456" }), "def456"); // non-Bearer scheme falls back to cookie
 });
+
+// --- DB-backed members: new always-allowed routes + admin-only /api/members ---
+// (middleware.ts resolves a portico_session cookie to a {role, name} and
+// bridges it into decide() as an ephemeral single-entry RbacConfig — from
+// this module's point of view that's just another token match, so no new
+// decide()-level test is needed for the session path itself; session.ts and
+// the live E2E cover that. What's new HERE is the path classification below.)
+
+test("/api/auth/login, /api/auth/logout, and /api/auth/status are always allowed, on or off, with no token", () => {
+  for (const config of [OFF, ON]) {
+    for (const path of ["/api/auth/login", "/api/auth/logout", "/api/auth/status"]) {
+      const result = decide({ path, method: "POST", token: null, config });
+      assert.equal(result.allow, true, `${path} should always be allowed`);
+    }
+  }
+});
+
+test("/api/members/bootstrap is always allowed, on or off, with no token (the route re-checks count===0 itself)", () => {
+  for (const config of [OFF, ON]) {
+    const result = decide({ path: "/api/members/bootstrap", method: "POST", token: null, config });
+    assert.equal(result.allow, true);
+  }
+});
+
+test("requiredRole classifies /api/members (add) and /api/members/[id]/disable|enable as admin-only, any method", () => {
+  assert.equal(requiredRole("/api/members", "POST"), "admin");
+  assert.equal(requiredRole("/api/members", "GET"), "admin"); // all methods, not just writes
+  assert.equal(requiredRole("/api/members/mem_abc123/disable", "POST"), "admin");
+  assert.equal(requiredRole("/api/members/mem_abc123/enable", "POST"), "admin");
+});
+
+test("requiredRole does NOT classify /api/members/bootstrap as admin-only (it's always-allowed instead, never reaches requiredRole in practice)", () => {
+  assert.equal(requiredRole("/api/members/bootstrap", "POST"), "operator", "excluded from isMembersApiRoute on purpose — see isAlwaysAllowedPath");
+});
+
+test("viewer/operator get 403 from the mutating /api/members API; admin gets through", () => {
+  const viewerAttempt = decide({ path: "/api/members", method: "POST", token: "tok_viewer_1", config: ON });
+  assert.equal(viewerAttempt.allow, false);
+  assert.equal(viewerAttempt.status, 403);
+
+  const operatorAttempt = decide({ path: "/api/members/mem_1/disable", method: "POST", token: "tok_operator_1", config: ON });
+  assert.equal(operatorAttempt.allow, false);
+  assert.equal(operatorAttempt.status, 403);
+
+  assert.equal(decide({ path: "/api/members", method: "POST", token: "tok_admin_1", config: ON }).allow, true);
+  assert.equal(decide({ path: "/api/members/mem_1/enable", method: "POST", token: "tok_admin_1", config: ON }).allow, true);
+});
+
+test("an unauthenticated request to the mutating /api/members API gets 401, not a redirect (it's an API path)", () => {
+  const result = decide({ path: "/api/members", method: "POST", token: null, config: ON });
+  assert.equal(result.allow, false);
+  assert.equal(result.status, 401);
+});

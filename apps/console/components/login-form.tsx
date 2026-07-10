@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 
 const fieldStyle: React.CSSProperties = {
   width: "100%",
@@ -23,29 +23,25 @@ const labelStyle: React.CSSProperties = {
 };
 
 /**
- * Minimal token-entry form for opt-in RBAC (see docs/DEPLOY.md, "RBAC
- * (optional)"). On submit this writes the `portico_token` cookie
- * client-side — there's no server-side login route — and sends the
- * browser to `/`; middleware re-checks the token on that next request and
- * bounces back to /login if it doesn't resolve to a role.
+ * Token-entry form for the console's sign-in (see docs/DEPLOY.md, "Members
+ * & access control"). Submits to POST /api/auth/login, which verifies the
+ * token — an env static token or a DB member token — and mints the signed,
+ * httpOnly `portico_session` cookie server-side. On success the browser is
+ * sent to `/` with a FULL navigation (not router.push) so the very next
+ * request middleware sees definitely carries the fresh cookie.
  *
- * The cookie is NOT httpOnly: nothing sets it server-side, so a script on
- * the page could in principle read it back. Accepted trade-off for a
- * minimal, backend-free login flow on a local, self-hosted console.
- *
- * Supports a `?token=` query param — the Members page's invite links
+ * Supports a `?token=` query param — the Members section's invite links
  * (components/members-manager.tsx) are `/login?token=...` — to prefill the
  * field. It only prefills: the human still has to click Continue, so
  * pre-fetching or merely opening the link can't sign anyone in by itself.
  */
 function LoginFormFields() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [token, setToken] = useState(() => searchParams.get("token") ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     const trimmed = token.trim();
     if (!trimmed) {
@@ -54,8 +50,23 @@ function LoginFormFields() {
     }
     setBusy(true);
     setError(null);
-    document.cookie = `portico_token=${encodeURIComponent(trimmed)}; path=/; samesite=lax`;
-    router.push("/");
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: trimmed }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok || data.error) {
+        setError(data.error ?? "Sign-in failed.");
+        setBusy(false);
+        return;
+      }
+      window.location.href = "/";
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false);
+    }
   }
 
   return (

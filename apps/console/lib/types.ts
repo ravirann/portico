@@ -134,3 +134,18 @@ export interface AuditEventView {
   target?: string;
   detail?: Record<string, unknown>;
 }
+
+/** A durable auth principal (console login / API bearer-token holder), as
+ *  the console sees it (read via `member-list --json`). Mirrors
+ *  packages/store/src/types.ts `MemberRecord` field-for-field — deliberately
+ *  has NO token/tokenHash field; the CLI never emits one in member-list, and
+ *  the raw token is only ever returned once, by `member-add`, as a separate
+ *  ad hoc shape (`{id, name, role, token}`) that isn't this view. */
+export interface MemberView {
+  id: string;
+  name: string;
+  role: "viewer" | "operator" | "admin";
+  disabled: boolean;
+  createdAt: string; // ISO
+  lastLoginAt?: string; // ISO
+}

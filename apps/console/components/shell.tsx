@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { IconAudit, IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings, IconUsers } from "./icons";
+import { IconAudit, IconConnectors, IconDash, IconFlows, IconHelp, IconRuns, IconSessions, IconSettings } from "./icons";
 import { ConnectorSwitcher } from "./connector-switcher";
 import { SignOutButton } from "./sign-out-button";
 
@@ -97,6 +97,8 @@ interface NavItem {
   adminOnly?: boolean;
 }
 
+// Members management lives on the Settings page (its "Members" section) —
+// no separate nav entry; /members redirects there for old links.
 const NAV: NavItem[] = [
   { href: "/", label: "Overview", Icon: IconDash, exact: true },
   { href: "/runs", label: "Runs", Icon: IconRuns },
@@ -104,7 +106,6 @@ const NAV: NavItem[] = [
   { href: "/sessions", label: "Sessions", Icon: IconSessions },
   { href: "/connectors", label: "Connectors", Icon: IconConnectors },
   { href: "/audit", label: "Audit", Icon: IconAudit },
-  { href: "/members", label: "Members", Icon: IconUsers, adminOnly: true },
   { href: "/settings", label: "Settings", Icon: IconSettings },
   { href: "/help", label: "Help", Icon: IconHelp },
 ];
@@ -192,34 +193,33 @@ export function Shell({
         ))}
 
         <div className="sidebar-foot">
-          <ThemeSwitcher />
-          <span className="self-host">
-            <span className="pulse" />
-            <span className="self-host-text">Self-hosted · local</span>
-          </span>
-          {/* Who-am-I + sign out. Only ever present when RBAC is on and the
-              request carried a valid token (see app/layout.tsx); absent
-              entirely otherwise, so this is zero visual change for the
-              common RBAC-off, single-user setup. Hidden while the rail is
-              collapsed — the name + role chip + button have no room in a
-              64px rail — rather than trying to truncate them further. */}
+          {/* One compact row: deployment badge left, theme control right. */}
+          <div className="foot-row">
+            <span className="self-host">
+              <span className="pulse" />
+              <span className="self-host-text">Self-hosted · local</span>
+            </span>
+            <ThemeSwitcher />
+          </div>
+          {/* Who-am-I + sign out, one slim row. Only present when the request
+              carried a valid identity (see app/layout.tsx); absent entirely
+              otherwise — zero visual change for the open single-user setup.
+              Hidden while the rail is collapsed (no room in a 64px rail). */}
           {!collapsed && user && role && (
-            <div
-              style={{
-                marginTop: 12,
-                paddingTop: 12,
-                borderTop: "1px solid var(--line)",
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            <div className="foot-row" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
+              <span
+                title={`${user} (${role})`}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 7,
+                  overflow: "hidden",
+                }}
+              >
                 <span
-                  className="mono"
-                  title={user}
                   style={{
-                    flex: 1,
                     minWidth: 0,
                     fontSize: 12.5,
                     fontWeight: 600,
@@ -231,8 +231,8 @@ export function Shell({
                 >
                   {user}
                 </span>
-                <span className="chip">{role}</span>
-              </div>
+                <span className="chip" style={{ flexShrink: 0 }}>{role}</span>
+              </span>
               <SignOutButton />
             </div>
           )}

@@ -2,23 +2,40 @@
  * Pure RBAC decision logic for the console — no Next.js imports, so this
  * loads and runs fine under `node --import tsx --test` without a Next
  * runtime (see rbac.test.ts). `middleware.ts` is a thin, Next-aware adapter
- * over `parseTokens` + `extractToken` + `decide` + `resolveIdentity`.
+ * over `parseTokens` + `extractToken` + `decide` + `resolveIdentity` for env
+ * static tokens, PLUS a `portico_session` cookie check (lib/session.ts) for
+ * DB-backed members — this module has no idea sessions/members exist at
+ * all. Middleware bridges a verified session's {role, name} into `decide()`
+ * by building a one-entry, request-scoped `RbacConfig` around it (see
+ * middleware.ts) — from this module's point of view that's indistinguishable
+ * from a normal env-token match, which is deliberate: it means everything
+ * below (role ranking, the admin-only surface, 401 vs 403 vs redirect) is
+ * shared by both auth sources without this file knowing which one it is.
  *
- * Design (user-facing version lives in docs/DEPLOY.md, "RBAC (optional)"):
- *  - Off by default. RBAC only turns on when PORTICO_RBAC_TOKENS is a
- *    non-empty string — deliberately independent of whether any individual
- *    entry in it turns out to be valid, so a typo'd token can never
- *    silently reopen the console. When off, every request is allowed,
- *    identical to today's behavior.
+ * Design (user-facing version lives in docs/DEPLOY.md, "Members & access
+ * control"):
+ *  - `enabled` here reflects ONLY PORTICO_RBAC_TOKENS (non-empty string) —
+ *    deliberately independent of whether any individual entry in it turns
+ *    out to be valid, so a typo'd token can never silently reopen the
+ *    console. Middleware ORs this with a second, DB-backed signal ("does
+ *    any member row exist?") before calling `decide()` — see
+ *    middleware.ts's `dbMembersEnabled` — so this module's `enabled` is
+ *    necessarily a partial view of whether enforcement is actually on.
+ *    When neither is true, every request is allowed (today's fully-open
+ *    default for a fresh, unconfigured console).
  *  - Roles rank viewer < operator < admin. viewer covers every GET/HEAD —
  *    all pages, all read APIs. operator adds mutations except the
  *    admin-only surface below. admin can do everything.
  *  - Admin-only: any method on /api/config (the Settings page's backing
  *    route — there is no literal /api/settings path in this app; see
  *    isSettingsApiRoute), any mutation (non-GET/HEAD) under /api/connectors*,
- *    DELETE /api/flows/[id] (the flow-delete route), and the /members page
- *    (see isMembersPage) — the env-backed member-management helper at
- *    app/members/page.tsx.
+ *    DELETE /api/flows/[id] (the flow-delete route), the /members page (see
+ *    isMembersPage), and the mutating /api/members* routes (see
+ *    isMembersApiRoute) — add/disable/enable a member.
+ *  - Always allowed, no token needed, `enabled` or not: /login, the session
+ *    login/logout/status API routes, and the one-time bootstrap route (see
+ *    isAlwaysAllowedPath) — a signed-out visitor has nothing else to
+ *    authenticate a request to any of those WITH.
  *  - Named tokens: each entry is `role:token` (name defaults to the role
  *    string, e.g. plain "admin") or `role:name:token` (explicit display
  *    name, e.g. "operator:ravi:tok123"). Both shapes coexist in the same
@@ -163,11 +180,28 @@ function normalizePath(path: string): string {
   return path;
 }
 
-/** Reachable with no token, RBAC on or off: the login page itself, and
+/** Reachable with no token, RBAC on or off: the login page itself, the
+ *  session login/logout/status API routes (a signed-out visitor has nothing
+ *  else to authenticate a request to them WITH), the one-time bootstrap
+ *  route (guards itself — see app/api/members/bootstrap/route.ts), and
  *  framework/static assets a page (including /login) needs to render. */
 function isAlwaysAllowedPath(path: string): boolean {
   return (
     path === "/login" ||
+    path === "/api/auth/login" ||
+    path === "/api/auth/logout" ||
+    // Middleware's own probe for "should enforcement be on" (DB members
+    // exist?) — see middleware.ts dbMembersEnabled. Reports only a boolean,
+    // never member details, so leaving it reachable pre-login is safe (see
+    // app/api/auth/status/route.ts) and is in fact the whole point: it has
+    // to answer BEFORE we know whether to require a login at all.
+    path === "/api/auth/status" ||
+    // Creates the FIRST admin member — by definition there is no admin yet
+    // to gate this behind. The route is its own guard: it re-checks the
+    // member count itself before minting anything (see
+    // app/api/members/bootstrap/route.ts) rather than relying on middleware
+    // to only reach here when count===0.
+    path === "/api/members/bootstrap" ||
     path.startsWith("/_next/") ||
     path === "/favicon.ico" ||
     path.startsWith("/brand/") // public/brand/* — logo & favicon files the Shell renders on every page
@@ -204,13 +238,25 @@ function isFlowDeleteRoute(path: string, method: string): boolean {
 }
 
 /**
- * app/members/page.tsx — the env-backed helper for managing
- * PORTICO_RBAC_TOKENS (builds add/invite/revoke lines to copy elsewhere; no
- * server mutations). Admin-only on every method, same reasoning as the
- * settings route: it's the one page that surfaces every member's token.
+ * app/members/page.tsx — DB-backed member management (add/disable/enable;
+ * see components/members-manager.tsx). Admin-only on every method, same
+ * reasoning as the settings route: it's the one page that can mint a new
+ * bearer token or lock out an existing member.
  */
 function isMembersPage(path: string): boolean {
   return path === "/members" || path.startsWith("/members/");
+}
+
+/**
+ * The mutating members API — app/api/members/route.ts (add),
+ * app/api/members/[id]/disable|enable/route.ts. Admin-only on every method,
+ * same reasoning as isMembersPage. Deliberately EXCLUDES
+ * /api/members/bootstrap (see isAlwaysAllowedPath above) — that route exists
+ * precisely for when there is no admin yet, so it can't require one; it
+ * guards itself instead.
+ */
+function isMembersApiRoute(path: string): boolean {
+  return (path === "/api/members" || path.startsWith("/api/members/")) && !path.startsWith("/api/members/bootstrap");
 }
 
 /** Minimum role required to perform `method` on `path`. Exported for
@@ -223,6 +269,7 @@ export function requiredRole(path: string, rawMethod: string): Role {
   if (isFlowDeleteRoute(path, method)) return "admin";
   if (isConnectorsApiRoute(path) && !isRead) return "admin";
   if (isMembersPage(path)) return "admin";
+  if (isMembersApiRoute(path)) return "admin";
   return isRead ? "viewer" : "operator";
 }
 

@@ -2,19 +2,22 @@
 
 /**
  * Sidebar "Sign out" control (rendered inside components/shell.tsx's
- * signed-in block). There's no server-side session — RBAC only ever reads
- * the `portico_token` cookie (see lib/rbac.ts extractToken / the login flow
- * in components/login-form.tsx) — so signing out is just clearing that
- * cookie and sending the browser to /login. A full navigation, not
- * router.push/refresh: that guarantees the very next request middleware
- * sees carries no cookie at all, rather than racing a client-side
- * transition against the cookie write.
+ * signed-in block). POSTs /api/auth/logout to expire the httpOnly
+ * `portico_session` cookie server-side, also clears the legacy client-set
+ * `portico_token` cookie (env static-token logins), then does a FULL
+ * navigation to /login — not router.push — so the very next request
+ * middleware sees carries no credentials at all.
  *
- * This does not revoke the token itself (see docs/DEPLOY.md, "Managing
- * members") — only the browser's copy of it.
+ * This does not revoke the member's token itself (see docs/DEPLOY.md,
+ * "Members & access control") — only this browser's session.
  */
 export function SignOutButton() {
-  function signOut() {
+  async function signOut() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      /* cookie clear below still runs; middleware re-checks on navigation */
+    }
     document.cookie = "portico_token=; path=/; max-age=0; samesite=lax";
     window.location.href = "/login";
   }
@@ -23,7 +26,7 @@ export function SignOutButton() {
     <button
       type="button"
       className="btn"
-      style={{ width: "100%", justifyContent: "center", padding: "6px 10px", fontSize: 12 }}
+      style={{ padding: "4px 10px", fontSize: 11.5 }}
       onClick={signOut}
     >
       Sign out

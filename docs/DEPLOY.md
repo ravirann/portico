@@ -93,116 +93,66 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 The volume (and everything in it) is untouched by a rebuild.
 
-## RBAC (optional)
+## Members & access control (optional)
 
 The console is open by default — no login, no roles — which is right for
-the common case of one person running this on their own machine. Set
-`PORTICO_RBAC_TOKENS` to turn on role-gated access instead; leave it unset
-(or empty) and nothing changes: same fully-open console as today, so
-existing single-user setups are unaffected.
+the common case of one person on their own machine. Access control turns
+on **by itself the moment the first member exists**, and everything about
+membership is managed from the console: no env editing, no restarts.
 
-```bash
-# Anywhere the console process reads its environment — e.g. deploy/.env for
-# Docker Compose (copy deploy/.env.example to deploy/.env first):
-PORTICO_RBAC_TOKENS=admin:tok_change_me_a1,operator:tok_change_me_o1,viewer:tok_change_me_v1
-```
+The only prerequisite is a signing secret for session cookies:
+`PORTICO_AUTH_SECRET`, or (the common case) the `PORTICO_ENCRYPTION_KEY`
+you already set — sign-in refuses to mint sessions if neither is present.
 
-For Compose specifically: add that line to `deploy/.env`, then add a
-`PORTICO_RBAC_TOKENS: ${PORTICO_RBAC_TOKENS:-}` entry to the `console`
-service's `environment:` block in `deploy/docker-compose.yml` (alongside
-`PORTICO_ENCRYPTION_KEY` and the other passthrough vars) so it actually
-reaches the container.
+### The lifecycle, end to end
 
-Format: comma-separated `role:token` pairs, or `role:name:token` to also
-give that entry a display name (shown in the sidebar and on the Members
-page) — the name defaults to the role string when omitted, so existing
-`role:token` entries don't need to change. Repeat a role for multiple
-tokens (`viewer:tok_a,viewer:tok_b`). Tokens are opaque strings — generate
-one with `openssl rand -hex 24` or similar, or let the Members page (see
-"Managing members" below) generate one for you. Tokens under 8 characters
-are rejected: the console logs a warning to stderr at startup and drops
-that one entry; the rest of the list still loads.
+1. **Bootstrap** — open **Settings → Members** on a fresh console and
+   "Create the first admin". You get a token, shown exactly once. From
+   that moment the console requires sign-in (allow up to ~10s for the
+   enforcement probe's cache).
+2. **Sign in** — `/login`, paste the token (or follow an invite link,
+   which prefills it). The server verifies it against the members table
+   and sets a signed, `httpOnly` `portico_session` cookie
+   (`PORTICO_SESSION_TTL_HOURS`, default 12).
+3. **Add / invite members** — Settings → Members → Add: name + role. The
+   new member's token appears once, with a `/login?token=…` invite link to
+   share over a private channel. Raw tokens are never stored (only a
+   hash) and can never be shown again — if one is lost, disable that
+   member and add them again.
+4. **Disable / enable** — per-row on the same page. Disabling blocks the
+   member's **next sign-in**; an already-minted session stays valid until
+   its expiry — worst-case revocation lag equals the session TTL.
+5. **Sign out** — the sidebar's signed-in row; expires the session cookie
+   server-side.
 
 ### Roles
 
 - **viewer** — read-only: every page, every `GET`/`HEAD` API route.
-- **operator** — viewer, plus the everyday mutations: starting sessions and
-  recordings, creating/saving/validating/confirming/refining flows,
-  kicking off runs.
-- **admin** — everything, including the routes `operator` cannot reach:
-  - `/api/config`, any method — the Settings page's backing route (global
-    LLM provider/model/API key). There's no literal `/api/settings` path in
-    this app; `/api/config` is what the Settings page posts to, so it's
-    treated as the settings-equivalent route and is admin-only end to end,
-    not just for writes.
-  - any mutation (`POST`/`PUT`/`PATCH`/`DELETE`) under `/api/connectors*` —
-    creating a connector, deleting one, saving its variables. Reading
-    connector data (`GET`) stays available to `viewer`.
-  - `DELETE /api/flows/[id]` — deleting a flow version (or every version of
-    its key).
-  - the **Members** page (`/members`) — the helper for managing
-    `PORTICO_RBAC_TOKENS` itself (see "Managing members" below). A
-    signed-in `viewer`/`operator` who navigates there is redirected to `/`,
-    not `/login` — they're already authenticated, just not admin.
+- **operator** — viewer, plus everyday mutations: sessions, recordings,
+  creating/saving/validating/confirming flows, runs.
+- **admin** — everything, including what `operator` cannot reach:
+  `/api/config` (Settings' backing route, any method), mutations under
+  `/api/connectors*`, `DELETE /api/flows/[id]`, and member management
+  (`/api/members*`). A signed-in non-admin who navigates to a management
+  page is sent to `/`, not `/login` — they're authenticated, just not
+  admin.
 
-### Presenting a token
+Denials: missing/invalid credentials → `401` JSON on `/api/*`, redirect to
+`/login` for pages. Valid identity, insufficient role → `403` JSON on
+`/api/*`. `/login`, the auth routes (`/api/auth/*`, `/api/members/bootstrap`
+— which self-guards on "zero members"), and static assets are always
+reachable.
 
-Two ways to authenticate a request: an `Authorization: Bearer <token>`
-header, or a `portico_token` cookie.
+### Static env tokens (scripts / CI / docker fallback)
 
-`/login` is the cookie path — paste a token, it's written to
-`document.cookie` client-side, and you're redirected to `/`. **That cookie
-is intentionally not `httpOnly`**: nothing sets it server-side, so in
-principle a script on the page could read it back. That's an accepted
-trade-off for a minimal, backend-free login flow on a local, self-hosted
-console — it's not the trade-off you'd want if you ever exposed this
-pattern to the open internet. `SameSite=Lax` limits cross-site sending.
-Sign out from the sidebar's signed-in block (bottom of the sidebar, shown
-whenever RBAC is on and you're signed in) — it clears the `portico_token`
-cookie and sends you back to `/login`. You can also just clear the cookie
-yourself (devtools, or an incognito window); either way, the token itself
-stays valid until it's removed from `PORTICO_RBAC_TOKENS` and the console
-restarts (see "Managing members" below).
-
-A missing or unrecognized token gets `401` JSON (`{"error": "..."}`) from
-`/api/*` routes, and a redirect to `/login` from page navigations. A
-*recognized* token with insufficient role gets `403` JSON from `/api/*`
-routes, and — for the one page this currently applies to, `/members` — a
-redirect to `/` rather than `/login` (see the Members bullet above; an
-already-signed-in user bouncing to `/login` would just re-present the same
-token and land right back where they started). `/login` itself, and
-framework/static assets (`_next/*`, `favicon.ico`, `/brand/*`), are always
-reachable, RBAC on or off.
-
-### Managing members
-
-Add members from the console itself: sign in as an admin and open
-**Members** (`/members`). It reads the current `PORTICO_RBAC_TOKENS` value
-and helps you build the next one — there's still no user database; the
-page is a helper over that one environment variable, and every change it
-produces still has to be pasted into your env and followed by a restart.
-
-- **Add a member** — enter a name and pick a role; the page generates a
-  token in your browser (nothing is sent anywhere) and shows you the full
-  updated `PORTICO_RBAC_TOKENS` line to copy, plus a `/login?token=...`
-  invite link that prefills (but doesn't submit) the login form. Share the
-  invite link over a private channel — it's as sensitive as the token
-  itself.
-- **Revoke a member** — the Members page's per-row "Revoke" control shows
-  you `PORTICO_RBAC_TOKENS` with that entry already stripped out, ready to
-  copy. There's no session to invalidate server-side, so the token keeps
-  working until you paste the new value in and restart.
-- **By hand** — the Members page is optional; `PORTICO_RBAC_TOKENS` is
-  just a plain comma-separated string, so you can always add, rename, or
-  remove entries directly.
-- **Named tokens** — entries can be `role:token` (as above) or
-  `role:name:token`, e.g. `operator:ravi:tok_change_me_o1`. The name is a
-  display label only (sidebar, Members table); omit it and it defaults to
-  the role.
-- **Every change requires a restart.** Middleware reads
-  `PORTICO_RBAC_TOKENS` once at process start — adding, renaming, or
-  revoking a member never takes effect until the console process restarts
-  with the new value.
+`PORTICO_RBAC_TOKENS` still works and is checked *before* the members
+table — useful for headless automation that sends
+`Authorization: Bearer <token>` per request, or for a fully
+env-provisioned container. Format: comma-separated `role:token` or
+`role:name:token` entries (name defaults to the role; tokens under 8 chars
+are dropped with a warning). Env-token changes require a restart — that's
+the trade-off that motivated DB members. When both are configured, the
+Members section shows a small banner listing the active env identities.
 
 ### The CLI is out of scope
 
