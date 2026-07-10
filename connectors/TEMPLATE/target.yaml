@@ -1,0 +1,13 @@
+# TEMPLATE connector — copy this whole directory to start a new connector for
+# an authenticated portal (e.g. `cp -r connectors/TEMPLATE connectors/acme-portal`),
+# then rename the fields below and point `auth` at your login flow's key.
+# A specific deployment is an instance override under instances/ (not included
+# in this template — see connectors/example-portal/instances/example.yaml for
+# the shape; keep real hosts/credentials out of git).
+key: template-connector        # rename: unique id for this connector
+name: Template Connector        # rename: human-readable name
+framework: template-connector   # rename: instances on the same framework share heals
+base_url: "{{instance.base_url}}"
+allowed_domains:                # hard network-egress boundary at run time
+  - "{{instance.host}}"
+auth: login                     # reusable, 2FA-aware auth subflow (flows/login.flow.yaml)

@@ -1,0 +1,33 @@
+# Reusable, 2FA-aware auth subflow — the generic shape every connector needs,
+# referenced by `auth:` in ../target.yaml.
+# First run: HITL 2FA once → trusted session persisted. Later runs skip auth.
+#
+# This is a TEMPLATE: the locators, condition names, and labels below are
+# generic placeholders, not captured from a real portal. Replace them with the
+# ones from your own record-by-demonstration session (see ../README.md and
+# docs/ARCHITECTURE.md §3, "Authoring: demonstration → deterministic flow").
+key: login
+version: 1
+description: Log into the portal; handle 2FA once and persist the trusted session.
+steps:
+  - type: navigate
+    url: "{{base_url}}"
+  - type: act
+    label: Enter username
+    value: "{{secrets.username}}"      # injected at runtime, redacted in traces
+    locator: { semantic: { role: textbox, name: "Username", intent: "the username field" } }
+  - type: act
+    label: Enter password
+    value: "{{secrets.password}}"
+    locator: { semantic: { role: textbox, name: "Password", intent: "the password field" } }
+  - type: act
+    label: Submit login
+    locator: { semantic: { role: button, name: "Sign In", intent: "the sign-in button" } }
+  # 2FA branch: authenticator-app → totp step; otherwise HITL once.
+  - type: human
+    label: Complete 2FA if challenged
+    condition: two_factor_challenge_present
+  - type: assert
+    label: Logged in
+    condition: dashboard_visible
+# On success the engine persists the trusted-device session back to the vault.
