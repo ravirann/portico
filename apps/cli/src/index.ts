@@ -1083,7 +1083,21 @@ async function main() {
   const instance = opts.instance ? (parseYaml(readFileSync(opts.instance, "utf8")) as Record<string, any>) : {};
   const instanceName = (instance.instance as string | undefined) ?? undefined;
 
-  const baseUrl: string = opts.baseUrl ?? instance.base_url ?? "";
+  let baseUrl: string = opts.baseUrl ?? instance.base_url ?? "";
+  // No explicit --base-url / instance: fall back to the connector's stored one
+  // (console-created connectors keep it in the DB — the console passes
+  // --connector when it spawns runs). The runner needs a base URL to establish
+  // the app origin before flows that OPEN with localStorage reads / api calls,
+  // otherwise those steps execute on about:blank and storage access is denied.
+  if (!baseUrl && connectorKey) {
+    try {
+      const s = new Store();
+      baseUrl = s.getConnector(connectorKey)?.baseUrl ?? "";
+      s.close();
+    } catch {
+      /* store unavailable — the runner can still infer an origin from the flow */
+    }
+  }
   const host = instance.host ?? (baseUrl ? new URL(baseUrl).host : "");
   const target: Target = {
     key: flow.key,

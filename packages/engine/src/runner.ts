@@ -161,14 +161,19 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
     // localStorage auth reads — establish the app origin first.
     const NON_PAGE_STEPS = new Set(["intercept", "guard", "human", "resolve", "select", "wait"]);
     const firstPageStep = plan.slice(start).find((s) => !NON_PAGE_STEPS.has(s.type));
-    if (firstPageStep && firstPageStep.type !== "navigate" && target.base_url) {
+    // Prefer the target's base_url; when the run has none (e.g. a CLI run whose
+    // connector row lacks one), fall back to the origin the flow's own step URLs
+    // point at — localStorage and cookies are origin-scoped, so opening the
+    // origin root is enough for the reads/api calls that follow.
+    const startNavUrl = target.base_url || inferStartOrigin(flow.steps) || "";
+    if (firstPageStep && firstPageStep.type !== "navigate" && startNavUrl) {
       try {
-        await rawPage.goto(target.base_url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await rawPage.goto(startNavUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
         await waitForDomQuiet(rawPage, { quietMs: 500, timeoutMs: 8000 });
       } catch (err) {
         const startedAt = now();
         const reason = scrub(
-          `start navigation to ${target.base_url} failed before step ${firstPageStep.index} could run: ` +
+          `start navigation to ${startNavUrl} failed before step ${firstPageStep.index} could run: ` +
             (err instanceof Error ? err.message : String(err)),
         );
         const trace: StepTrace = {
@@ -293,6 +298,29 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
   } finally {
     await closeSession();
   }
+}
+
+/**
+ * Best-effort start origin for a flow that never navigates before touching the
+ * page: the origin of the first absolute http(s) URL any of its steps declares
+ * (an api block or a navigate/deep-link url). Origins carrying an unrendered
+ * template ({{host}}) are skipped — they can't be opened literally. Exported
+ * for unit tests.
+ */
+export function inferStartOrigin(steps: Flow["steps"]): string | undefined {
+  for (const s of steps) {
+    const api = (s as unknown as { api?: { url?: string } }).api;
+    for (const raw of [api?.url, (s as { url?: string }).url]) {
+      if (typeof raw !== "string" || !/^https?:\/\//i.test(raw)) continue;
+      try {
+        const origin = new URL(raw).origin;
+        if (!origin.includes("{")) return origin;
+      } catch {
+        /* malformed — keep scanning */
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
