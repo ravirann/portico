@@ -92,3 +92,76 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 The volume (and everything in it) is untouched by a rebuild.
+
+## RBAC (optional)
+
+The console is open by default — no login, no roles — which is right for
+the common case of one person running this on their own machine. Set
+`PORTICO_RBAC_TOKENS` to turn on role-gated access instead; leave it unset
+(or empty) and nothing changes: same fully-open console as today, so
+existing single-user setups are unaffected.
+
+```bash
+# Anywhere the console process reads its environment — e.g. deploy/.env for
+# Docker Compose (copy deploy/.env.example to deploy/.env first):
+PORTICO_RBAC_TOKENS=admin:tok_change_me_a1,operator:tok_change_me_o1,viewer:tok_change_me_v1
+```
+
+For Compose specifically: add that line to `deploy/.env`, then add a
+`PORTICO_RBAC_TOKENS: ${PORTICO_RBAC_TOKENS:-}` entry to the `console`
+service's `environment:` block in `deploy/docker-compose.yml` (alongside
+`PORTICO_ENCRYPTION_KEY` and the other passthrough vars) so it actually
+reaches the container.
+
+Format: comma-separated `role:token` pairs. Repeat a role for multiple
+tokens (`viewer:tok_a,viewer:tok_b`). Tokens are opaque strings — generate
+one with `openssl rand -hex 24` or similar. Tokens under 8 characters are
+rejected: the console logs a warning to stderr at startup and drops that
+one entry; the rest of the list still loads.
+
+### Roles
+
+- **viewer** — read-only: every page, every `GET`/`HEAD` API route.
+- **operator** — viewer, plus the everyday mutations: starting sessions and
+  recordings, creating/saving/validating/confirming/refining flows,
+  kicking off runs.
+- **admin** — everything, including the routes `operator` cannot reach:
+  - `/api/config`, any method — the Settings page's backing route (global
+    LLM provider/model/API key). There's no literal `/api/settings` path in
+    this app; `/api/config` is what the Settings page posts to, so it's
+    treated as the settings-equivalent route and is admin-only end to end,
+    not just for writes.
+  - any mutation (`POST`/`PUT`/`PATCH`/`DELETE`) under `/api/connectors*` —
+    creating a connector, deleting one, saving its variables. Reading
+    connector data (`GET`) stays available to `viewer`.
+  - `DELETE /api/flows/[id]` — deleting a flow version (or every version of
+    its key).
+
+### Presenting a token
+
+Two ways to authenticate a request: an `Authorization: Bearer <token>`
+header, or a `portico_token` cookie.
+
+`/login` is the cookie path — paste a token, it's written to
+`document.cookie` client-side, and you're redirected to `/`. **That cookie
+is intentionally not `httpOnly`**: nothing sets it server-side, so in
+principle a script on the page could read it back. That's an accepted
+trade-off for a minimal, backend-free login flow on a local, self-hosted
+console — it's not the trade-off you'd want if you ever exposed this
+pattern to the open internet. `SameSite=Lax` limits cross-site sending.
+There's no logout button; clear the `portico_token` cookie yourself
+(devtools, or an incognito window) to sign out.
+
+A missing, invalid, or wrong-role token gets: `401`/`403` JSON
+(`{"error": "..."}`) from `/api/*` routes, and a redirect to `/login` from
+page navigations. `/login` itself, and framework/static assets
+(`_next/*`, `favicon.ico`, `/brand/*`), are always reachable, RBAC on or
+off.
+
+### The CLI is out of scope
+
+RBAC here only gates the console's HTTP surface (`apps/console/middleware.ts`).
+The `portico` CLI talks to the local SQLite store directly — if you can run
+the CLI on this machine, you already have shell access, which is a
+strictly stronger position than "holds an admin token." Local shell access
+is treated as equivalent to admin; there's no separate CLI-level gate.

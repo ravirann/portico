@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "test": "node --import tsx --test packages/**/*.test.ts"
+    "test": "node --import tsx --test packages/**/*.test.ts apps/console/lib/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
