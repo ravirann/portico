@@ -1,0 +1,48 @@
+# Portico self-host — one command, one container, nothing external.
+#
+#   cp deploy/.env.example deploy/.env   # fill in PORTICO_ENCRYPTION_KEY (+ optional LLM keys)
+#   docker compose -f deploy/docker-compose.yml up -d
+#   open http://localhost:4400
+#
+# See docs/DEPLOY.md for the full guide.
+
+services:
+  console:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: portico-console:local
+    ports:
+      - "4400:4400"
+    environment:
+      # Encrypts session storage-state (cookies/local-storage that skip
+      # login/2FA on replay) at rest with AES-256-GCM — see
+      # packages/store/src/crypto.ts. Falls back to a base64 *encoding* (NOT
+      # encryption, loudly warned in the logs) when unset or under 16 chars.
+      PORTICO_ENCRYPTION_KEY: ${PORTICO_ENCRYPTION_KEY:-}
+      # Optional: self-heal / AI extraction tier (off the hot path of a
+      # promoted flow). PORTICO_HEAL_API_KEY falls back to ANTHROPIC_API_KEY
+      # or OPENAI_API_KEY depending on PORTICO_HEAL_PROVIDER — see
+      # packages/engine/src/model.ts.
+      PORTICO_HEAL_PROVIDER: ${PORTICO_HEAL_PROVIDER:-}
+      PORTICO_HEAL_MODEL: ${PORTICO_HEAL_MODEL:-}
+      PORTICO_HEAL_API_KEY: ${PORTICO_HEAL_API_KEY:-}
+      # Optional: agent authoring ("author by demonstration" in the console)
+      # uses Stagehand, which reads OPENAI_API_KEY directly.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      # Everything Portico persists — SQLite store (runs/steps/sessions/
+      # flows/audit) + run artifacts — lives under /app/data (see
+      # packages/store/src/store.ts's DEFAULT_DB_PATH). Named volume so it
+      # survives image rebuilds/recreates; nothing else is stateful.
+      - portico-data:/app/data
+    # Playwright's own Docker guidance: avoid Chromium crashing under the
+    # default 64MB /dev/shm, and reap zombie child processes since Chromium's
+    # multi-process model assumes a real init as PID 1.
+    ipc: host
+    init: true
+    restart: unless-stopped
+
+volumes:
+  portico-data:
