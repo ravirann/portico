@@ -85,6 +85,7 @@ interface FlowRow {
   status: string;
   source: string;
   connector: string | null;
+  provenance_json: string | null;
   created_at: string;
 }
 
@@ -361,7 +362,9 @@ export class Store {
 
   // ---- flows --------------------------------------------------------------
 
-  /** Insert a new flow version (self-serve portal). */
+  /** Insert a new flow version (self-serve portal). `provenance` (model/prompt-
+   *  version/author-version) is optional — set by the author CLI for authored
+   *  flows so their authorship is reproducible. */
   saveFlow(f: {
     id: string;
     key: string;
@@ -370,12 +373,13 @@ export class Store {
     status: "draft" | "confirmed";
     source: "recorded" | "manual" | "llm" | "authored";
     connector?: string;
+    provenance?: { provider?: string; model?: string; promptVersion?: number; authorVersion?: string } | null;
     createdAt: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO flows (id, key, version, yaml, status, source, connector, created_at)
-         VALUES (@id, @key, @version, @yaml, @status, @source, @connector, @created_at)`,
+        `INSERT INTO flows (id, key, version, yaml, status, source, connector, provenance_json, created_at)
+         VALUES (@id, @key, @version, @yaml, @status, @source, @connector, @provenance_json, @created_at)`,
       )
       .run({
         id: f.id,
@@ -385,6 +389,7 @@ export class Store {
         status: f.status,
         source: f.source,
         connector: f.connector ?? null,
+        provenance_json: f.provenance ? JSON.stringify(f.provenance) : null,
         created_at: f.createdAt,
       });
   }
@@ -494,6 +499,14 @@ export class Store {
       createdAt: row.created_at,
     };
     if (row.connector != null) flow.connector = row.connector;
+    if (row.provenance_json != null) {
+      // Tolerate malformed JSON (never crash a read over diagnostic metadata).
+      try {
+        flow.provenance = JSON.parse(row.provenance_json) as FlowRecord["provenance"];
+      } catch {
+        flow.provenance = null;
+      }
+    }
     return flow;
   }
 

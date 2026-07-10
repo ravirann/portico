@@ -13,6 +13,7 @@ import { createRequire } from "module";
 import { resolve } from "node:path";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { authorFlow } from "./src/index.ts";
+import { PROMPT_VERSION } from "./src/rewrite.ts";
 
 const require = createRequire(resolve("apps/cli") + "/");
 const { Store } = require(resolve("packages/store/dist/index.js"));
@@ -79,6 +80,7 @@ if (jobId) {
 const pick = (k) => store.getConfigValue(connector ?? "", "llm", k) || store.getConfigValue("global", "llm", k);
 const provider = pick("provider") || "openai";
 const modelName = pick("model") || "gpt-5.5";
+const authorVersion = require(resolve("packages/author/package.json")).version;
 const apiKey = process.env.OPENAI_API_KEY || pick("api_key") || "";
 // A key that decrypts to non-ASCII means PORTICO_ENCRYPTION_KEY is missing/wrong.
 if (!apiKey || [...apiKey].some((c) => c.charCodeAt(0) > 126)) {
@@ -144,6 +146,7 @@ store.saveFlow({
   status: "draft",
   source: "authored",
   connector: connector || undefined,
+  provenance: { provider, model: modelName, promptVersion: PROMPT_VERSION, authorVersion },
   createdAt: new Date().toISOString(),
 });
 logEvent("Done — draft ready to review.");

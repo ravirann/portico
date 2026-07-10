@@ -97,6 +97,15 @@ export interface FlowRecord {
   status: FlowStatus;
   source: FlowSource;
   connector?: string;
+  /** Which model authored this flow version (authored source only): provider,
+   *  model name, rewrite-prompt version, and author-CLI version — kept so an
+   *  authored flow's exact authorship is reproducible later. */
+  provenance?: {
+    provider?: string;
+    model?: string;
+    promptVersion?: number;
+    authorVersion?: string;
+  } | null;
   createdAt: string;
 }
 

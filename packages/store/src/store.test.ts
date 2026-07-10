@@ -209,6 +209,41 @@ test("saveFlow then getFlow round-trips all fields", () => {
   }
 });
 
+test("saveFlow provenance round-trips through getFlow; flows saved without it have none", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveFlow({
+      id: "flow-prov-1",
+      key: "portal-availability",
+      version: 1,
+      yaml: "steps: []",
+      status: "draft",
+      source: "authored",
+      provenance: { provider: "openai", model: "gpt-5.5", promptVersion: 1, authorVersion: "0.0.0" },
+      createdAt: "2026-07-08T10:00:00.000Z",
+    });
+    const got = store.getFlow("flow-prov-1");
+    assert.ok(got);
+    assert.deepEqual(got.provenance, { provider: "openai", model: "gpt-5.5", promptVersion: 1, authorVersion: "0.0.0" });
+
+    store.saveFlow({
+      id: "flow-no-prov",
+      key: "portal-availability",
+      version: 2,
+      yaml: "steps: []",
+      status: "draft",
+      source: "recorded",
+      createdAt: "2026-07-08T11:00:00.000Z",
+    });
+    const noProv = store.getFlow("flow-no-prov");
+    assert.ok(noProv);
+    assert.equal(noProv.provenance, undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("listFlowVersions returns versions newest-first for a key", () => {
   const { store, dir } = freshStore();
   try {

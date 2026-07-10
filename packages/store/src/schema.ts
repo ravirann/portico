@@ -205,6 +205,15 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_author_job_events_job ON author_job_events(job_id, id);
     `,
   },
+  {
+    // Provenance for authored flows — which LLM (provider/model), rewrite-
+    // prompt version, and author-CLI version produced a given flow version,
+    // so a flow's authorship is reproducible after the fact.
+    version: 9,
+    sql: `
+      ALTER TABLE flows ADD COLUMN provenance_json TEXT;
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

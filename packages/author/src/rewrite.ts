@@ -42,6 +42,10 @@ export interface GoalPlan {
   rawGoal: string;
 }
 
+/** Bump whenever SYSTEM (the rewrite prompt below) changes materially — recorded
+ *  in each authored flow's provenance for reproducibility. */
+export const PROMPT_VERSION = 1;
+
 const SYSTEM = [
   "You are a planning assistant for a browser-automation authoring tool.",
   "A user gives a short goal for a task to perform on a web portal. Your job is",
