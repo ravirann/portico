@@ -769,6 +769,50 @@ const CLICK_CAPTURE_SCRIPT = `(() => {
 })();`;
 
 /**
+ * Leading navigation-chrome the agent clicks to re-orient itself — "Back",
+ * "Home", "Back to the home page" — before the run's first real SOP click.
+ * Deliberately narrow: only back/return/home phrasing, so a real control that
+ * happens to be named "Menu" (or anything else) never matches.
+ */
+const HOME_OR_BACK_LABEL_RE =
+  /^\s*(go\s+)?(back|return)(\s+to\b.*)?$|^\s*(back\s+to\s+)?(the\s+)?home(\s*page)?\s*$/i;
+
+/** Same origin+pathname (ignoring query/hash); false — never a match — if
+ *  either side fails to parse as a URL. */
+function sameRoute(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    return ua.origin === ub.origin && ua.pathname === ub.pathname;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Drop the leading detour: the agent sometimes starts a run with a "Back"/
+ * "Home" chrome click that lands back on the very page the compiled flow's
+ * first step already navigates to — redundant at best, and a brittle `act`
+ * step at worst (that chrome resolves differently across runs/portals). Only
+ * strips a click while BOTH its label reads as back/home chrome AND its
+ * captured URL resolves to `baseUrl`'s origin+pathname (query/hash ignored) —
+ * so a same-named control that lands somewhere else, or that any parse
+ * failure, is left alone. Repeats from the front, so it only ever removes a
+ * contiguous leading run and never touches "Menu" or anything mid-sequence.
+ */
+export function canonicalizeRoute(clicks: ClickEvent[], baseUrl: string): { clicks: ClickEvent[]; dropped: number } {
+  let i = 0;
+  while (i < clicks.length) {
+    const c = clicks[i]!;
+    const label = (c.ariaLabel ?? c.text ?? c.name ?? "").toString().trim();
+    if (!HOME_OR_BACK_LABEL_RE.test(label) || !sameRoute(c.url, baseUrl)) break;
+    i++;
+  }
+  return { clicks: clicks.slice(i), dropped: i };
+}
+
+/**
  * A real, replayable control's accessible name is CONCISE. When a click resolves
  * to a big container (or a dashboard notification card), its captured label is a
  * long blob of concatenated inner text — not something a semantic locator can
@@ -778,10 +822,38 @@ const CLICK_CAPTURE_SCRIPT = `(() => {
 const MAX_CONTROL_LABEL = 72;
 
 /**
+ * A REAL interactive control's accessible name can legitimately exceed
+ * MAX_CONTROL_LABEL when it's an option/location card whose name folds in an
+ * address or other detail (e.g. a location-picker card). That's still safe to
+ * freeze as a click IF the element carries an explicit interactive role/tag —
+ * the click hook resolved to the actual control, not a container it merely sat
+ * inside. Above this ceiling, even an explicitly interactive element's name is
+ * long enough to be suspect (or too brittle to match on replay) and is dropped
+ * like any other blob.
+ */
+const MAX_INTERACTIVE_CONTROL_LABEL = 140;
+
+/** Roles/tags that mark a click as an explicit, real interactive control —
+ *  as opposed to a role-less container or landmark the hook happened to
+ *  resolve the click to (a `<div>`, a `<main id="main">`, …). */
+const INTERACTIVE_ROLES = new Set(["button", "link", "tab", "option", "radio", "menuitem"]);
+const INTERACTIVE_TAGS = new Set(["BUTTON", "A"]);
+
+function isExplicitlyInteractive(c: ClickEvent): boolean {
+  return INTERACTIVE_ROLES.has((c.role ?? "").toLowerCase()) || INTERACTIVE_TAGS.has((c.tag ?? "").toUpperCase());
+}
+
+/**
  * Keep only the captured clicks that are real, replayable SOP interactions:
  * a concise accessible name, and not a sign-in step. Drops container/notification
  * blobs (over-long labels) and login clicks — the noise that would make a frozen
  * `act` step fail on replay. Order-preserving.
+ *
+ * A label over MAX_CONTROL_LABEL is still kept when it's under
+ * MAX_INTERACTIVE_CONTROL_LABEL AND the click is explicitly interactive (see
+ * isExplicitlyInteractive) — the location-card case: a legitimately long
+ * accessible name on a real `role="button"`/`<a>` control, not a role-less
+ * container blob (those stay dropped regardless of role/tag).
  *
  * NOTE: "Continue" is deliberately NOT treated as a login token — it is a common
  * page-advancing control inside authenticated scheduling wizards ("Continue to
@@ -792,7 +864,10 @@ const MAX_CONTROL_LABEL = 72;
 export function replayableClicks(clicks: ClickEvent[]): ClickEvent[] {
   return clicks.filter((c) => {
     const label = (c.ariaLabel ?? c.text ?? c.name ?? c.testid ?? "").toString().trim();
-    if (!label || label.length > MAX_CONTROL_LABEL) return false;
+    if (!label) return false;
+    const withinDefault = label.length <= MAX_CONTROL_LABEL;
+    const withinInteractive = label.length <= MAX_INTERACTIVE_CONTROL_LABEL && isExplicitlyInteractive(c);
+    if (!withinDefault && !withinInteractive) return false;
     return !/\b(log ?in|sign ?in|password|username|passkey)\b/i.test(label);
   });
 }
@@ -1105,10 +1180,16 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
       log(opts, `agent action stream present (${agentActions.length}) but not correlated — using DOM-hook clicks`);
     }
     const replaySource = reconcile.usedAgentStream ? reconcile.steps : clicks;
+    // Drop a redundant leading "Back"/"Home" detour back to the page the
+    // compiled flow's first step already navigates to (see canonicalizeRoute).
+    const canon = canonicalizeRoute(replaySource, replayBaseUrl);
+    if (canon.dropped > 0) {
+      log(opts, `canonicalized route: dropped ${canon.dropped} redundant navigation click(s) back to the start page`);
+    }
     // Filter noise, then STOP at the first dynamic date/time selection: the slot
     // the agent clicked ("Monday …") won't exist next run, so the flow replays
     // the deterministic path to the slot screen and harvests the slots there.
-    const { clicks: replay, truncated } = stopAtEphemeralSlot(replayableClicks(replaySource));
+    const { clicks: replay, truncated } = stopAtEphemeralSlot(replayableClicks(canon.clicks));
     if (truncated) {
       log(opts, "reached the dynamic time-slot screen — stopping the deterministic replay there and harvesting the available slots (a specific past date is never frozen as a click)");
     }

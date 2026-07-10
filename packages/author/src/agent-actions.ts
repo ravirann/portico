@@ -101,7 +101,13 @@ export function extractAgentActions(raw: readonly unknown[] | undefined): AgentA
     const args = Array.isArray(pw?.arguments) ? (pw!.arguments as unknown[]) : [];
     const value = str(args[0]);
     // Prefer the element description (what it IS) over the imperative instruction.
-    const label = str(pw?.description) ?? str(a.action) ?? str(a.instruction) ?? str(a.reasoning) ?? "";
+    // A hybrid-mode coordinate click/tap has no playwrightArguments at all (no
+    // resolved selector, no xpath) — Stagehand instead describes the target
+    // under one of several field names, so widen the lookup for just that case.
+    const label =
+      !pw && (type === "click" || type === "tap")
+        ? str(a.describe) ?? str(a.description) ?? str(a.elementDescription) ?? str(a.action) ?? str(a.instruction) ?? str(a.reasoning) ?? ""
+        : str(pw?.description) ?? str(a.action) ?? str(a.instruction) ?? str(a.reasoning) ?? "";
     if (!label && !xpath) return;
 
     out.push({ index: i, type, kind: kindOf(method, type), label, xpath: xpath || undefined, method, value });

@@ -43,6 +43,31 @@ test("extractAgentActions tolerates a missing/loose action array", () => {
   assert.deepEqual(extractAgentActions([null, 3, "x", {}]), []);
 });
 
+test("extractAgentActions labels a hybrid coordinate click/tap (no playwrightArguments) from describe/description/elementDescription", () => {
+  const raw = [
+    { type: "click", describe: "the second location card", coordinates: [120, 340] },
+    { type: "tap", description: "the confirm button", coordinates: [80, 500] },
+    { type: "click", elementDescription: "the third result row", coordinates: [10, 20] },
+  ];
+  const got = extractAgentActions(raw);
+  assert.equal(got.length, 3);
+  assert.equal(got[0]!.label, "the second location card");
+  assert.equal(got[0]!.kind, "click");
+  assert.equal(got[0]!.xpath, undefined);
+  assert.equal(got[1]!.label, "the confirm button"); // "tap" falls back past the missing describe
+  assert.equal(got[1]!.kind, "click"); // tap is a click-kind interaction
+  assert.equal(got[2]!.label, "the third result row"); // falls back past missing describe/description
+});
+
+test("extractAgentActions prefers describe over description/action/instruction/reasoning, in that order, for a hybrid click", () => {
+  const got = extractAgentActions([
+    { type: "click", describe: "PRIMARY", description: "secondary", action: "tertiary", instruction: "quaternary", reasoning: "quinary" },
+  ]);
+  assert.equal(got[0]!.label, "PRIMARY");
+  const got2 = extractAgentActions([{ type: "click", action: "tertiary", instruction: "quaternary", reasoning: "quinary" }]);
+  assert.equal(got2[0]!.label, "tertiary");
+});
+
 test("reconcile drops dashboard/notification noise the agent never clicked (the real URMC bug)", () => {
   // Hook captured 5 clicks; 3 are noise (a phone-verify card, a security banner,
   // a container blob) the agent never intended. The agent stream has the 3 real

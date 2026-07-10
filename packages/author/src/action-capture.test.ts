@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { compileRecording, type ClickEvent, type Recording } from "@portico/flow-spec";
-import { replayableClicks, isEphemeralSlotLabel, stopAtEphemeralSlot } from "./index.js";
+import { replayableClicks, isEphemeralSlotLabel, stopAtEphemeralSlot, canonicalizeRoute } from "./index.js";
 
 test("isEphemeralSlotLabel flags dates/weekdays/times, not real controls", () => {
   for (const l of ["Monday", "October 12", "8:00 AM", "3:30pm", "3/15", "3/15/2026", "Oct 12", "Monday, October 12, 2026"]) {
@@ -54,6 +54,44 @@ test("stopAtEphemeralSlot leaves a date-free sequence intact", () => {
   assert.equal(kept.length, 2);
 });
 
+test("canonicalizeRoute drops a leading back/home click that returns to the flow's start page, but stops at Menu", () => {
+  const baseUrl = "https://portal.example.com/app/Home";
+  const clicks: ClickEvent[] = [
+    // Same origin+pathname as baseUrl (query differs — must still match).
+    { text: "Back to the home page", url: "https://portal.example.com/app/Home?tab=1" },
+    { text: "Menu", url: "https://portal.example.com/app/Home" }, // not back/home chrome — must survive
+    { text: "Schedule an Appointment", role: "button", url: "https://portal.example.com/app/Home" },
+  ];
+  const { clicks: kept, dropped } = canonicalizeRoute(clicks, baseUrl);
+  assert.equal(dropped, 1);
+  assert.deepEqual(kept.map((c) => c.text), ["Menu", "Schedule an Appointment"]);
+});
+
+test("canonicalizeRoute does NOT drop a back/home click whose url is a DIFFERENT page", () => {
+  const baseUrl = "https://portal.example.com/app/Home";
+  const clicks: ClickEvent[] = [
+    // Label matches "back", but it fired on a different page than baseUrl — must survive.
+    { text: "Back", url: "https://portal.example.com/app/Claims/4305" },
+    { text: "Schedule an Appointment", role: "button", url: "https://portal.example.com/app/Home" },
+  ];
+  const { clicks: kept, dropped } = canonicalizeRoute(clicks, baseUrl);
+  assert.equal(dropped, 0);
+  assert.deepEqual(kept.map((c) => c.text), ["Back", "Schedule an Appointment"]);
+});
+
+test("canonicalizeRoute never drops mid-sequence — stops at the first non-matching click", () => {
+  const baseUrl = "https://portal.example.com/app/Home";
+  const clicks: ClickEvent[] = [
+    { text: "Schedule an Appointment", role: "button", url: "https://portal.example.com/app/Home" },
+    // Would match the back/home pattern AND the URL — but it's not leading, so it must be left alone.
+    { text: "Home", url: "https://portal.example.com/app/Home" },
+    { text: "Primary Care", role: "button", url: "https://portal.example.com/app/Scheduling" },
+  ];
+  const { clicks: kept, dropped } = canonicalizeRoute(clicks, baseUrl);
+  assert.equal(dropped, 0);
+  assert.equal(kept.length, 3);
+});
+
 test("replayableClicks keeps concise controls (incl. Continue), drops login/blank clicks", () => {
   const clicks: ClickEvent[] = [
     { text: "MyChart Username", name: "Login", url: "u" }, // login field → excluded
@@ -84,6 +122,26 @@ test("replayableClicks drops container / notification blobs (the real URMC noise
     replayableClicks(clicks).map((c) => c.text),
     ["Schedule an Appointment", "Primary Care Includes adult, pediatric, and geriatric care"],
   );
+});
+
+test("replayableClicks keeps a long (73–140 char) label ONLY when the click is explicitly interactive", () => {
+  // A real option/location card: an explicit role="button" control whose accessible
+  // name folds in an address, well over MAX_CONTROL_LABEL but under the extended ceiling.
+  const cardLabel = "Example Family Clinic option, 500 Example Parkway, Suite 210, Springfield, open weekdays";
+  assert.ok(cardLabel.length > 72 && cardLabel.length <= 140, "fixture must exercise the extended range");
+  const clicks: ClickEvent[] = [
+    { text: cardLabel, role: "button", url: "u" }, // explicit interactive role → KEPT
+    { text: cardLabel, url: "u" }, // same text, role-less container mis-capture → still DROPPED
+  ];
+  const kept = replayableClicks(clicks);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0]!.role, "button");
+});
+
+test("replayableClicks respects the 140-char ceiling even for explicit interactive controls", () => {
+  const tooLong = "Example option label ".repeat(7).trim(); // > 140 chars
+  assert.ok(tooLong.length > 140);
+  assert.equal(replayableClicks([{ text: tooLong, role: "button", url: "u" }]).length, 0);
 });
 
 test("a single (or zero) interaction does NOT trigger action-replay", () => {
