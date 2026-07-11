@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { resolveSectorProfile } from "@portico/flow-spec";
-import { compileAgentRun, writeReplayability, UnreplayableWriteError, type CapturedRequest } from "./index.js";
+import { compileAgentRun, writeReplayability, registrableDomain, UnreplayableWriteError, type CapturedRequest } from "./index.js";
 
 // ---------------------------------------------------------------------------
 // writeReplayability — the pure classifier
@@ -44,7 +44,7 @@ test("writeReplayability: a same-origin write with a templated auth header is re
   assert.deepEqual(result.distinctForeignHosts, []);
 });
 
-test("writeReplayability: a Gmail-shaped storm of 3 foreign hosts with frozen SAPISIDHASH/xsrf literals is entirely unreplayable", () => {
+test("writeReplayability: a Gmail-shaped storm of 3 *.google.com hosts with frozen SAPISIDHASH/xsrf literals is entirely unreplayable", () => {
   const result = writeReplayability(
     [
       {
@@ -76,9 +76,14 @@ test("writeReplayability: a Gmail-shaped storm of 3 foreign hosts with frozen SA
   );
   assert.equal(result.unreplayable.length, 3);
   assert.equal(result.reliable.length, 0);
-  assert.ok(result.distinctForeignHosts.length >= 2, `expected 2+ foreign hosts, got ${result.distinctForeignHosts.length}`);
+  // These hosts share the registrable domain google.com with mail.google.com, so
+  // SITE-level cross-origin does NOT fire — the FROZEN CREDENTIAL is what refuses
+  // every one of them (that's the whole discriminator: a naive eTLD+1 switch
+  // would wave them through). distinctForeignHosts still lists the exact
+  // subdomains, since the caller names them in the error and counts them.
+  assert.ok(result.unreplayable.every((u) => u.reason === "frozen_credential"), "same-site *.google.com hosts are caught by their single-use credential, not by cross-origin");
+  assert.ok(result.distinctForeignHosts.length >= 2, `expected 2+ distinct foreign subdomains, got ${result.distinctForeignHosts.length}`);
   assert.deepEqual(result.distinctForeignHosts, ["clients6.google.com", "peoplestack-pa.clients6.google.com", "taskassist-pa.clients6.google.com"].sort());
-  assert.ok(result.unreplayable.every((u) => u.reason === "cross_origin"), "a foreign host is decisive on its own, regardless of its also-frozen credential");
 });
 
 test("writeReplayability: frozen vs runtime-resolved — literal SAPISIDHASH is frozen_credential, the same shape templated as {{token}} is not", () => {
@@ -123,6 +128,143 @@ test("writeReplayability: a gsessionid querystring param counts as frozen_creden
   assert.equal(result.unreplayable.length, 1);
   assert.equal(result.unreplayable[0]?.reason, "frozen_credential");
   assert.equal(result.reliable.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// registrableDomain — the eTLD+1 "same site" boundary the guard now keys on
+// ---------------------------------------------------------------------------
+
+test("registrableDomain: subdomains collapse to eTLD+1; IPs and short hosts pass through", () => {
+  // Same-company split: UI and API share the registrable domain.
+  assert.equal(registrableDomain("app.vendor.com"), "vendor.com");
+  assert.equal(registrableDomain("api.vendor.com"), "vendor.com");
+  // Gmail's foreign API hosts share google.com with mail.google.com — which is
+  // exactly why eTLD+1 alone can't tell them apart from a legit split.
+  assert.equal(registrableDomain("mail.google.com"), "google.com");
+  assert.equal(registrableDomain("peoplestack-pa.clients6.google.com"), "google.com");
+  // Multi-label public suffix: co.uk needs three labels to reach the registrable domain.
+  assert.equal(registrableDomain("portal.acme.co.uk"), "acme.co.uk");
+  assert.equal(registrableDomain("api.acme.co.uk"), "acme.co.uk");
+  // Truly different companies do NOT collapse together.
+  assert.notEqual(registrableDomain("ops.example.com"), registrableDomain("partner-sync.example-partner.com"));
+  // No registrable-domain concept: return as-is.
+  assert.equal(registrableDomain("1.2.3.4"), "1.2.3.4");
+  assert.equal(registrableDomain("localhost"), "localhost");
+  assert.equal(registrableDomain("Vendor.COM."), "vendor.com"); // lowercased, trailing dot stripped
+});
+
+// ---------------------------------------------------------------------------
+// Same-company UI/API subdomain split — the false-positive the redesign fixes
+// ---------------------------------------------------------------------------
+
+test("writeReplayability: a same-company UI/API subdomain split with runtime-resolved auth is reliable (not cross_origin)", () => {
+  const result = writeReplayability(
+    [
+      {
+        method: "PUT",
+        url: "https://api.vendor.com/v2/records/4821",
+        pathname: "/v2/records/4821",
+        resourceType: "fetch",
+        postData: JSON.stringify({ status: "closed" }),
+        headers: { authorization: "Bearer {{user_token}}", "content-type": "application/json" },
+      },
+    ],
+    "app.vendor.com", // the UI host; the API lives on api.vendor.com — same registrable domain
+  );
+  assert.equal(result.reliable.length, 1);
+  assert.equal(result.unreplayable.length, 0);
+  assert.deepEqual(result.distinctForeignHosts, []); // a reliable same-company host is never a "foreign storm" host
+});
+
+test("writeReplayability: a same-company split under a multi-label suffix (co.uk) is same-site", () => {
+  const result = writeReplayability(
+    [
+      {
+        method: "POST",
+        url: "https://api.acme.co.uk/v1/tickets",
+        pathname: "/v1/tickets",
+        resourceType: "fetch",
+        headers: { authorization: "Bearer {{token}}" },
+      },
+    ],
+    "portal.acme.co.uk",
+  );
+  assert.equal(result.reliable.length, 1);
+  assert.equal(result.unreplayable.length, 0);
+});
+
+test("writeReplayability: a same-site subdomain split does NOT excuse a FROZEN credential", () => {
+  // The split passes ONLY when auth is runtime-resolvable. A raw literal token on
+  // the sibling subdomain is still refused — by frozen_credential, not cross_origin.
+  const result = writeReplayability(
+    [
+      {
+        method: "PUT",
+        url: "https://api.vendor.com/v2/records/4821",
+        pathname: "/v2/records/4821",
+        resourceType: "fetch",
+        headers: { authorization: "Bearer raw.literal.jwt.not.templated" },
+      },
+    ],
+    "app.vendor.com",
+    "either",
+  );
+  assert.equal(result.reliable.length, 0);
+  assert.equal(result.unreplayable.length, 1);
+  assert.equal(result.unreplayable[0]?.reason, "frozen_credential");
+});
+
+// ---------------------------------------------------------------------------
+// cookie-session reconciliation — NAME-based check suppressed, VALUE never is
+// ---------------------------------------------------------------------------
+
+test("writeReplayability: outside cookie-session, a literal Bearer credential header is frozen by NAME", () => {
+  const result = writeReplayability(
+    [
+      {
+        method: "POST",
+        url: "https://portal.acme.com/api/save",
+        pathname: "/api/save",
+        resourceType: "fetch",
+        headers: { authorization: "Bearer eyJhbGciOiJ.some.literal.jwt" }, // no {{…}} — discovery didn't explain it
+      },
+    ],
+    "portal.acme.com",
+    "either",
+  );
+  assert.equal(result.unreplayable.length, 1);
+  assert.equal(result.unreplayable[0]?.reason, "frozen_credential");
+});
+
+test("writeReplayability: a cookie-session app exempts a NAME-only credential header but NEVER a SAPISIDHASH value", () => {
+  const result = writeReplayability(
+    [
+      {
+        // A literal Bearer on the app's own host: for a cookie-session app the
+        // cookie is the real auth, so this header is cookie-redundant — reliable.
+        method: "POST",
+        url: "https://portal.acme.com/api/save",
+        pathname: "/api/save",
+        resourceType: "fetch",
+        headers: { authorization: "Bearer eyJhbGciOiJ.some.literal.jwt", "content-type": "application/json" },
+      },
+      {
+        // A genuine single-use SAPISIDHASH is unreplayable however the app authenticates.
+        method: "POST",
+        url: "https://portal.acme.com/api/other",
+        pathname: "/api/other",
+        resourceType: "fetch",
+        headers: { authorization: "SAPISIDHASH 1700000000_deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" },
+      },
+    ],
+    "portal.acme.com",
+    "cookie-session",
+  );
+  assert.equal(result.reliable.length, 1);
+  assert.equal(result.reliable[0]?.pathname, "/api/save"); // Bearer JWT exempted for cookie-session
+  assert.equal(result.unreplayable.length, 1);
+  assert.equal(result.unreplayable[0]?.reason, "frozen_credential");
+  assert.equal(result.unreplayable[0]?.req.pathname, "/api/other"); // SAPISIDHASH still caught by VALUE
 });
 
 // ---------------------------------------------------------------------------
@@ -211,6 +353,51 @@ test("compileAgentRun does NOT throw on a pulse-like single same-origin template
   // Genuinely reliable, not just "didn't happen to throw" — the auth header was
   // resolved to a fresh runtime read, exactly the shape the guard must pass.
   assert.equal(write.api.headers.authorization, "Bearer {{user_token}}");
+});
+
+test("compileAgentRun compiles a same-company UI/API subdomain split when auth resolves at runtime", () => {
+  // The regression this redesign fixes: the UI (app.vendor.com) drives its API
+  // on api.vendor.com — a legitimate same-company split. Exact-hostname
+  // cross-origin used to classify this single write cross_origin, leaving
+  // reliable.length === 0, and the guard wrongly refused it. Now it's same-site
+  // (registrable domain vendor.com) and its bearer auth resolves to a runtime
+  // {{user_token}} read, so it compiles.
+  const goal = "update record 4821 and set its status to closed";
+  const requests: CapturedRequest[] = [
+    {
+      method: "PUT",
+      url: "https://api.vendor.com/v2/records/4821",
+      pathname: "/v2/records/4821",
+      resourceType: "fetch",
+      postData: JSON.stringify({ status: "closed" }),
+      headers: { authorization: "Bearer LIVE_TOKEN", "content-type": "application/json" },
+    },
+  ];
+  const ls = { userToken: "LIVE_TOKEN" };
+  const profile = resolveSectorProfile("saas_ops"); // localStorage auth — discovery can template the bearer
+
+  let flow: ReturnType<typeof compileAgentRun> | undefined;
+  assert.doesNotThrow(() => {
+    flow = compileAgentRun(
+      goal,
+      "https://app.vendor.com/records/4821", // appHost is the UI subdomain
+      [],
+      "vendor-update",
+      requests,
+      new Map(),
+      ls,
+      [{ name: "record_id", value: "4821", description: "record id" }],
+      "update",
+      profile,
+    );
+  });
+  const write = flow!.steps.find((s) => (s as unknown as { api?: { method?: string } }).api?.method === "PUT") as unknown as {
+    api: { headers: Record<string, string>; url: string };
+  };
+  // Reliable for the right reason: the cross-subdomain host was accepted AND its
+  // auth was resolved to a fresh runtime read — not merely "didn't throw".
+  assert.equal(write.api.headers.authorization, "Bearer {{user_token}}");
+  assert.ok(write.api.url.startsWith("https://api.vendor.com/"), `write should still target the API subdomain, got ${write.api.url}`);
 });
 
 test("compileAgentRun does not fail the whole run over a single foreign call alongside a real same-origin write", () => {

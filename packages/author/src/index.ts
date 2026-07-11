@@ -571,36 +571,103 @@ const FROZEN_TOKEN_VALUE_RE = /SAPISID(1P|3P)?HASH/;
 const GSESSIONID_QUERY_RE = /[?&]gsessionid=/i;
 
 /**
+ * Multi-label public suffixes (eTLDs) that need THREE labels, not two, to reach
+ * the registrable domain — so a same-company subdomain split under one of them
+ * (portal.acme.co.uk vs api.acme.co.uk → acme.co.uk) is still seen as same-site.
+ *
+ * This is a PRAGMATIC subset of the Public Suffix List, not the whole thing: the
+ * author package deliberately carries no runtime deps of its own (see the module
+ * header), and getting the high-frequency ccTLD second-levels right is exactly
+ * what keeps the same-company case from being misread as cross-origin. An
+ * omitted obscure suffix only risks a rare FALSE cross-origin, which then falls
+ * to the frozen-credential check below rather than silently passing a bad write.
+ */
+const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
+  "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "ac.uk", "gov.uk", "nhs.uk",
+  "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+  "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "co.kr", "or.kr", "ne.kr", "go.kr",
+  "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in", "gov.in", "ac.in", "edu.in", "res.in",
+  "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
+  "com.br", "net.br", "org.br", "gov.br",
+  "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+  "com.mx", "org.mx", "gob.mx", "com.sg", "edu.sg", "gov.sg", "net.sg", "org.sg",
+  "co.za", "org.za", "gov.za", "ac.za", "com.tr", "gov.tr", "org.tr", "net.tr",
+  "com.hk", "org.hk", "gov.hk", "edu.hk", "com.co", "com.ph", "com.my", "org.my",
+  "com.sa", "com.tw", "org.tw", "gov.tw", "co.id", "or.id", "go.id", "ac.id",
+]);
+
+/**
+ * The registrable domain (eTLD+1) of a hostname — the boundary that defines a
+ * "site". mail.google.com and clients6.google.com share google.com; app.acme.com
+ * and api.acme.com share acme.com. This is what lets a same-company UI/API split
+ * count as same-site (so a legitimate cross-subdomain write isn't refused) while
+ * a genuinely third-party host still reads as cross-origin.
+ *
+ * IP literals and one/two-label hosts are returned unchanged. Common multi-label
+ * ccTLD suffixes (…co.uk) step up to three labels via MULTI_LABEL_PUBLIC_SUFFIXES.
+ * Pure — trivially unit-tested.
+ */
+export function registrableDomain(hostname: string): string {
+  const host = hostname.trim().toLowerCase().replace(/\.$/, "");
+  if (!host) return host;
+  // IPv4 / bracketed IPv6 literal — no registrable-domain concept; compare as-is.
+  if (host.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host;
+  const labels = host.split(".");
+  if (labels.length <= 2) return host;
+  const lastTwo = labels.slice(-2).join(".");
+  const take = MULTI_LABEL_PUBLIC_SUFFIXES.has(lastTwo) ? 3 : 2;
+  return labels.slice(-take).join(".");
+}
+
+/**
  * Classify captured mutations by whether they can ever replay.
  *
  * A compiled flow re-executes later with ZERO model calls and no live human
- * session, so a captured write is only reliable if replaying it needs
- * nothing that dies when the recording ends. Two independent ways a captured
- * write fails that bar — each request lands in `unreplayable` with whichever
- * fires (cross_origin checked first, since a foreign host makes the
- * credential question moot):
+ * session, so a captured write is only reliable if replaying it needs nothing
+ * that dies when the recording ends. Two ways a captured write fails that bar;
+ * the FROZEN CREDENTIAL is the primary discriminator, cross-origin corroborates:
  *
- *  - cross_origin: the request went to a host other than the app being
- *    authored (exact hostname inequality — see the call site for why that's
- *    enough: a foreign host like Gmail's clients6.google.com runs its own
- *    opaque session protocol the flow has no way to re-derive, unlike a
- *    same-origin request whose auth can be re-read fresh from the app's own
- *    localStorage/cookies at replay time).
- *  - frozen_credential: a header whose NAME reads as a credential, or whose
- *    VALUE matches Google's SAPISIDHASH family, still holding a literal value
- *    rather than a `{{…}}` runtime reference — i.e. discovery (see
- *    buildMutationStep above) could not explain it, so it would be baked into
- *    the flow verbatim and die the moment the recording session ends. A
- *    `gsessionid` querystring param is the same failure carried in the URL.
+ *  - frozen_credential (checked first): a single-use auth secret that would be
+ *    baked into the flow verbatim and expire the moment the recording ends —
+ *    discovery (see buildMutationStep) could not turn it into a runtime `{{…}}`
+ *    reference. Two shapes: a header whose VALUE is a Google SAPISIDHASH-family
+ *    token (ALWAYS decisive, however the app authenticates), or a header merely
+ *    NAMED like a credential (Authorization / x-…-xsrf / server-token — the
+ *    WEAKER signal, suppressed for a cookie-session app where such a header is
+ *    typically cookie-redundant; see the `authPattern` param). A `gsessionid`
+ *    querystring param is the same single-use failure carried in the URL.
+ *  - cross_origin: the request went to a different SITE (registrable domain, via
+ *    registrableDomain) than the app being authored — a genuinely third-party
+ *    host whose session protocol the flow has no way to re-derive. This is now
+ *    SITE-level, not exact-hostname: a same-company UI/API split
+ *    (app.acme.com → api.acme.com) is same-site and passes, since its auth can
+ *    be re-read fresh from the app's own localStorage at replay time. Note this
+ *    means Gmail's *.google.com storm is NOT caught here (it's same-site) — the
+ *    frozen credential above is what catches it, which is the whole point.
  *
- * Pure — no I/O, no knowledge of localStorage or authPattern — so it's
- * unit-tested directly against synthetic fixtures. The caller (compileAgentRun)
- * is responsible for handing it requests whose headers already reflect any
- * runtime substitution it was able to make.
+ * `distinctForeignHosts` stays keyed on the exact HOSTNAME (not site) of the
+ * unreplayable requests — the Gmail signature is dozens of distinct
+ * *-pa.clients6.google.com subdomains, and the caller both names them in the
+ * error and uses their count to detect the storm.
+ *
+ * Pure — no I/O — so it's unit-tested directly against synthetic fixtures. The
+ * caller (compileAgentRun) hands it requests whose headers already reflect any
+ * runtime substitution it made, plus the sector's `authPattern`.
  */
 export function writeReplayability(
   mutations: CapturedRequest[],
   appHost: string,
+  /**
+   * How the app carries auth (SectorProfile.authoring.authPattern). For a
+   * cookie-session app the browser's cookie jar is the real credential, so a
+   * literal `Authorization: Bearer …` / `x-…-xsrf` header on the captured
+   * request is often cookie-redundant, not a genuine frozen blocker — the weaker
+   * NAME-based frozen check is skipped for it. The VALUE-based single-use-token
+   * check (SAPISIDHASH) and the gsessionid check ALWAYS run: those are
+   * unambiguously unreplayable however the app authenticates. Defaults to
+   * "either" (both checks on) so direct callers get the strict behavior.
+   */
+  authPattern: SectorProfile["authoring"]["authPattern"] = "either",
 ): {
   reliable: CapturedRequest[];
   unreplayable: Array<{ req: CapturedRequest; reason: "cross_origin" | "frozen_credential" }>;
@@ -609,6 +676,7 @@ export function writeReplayability(
   const reliable: CapturedRequest[] = [];
   const unreplayable: Array<{ req: CapturedRequest; reason: "cross_origin" | "frozen_credential" }> = [];
   const foreignHosts = new Set<string>();
+  const appSite = registrableDomain(appHost);
 
   for (const req of mutations) {
     let hostname: string | null = null;
@@ -621,19 +689,35 @@ export function writeReplayability(
       hostname = null; // unparseable — can't prove foreign; falls through to the credential check
     }
 
-    const crossOrigin = hostname !== null && hostname !== appHost;
-    if (crossOrigin && hostname) foreignHosts.add(hostname);
+    // Cross-origin is SITE-level (registrable domain), so a same-company UI/API
+    // subdomain split is same-site; a genuinely third-party host still trips it.
+    const crossOrigin = hostname !== null && registrableDomain(hostname) !== appSite;
+    // For reporting/storm-detection track the DISTINCT external HOSTNAME (exact,
+    // not site) — but only among requests we actually refuse (below), so a
+    // reliable same-company API host is never mislabeled a foreign storm host.
+    const foreignHost = hostname !== null && hostname !== appHost ? hostname : null;
 
     const frozenHeader = Object.entries(req.headers ?? {}).some(([name, value]) => {
-      const looksLikeCredential = CREDENTIAL_HEADER_NAME_RE.test(name) || FROZEN_TOKEN_VALUE_RE.test(value);
-      return looksLikeCredential && !value.includes("{{"); // {{…}} means an authRead already resolves it fresh
+      if (value.includes("{{")) return false; // a runtime {{…}} authRead already resolves it fresh
+      // VALUE match (a single-use SAPISIDHASH literal) can never be re-derived at
+      // replay — decisive however the app authenticates. NAME match is the weaker
+      // "looks like a credential" signal; for a cookie-session app the real auth
+      // is the cookie, so a literal Bearer/xsrf header here is not a frozen blocker.
+      const frozenByValue = FROZEN_TOKEN_VALUE_RE.test(value);
+      const frozenByName = authPattern !== "cookie-session" && CREDENTIAL_HEADER_NAME_RE.test(name);
+      return frozenByValue || frozenByName;
     });
     const frozenCredential = frozenHeader || GSESSIONID_QUERY_RE.test(search);
 
-    if (crossOrigin) {
-      unreplayable.push({ req, reason: "cross_origin" });
-    } else if (frozenCredential) {
+    // Frozen credential FIRST (the primary discriminator): a single-use token
+    // dooms replay whether or not the host is foreign. Cross-origin is the
+    // corroborating fallback for a third-party host we also can't re-auth to.
+    if (frozenCredential) {
+      if (foreignHost) foreignHosts.add(foreignHost);
       unreplayable.push({ req, reason: "frozen_credential" });
+    } else if (crossOrigin) {
+      if (foreignHost) foreignHosts.add(foreignHost);
+      unreplayable.push({ req, reason: "cross_origin" });
     } else {
       reliable.push(req);
     }
@@ -793,16 +877,17 @@ export function compileAgentRun(
       const compiledHeaders = (built.step as unknown as { api?: ApiBlock }).api?.headers;
       checkedMutations.push({
         ...r,
-        // cookie-session apps carry auth via the browser's cookie jar, not a
-        // header value — buildMutationStep (above) never even attempts
-        // localStorage discovery for this authPattern, BY DESIGN, to avoid
-        // binding a coincidentally-matching but unrelated value (see its
-        // `lsKey` comment). For the same reason a header's literal value here
-        // is not a meaningful replayability signal for a cookie-session app,
-        // so headers are excluded from its check; cross-origin detection
-        // below is authPattern-independent and still catches a genuine
-        // foreign-host storm (Gmail-class) regardless.
-        headers: profile.authoring.authPattern === "cookie-session" ? undefined : { ...r.headers, ...compiledHeaders },
+        // Overlay whatever buildMutationStep resolved via localStorage discovery
+        // (a `{{user_token}}` templated header) so the guard sees the runtime
+        // reference, not the literal captured value, for anything discovery
+        // explained. For a cookie-session app discovery is skipped BY DESIGN
+        // (see buildMutationStep's `lsKey` comment), so these stay literal — but
+        // headers are NOT stripped: the guard is told the authPattern below so it
+        // suppresses only the weaker NAME-based frozen check for cookie-session
+        // apps while STILL catching a genuine single-use token by VALUE
+        // (SAPISIDHASH — the Gmail signature, which is same-site so cross-origin
+        // no longer catches it).
+        headers: { ...r.headers, ...compiledHeaders },
       });
     }
 
@@ -810,12 +895,16 @@ export function compileAgentRun(
     // flow re-executes with ZERO model calls and no live human session, so a
     // captured write is only reliable if nothing it needs dies when the
     // recording ends — see writeReplayability's doc comment for the two ways
-    // that happens (foreign host, frozen single-use credential). UNRELIABLE
-    // when at least one entry is unreplayable AND EITHER nothing else is
-    // reliable to fall back on OR the storm spans 2+ distinct foreign hosts
-    // (the Gmail signature: dozens of cross-origin RPCs, not one bad
-    // request) — a single foreign call alongside real same-origin writes
-    // is left to human review rather than failing the whole run.
+    // that happens (frozen single-use credential — the primary signal — and a
+    // genuinely cross-SITE host). UNRELIABLE when at least one entry is
+    // unreplayable AND EITHER nothing else is reliable to fall back on OR the
+    // storm spans 2+ distinct foreign hosts (the Gmail signature: dozens of
+    // single-use-credential RPCs across distinct *.google.com subdomains, not
+    // one bad request) — a single foreign call alongside real same-origin
+    // writes is left to human review rather than failing the whole run. The
+    // sector's authPattern is passed so the guard suppresses the weaker
+    // NAME-based frozen check for cookie-session apps (a literal Bearer/xsrf
+    // header is cookie-redundant there) while still catching a SAPISIDHASH value.
     //
     // No-op for read/search goals: `mutations` (and so `checkedMutations`) is
     // only ever populated when intent === "update" — the
@@ -830,7 +919,7 @@ export function compileAgentRun(
           return "";
         }
       })();
-      const replayability = writeReplayability(checkedMutations, appHost);
+      const replayability = writeReplayability(checkedMutations, appHost, profile.authoring.authPattern);
       const nothingReliable = replayability.reliable.length === 0;
       if (replayability.unreplayable.length > 0 && (nothingReliable || replayability.distinctForeignHosts.length >= 2)) {
         throw new UnreplayableWriteError(goal, replayability);
