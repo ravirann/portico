@@ -7,9 +7,9 @@
 # read from the portal's own API (the "API tier"), which returns the real open
 # slots as structured JSON in one sub-second call — no DOM scraping, no model.
 #
-# ── Two-phase authoring (Libretto's convert-to-network-requests workflow) ──
+# ── Two-phase authoring (capture → analyze network requests) ──
 #   Phase 1 · CAPTURE  : scripts/record-network.mjs drives the flow once and logs
-#                        every request to .libretto/sessions/<s>/network.jsonl.
+#                        every request to .portico/sessions/<s>/network.jsonl.
 #   Phase 2 · ANALYZE  : scripts/analyze-network.mjs surfaces the clean JSON read
 #                        endpoint (the availability call) to promote below.
 #   The `api:` step's url/body/schema are filled from that capture — you cannot
@@ -60,7 +60,7 @@ steps:
       on_ambiguous: fail
   # (Same pattern applies to specialty/reason — omitted here for brevity.)
 
-  # ── API TIER: read real availability in one call. Runs via Libretto pageRequest
+  # ── API TIER: read real availability in one call. Runs via Portico's pageRequest
   #    inside the authenticated page context (session cookies + TLS reused), so it
   #    is sub-second and needs no DOM and no model. FILL url/method/body from the
   #    Phase-2 analysis of the recorded availability request; the schema below is

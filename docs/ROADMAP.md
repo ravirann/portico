@@ -11,7 +11,7 @@ diagram · branding.
 
 ## Phase 1 — Runtime foundation ✅
 
-Flow / run / session model (SQLite store) · Libretto worker loop (in-process) ·
+Flow / run / session model (SQLite store) · worker loop (in-process) ·
 deterministic step runner · run logs, per-step screenshots, artifacts ·
 env-based secret injection + redaction (vault) · retry / timeout policies ·
 tier derivation (`deriveTier`).
@@ -67,9 +67,15 @@ recorded on every authored flow (`flows.provenance_json`).
   (`locator.frame`), scroll-into-view, landed in the flow spec together with a
   worked reference connector, [`connectors/gmail-web/`](../connectors/gmail-web/)
   (communications sector, DRAFT — locators need live validation).
-- **Worker reliability** — distinguishes paused (HITL/resume needed) runs from
-  failed ones; retries transient failures with backoff instead of treating
-  every failure the same.
+- ✅ **Engine ownership** — [ADR-0004](decisions/0004-own-engine.md) retired the
+  Libretto dependency; Portico's own `launch`/`recover`/`page-request` modules
+  run directly on Playwright behind the same `EngineAdapter` seam, with
+  deterministic-first recovery. Evidence bar: the full suite (393/393) plus a
+  browser-backed smoke suite (`packages/engine/src/smoke.browser.test.ts`, 8
+  live-Chromium scenarios).
+- ✅ **Worker reliability** — distinguishes paused (HITL/resume needed) runs
+  from failed ones; retries transient failures with backoff instead of
+  treating every failure the same.
 
 ## Phase 6 — planned ⬜
 

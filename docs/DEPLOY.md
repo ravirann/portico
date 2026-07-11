@@ -62,8 +62,21 @@ docker volume inspect deploy_portico-data   # host path backing the volume
 To back it up, stop the container and copy that path (or `docker run --rm -v
 deploy_portico-data:/data -v "$PWD":/backup busybox tar czf /backup/portico-data.tgz -C /data .`).
 
-Nothing else is stateful: rerunning `up -d --build` after pulling changes
-rebuilds the console/engine image and reattaches the same volume.
+**Auth profiles** — persisted logins (storage-state plus, where a portal needs
+it, a persistent browser profile) that let a run skip login/2FA live under
+`.portico/profiles` inside the container, backed by its own named volume,
+`portico-profiles`, mounted at `/app/.portico` (see `deploy/docker-compose.yml`).
+Before [ADR-0004](decisions/0004-own-engine.md) this state sat at
+`.libretto/profiles`, outside any volume, so an image rebuild silently dropped
+every persisted login; that's fixed now — profiles survive rebuilds the same
+way the SQLite store does. If you're upgrading from an older Portico, a
+read-fallback shim migrates any existing `.libretto/profiles` state to
+`.portico/profiles` automatically the first time each profile is used, so
+nothing needs to be moved by hand.
+
+Between the two named volumes, rerunning `up -d --build` after pulling changes
+rebuilds the console/engine image and reattaches both — nothing else is
+stateful.
 
 ## Local-only, by design
 

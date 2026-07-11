@@ -163,6 +163,14 @@ Ordered by expected next value:
 
 ## Invariants preserved
 
+- **Engine ownership ([ADR-0004](decisions/0004-own-engine.md)).** The last
+  third-party layer between the runner and Playwright is gone — Portico's own
+  `launch`/`recover`/`page-request` modules replace the composed engine, behind
+  the same `EngineAdapter` seam. Recovery is deterministic-first: a scripted
+  overlay/popup-dismiss-and-retry step, model-gated only if a heal model is
+  configured. Evidence bar for the transition: the full suite (393/393) plus a
+  browser-backed smoke suite (`packages/engine/src/smoke.browser.test.ts`, 8
+  live-Chromium scenarios).
 - **LLM never on the hot path.** Every mechanism above is deterministic;
   profiles are static data, gates are code.
 - **No-regression for existing flows.** Absent a sector, the `generic` profile

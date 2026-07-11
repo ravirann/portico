@@ -2,6 +2,9 @@
 
 **Status:** Accepted.
 **Date:** 2026-07.
+**Superseded in part by** [ADR-0004](0004-own-engine.md) (2026-07-11): the
+`EngineAdapter` seam and compose-don't-reinvent principle survive; the
+Libretto dependency was retired.
 
 ## Context
 

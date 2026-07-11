@@ -43,7 +43,7 @@ only backend CI runs against.
 exact move: `EngineAdapter` (`packages/engine/src/types.ts:112-123` — 1
 property + 3 methods) lets the platform be built so that "the platform depends
 only on the `EngineAdapter` interface (`packages/engine`); engine specifics
-stay behind adapters" (CONTRIBUTING.md:46-47), while `LibrettoAdapter` and
+stay behind adapters" (CONTRIBUTING.md:46-47), while `PorticoAdapter` and
 `FallbackAdapter` compete underneath it. `Store` has no equivalent today — it
 is a concrete class (`packages/store/src/store.ts:182-1132`) with no
 `interface Store` / `IStore` anywhere in the package (verified by grep across

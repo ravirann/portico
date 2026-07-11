@@ -1,3 +1,11 @@
+HISTORICAL — kept as field notes from the Libretto era. The Libretto
+dependency was removed in [ADR-0004](decisions/0004-own-engine.md); Portico
+now owns its execution engine directly on Playwright. Paths mentioned below
+like `.libretto/profiles` are legacy — a read-fallback shim migrates them to
+`.portico/profiles` on first use. The rest of this document is preserved
+unchanged as-sent.
+
+
 Portico x Libretto — field notes
 
 Context: we built a healthcare-portal automation platform on Libretto. The hard

@@ -5,7 +5,8 @@
 > runs against authenticated portals — deployed in the operator's own
 > infrastructure so credentials and sensitive data never leave it.**
 
-Status: founding draft. Engine: [ADR-0001](decisions/0001-execution-engine.md).
+Status: founding draft. Engine: [ADR-0001](decisions/0001-execution-engine.md),
+[ADR-0004](decisions/0004-own-engine.md).
 Authoring: [ADR-0002](decisions/0002-agent-authoring.md).
 
 ![Portico — author once, replay deterministically](architecture.svg)
@@ -18,8 +19,9 @@ Existing browser-automation tools are either libraries or managed cloud
 services; the production concerns around them — multi-tenant control plane,
 credential vault, durable/resumable runs, audit, replay, and self-host — are
 left to each team to build. Portico is an open-source platform for exactly those
-concerns, and it **composes an existing execution engine rather than
-reinventing one**.
+concerns, and it **owns its deterministic execution engine, built directly on
+Playwright, rather than reinventing browser automation itself**
+([ADR-0004](decisions/0004-own-engine.md)).
 
 Portico targets **authenticated portals the operator is entitled to access**
 (e.g. healthcare payer/EHR portals), not the open web. Modern anti-bot is
@@ -30,9 +32,11 @@ focus is portals where the operator holds legitimate credentials.
 
 1. **Deterministic-first, AI-assisted.** AI authors and heals; deterministic
    code runs. See the hard invariant in §4.
-2. **Compose, don't reinvent.** The execution engine is a pluggable adapter over
-   an existing engine ([ADR-0001](decisions/0001-execution-engine.md)). Portico's
-   value is the platform layer, which is engine-agnostic.
+2. **Compose, don't reinvent.** The execution engine is Portico's own, built
+   directly on Playwright, behind a pluggable `EngineAdapter`
+   ([ADR-0001](decisions/0001-execution-engine.md) established the seam;
+   [ADR-0004](decisions/0004-own-engine.md) brought the engine itself in-house).
+   Portico's value is the platform layer, which is engine-agnostic.
 3. **Self-host first.** One-command deploy in the operator's own infrastructure,
    so credentials and sensitive data never leave it.
 4. **Fail safe, never guess.** On genuine change, stop with a clear reason and a
@@ -77,12 +81,13 @@ independent streams** and reconciles them (see the diagram above):
 The reliable join is **exact xpath identity**: the agent's resolved xpath equals
 the clean DOM-hook capture for the same control, so we recover the element's real
 accessible name rather than the agent's paraphrase. The result compiles to a
-frozen `intercept → navigate → act… → wait` flow — pure Libretto, no model on
-replay. When the agent stream is thin or uncorrelated it falls back to the
-DOM-hook path (no regression). Compiling from raw DOM clicks alone froze noise
-and mis-identified elements; the agent stream supplies intent, the DOM hook the
-real name — neither alone is enough. This layer is `@portico/author`, isolated
-from the engine (the authoring agent pins `ai@5`; the engine uses `ai@6`).
+frozen `intercept → navigate → act… → wait` flow — deterministic replay on
+Portico's own engine, no model. When the agent stream is thin or uncorrelated it
+falls back to the DOM-hook path (no regression). Compiling from raw DOM clicks
+alone froze noise and mis-identified elements; the agent stream supplies intent,
+the DOM hook the real name — neither alone is enough. This layer is
+`@portico/author`, isolated from the engine (the authoring agent pins `ai@5`;
+the engine uses `ai@6`).
 
 ## 4. Latency budget & SLO
 
@@ -205,7 +210,7 @@ ORCHESTRATION: durable run state machine · queue → run → steps ·
   retries · resume-from-step
 ─────────────────────────────────────────────────
 EXECUTION ENGINE (per-run, ephemeral): API → DOM → agent tiers ·
-  locator cache · AI-heal   [engine adapter — see ADR-0001]
+  locator cache · AI-heal   [engine adapter — see ADR-0001, ADR-0004]
   inside → browser sandbox (1 ctx / run)
 ─────────────────────────────────────────────────
 DATA: SQLite store (runs·steps·sessions·audit) + local artifact store
@@ -221,8 +226,8 @@ connectors/ ·  scripts/ ·  examples/ ·  docs/
 ```
 
 - **`flow-spec`** — declarative flow contract + `compileRecording` (shared, pure).
-- **`engine`** — `EngineAdapter` + Libretto adapter, tiered runner, self-heal,
-  `deriveTier`.  **`vault`** — secret resolution, redaction, TOTP.
+- **`engine`** — `EngineAdapter` + `PorticoAdapter` (in-house, on Playwright), tiered
+  runner, self-heal, `deriveTier`.  **`vault`** — secret resolution, redaction, TOTP.
   **`store`** — SQLite store (runs · steps · sessions · flows · audit · author jobs).
   **`author`** — agent authoring + two-source reconciliation (Stagehand).
 - **`apps/cli`** — `portico` runner (run/validate/confirm/sessions).
@@ -243,3 +248,4 @@ booking**.
 ## Decisions
 
 - [ADR-0001 — Execution engine](decisions/0001-execution-engine.md)
+- [ADR-0004 — Own the execution engine](decisions/0004-own-engine.md)
