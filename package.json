@@ -12,7 +12,9 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "test": "node --import tsx --test packages/**/*.test.ts apps/console/lib/*.test.ts"
+    "build:console": "pnpm --filter @portico/console build",
+    "test": "node --import tsx --test packages/**/*.test.ts apps/console/lib/*.test.ts",
+    "verify": "pnpm build && pnpm build:console && pnpm test"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
