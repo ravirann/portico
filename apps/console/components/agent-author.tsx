@@ -2,11 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { listSectors, resolveSectorProfile } from "@portico/flow-spec";
 import type { ConnectorOption } from "./new-flow-editor";
 import type { ActiveSession } from "./record-flow";
 
 // Same key rules as record/hand-authoring (start & end alphanumeric).
 const KEY_RE = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
+// All sector keys, "generic" first — @portico/flow-spec is pure data/functions
+// (zero node deps), so it's safe to call at module scope in this Client Component.
+// Widened to string[] so it can be compared against a connector record's plain
+// (unvalidated) `sector` field without a type-narrowing cast at each call site.
+const SECTOR_KEYS: string[] = listSectors();
 // Where the in-flight async authoring job id is persisted, so leaving the page
 // and coming back resumes the same run.
 const LS_JOB_KEY = "portico:authorJob";
@@ -75,6 +81,13 @@ export function AgentAuthor({
 }) {
   const router = useRouter();
   const [connector, setConnector] = useState(initialConnector ?? "");
+  // Industry/app-class — tunes the author's reliability defaults. Defaults to
+  // "generic"; if the initially-selected connector already declares a sector,
+  // start there instead (same rule the connector <select> below applies on change).
+  const [sector, setSector] = useState(() => {
+    const s = connectors.find((c) => c.key === (initialConnector ?? ""))?.sector;
+    return s && SECTOR_KEYS.includes(s) ? s : "generic";
+  });
   const [goal, setGoal] = useState("");
   const [startUrl, setStartUrl] = useState("");
   const [key, setKey] = useState("");
@@ -180,7 +193,13 @@ export function AgentAuthor({
       const res = await fetch("/api/flows/author", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ goal: goal.trim(), startUrl: normalizedUrl, connector: connector || undefined, key: key.trim() || undefined }),
+        body: JSON.stringify({
+          goal: goal.trim(),
+          startUrl: normalizedUrl,
+          connector: connector || undefined,
+          key: key.trim() || undefined,
+          sector,
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok || data.error || !data.jobId) {
@@ -212,12 +231,44 @@ export function AgentAuthor({
 
       <div>
         <label style={labelStyle} htmlFor="aa-connector">Connector</label>
-        <select id="aa-connector" style={fieldStyle} value={connector} onChange={(e) => setConnector(e.target.value)} disabled={busy}>
+        <select
+          id="aa-connector"
+          style={fieldStyle}
+          value={connector}
+          onChange={(e) => {
+            const next = e.target.value;
+            setConnector(next);
+            // Preselect the sector from the chosen connector's declared sector
+            // (e.g. Gmail (web) → communications). If the connector has none,
+            // leave whatever sector the user already has selected alone.
+            const s = connectors.find((c) => c.key === next)?.sector;
+            if (s && SECTOR_KEYS.includes(s)) setSector(s);
+          }}
+          disabled={busy}
+        >
           <option value="">(no connector)</option>
           {connectors.map((c) => (
             <option key={c.key} value={c.key}>{c.name}</option>
           ))}
         </select>
+      </div>
+
+      <div>
+        <label style={labelStyle} htmlFor="aa-sector">Sector</label>
+        <select id="aa-sector" style={fieldStyle} value={sector} onChange={(e) => setSector(e.target.value)} disabled={busy}>
+          {SECTOR_KEYS.map((k) => {
+            const profile = resolveSectorProfile(k);
+            return (
+              <option key={k} value={k} title={profile.description}>
+                {profile.name} — {profile.description}
+              </option>
+            );
+          })}
+        </select>
+        <p style={helpStyle}>
+          Sectors tune reliability defaults (timeouts, retries, locator strategy, safety guards) per app class;
+          communications = keyboard-first, virtualized DOM (Gmail/Outlook/Slack).
+        </p>
       </div>
 
       <div>

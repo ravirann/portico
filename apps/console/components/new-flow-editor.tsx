@@ -10,6 +10,9 @@ export interface ConnectorOption {
   name: string;
   /** false for read-only filesystem "seed" connectors. */
   editable: boolean;
+  /** Industry/app-class key (see @portico/flow-spec SectorKey), when the
+   *  connector has one set. Lets the New Flow form preselect a sector. */
+  sector?: string;
 }
 
 /** Starter flow, seeded with the chosen key. Read-only by default (no_booking)

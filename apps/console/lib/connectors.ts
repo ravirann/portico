@@ -24,6 +24,9 @@ export interface ConnectorSummary {
   key: string;
   name: string;
   framework?: string;
+  /** Industry/app-class key (see @portico/flow-spec SectorKey), when the
+   *  connector's target.yaml declares one. */
+  sector?: string;
   flows: FlowSummary[];
   instances: InstanceSummary[];
 }
@@ -95,6 +98,7 @@ export function listConnectors(): ConnectorSummary[] {
       key: target.key ?? dir,
       name: target.name ?? dir,
       framework: target.framework,
+      sector: target.sector,
       flows,
       instances,
     };

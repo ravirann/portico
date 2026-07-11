@@ -21,11 +21,11 @@ export default async function NewFlowPage({
   const options: ConnectorOption[] = [];
   for (const c of readConnectors()) {
     dbKeys.add(c.key);
-    options.push({ key: c.key, name: c.name, editable: true });
+    options.push({ key: c.key, name: c.name, editable: true, sector: c.sector });
   }
   for (const c of listConnectors()) {
     if (dbKeys.has(c.key)) continue;
-    options.push({ key: c.key, name: c.name, editable: false });
+    options.push({ key: c.key, name: c.name, editable: false, sector: c.sector });
   }
 
   // Preselect from ?connector=, else the connector switcher's current scope.
