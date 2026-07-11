@@ -9,7 +9,7 @@
 // Notes:
 //  - Uses Playwright's locator.ariaSnapshot() (page.accessibility was removed in
 //    Playwright 1.6x). The output is YAML: `- button "Schedule an appointment"`.
-//  - Launches a PERSISTENT on-disk profile (.libretto/profiles/<name>.userdata/),
+//  - Launches a PERSISTENT on-disk profile (.portico/profiles/<name>.userdata/),
 //    SHARED with record-network.mjs and the CLI runner — so one login serves them
 //    all and survives across runs (a storage-state snapshot can't restore MyChart).
 import { createRequire } from "module";
@@ -28,7 +28,7 @@ const arg = (flag) => {
 const baseUrl = arg("--base-url") ?? "";
 const profileArg = arg("--profile") ?? "default";
 const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
-const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
+const userDataDir = resolve(".portico/profiles", `${profileName}.userdata`);
 
 mkdirSync(userDataDir, { recursive: true });
 const context = await chromium.launchPersistentContext(userDataDir, {
@@ -36,7 +36,7 @@ const context = await chromium.launchPersistentContext(userDataDir, {
   viewport: { width: 1440, height: 900 },
 });
 const page = context.pages()[0] ?? (await context.newPage());
-console.log(`↻ persistent profile: .libretto/profiles/${profileName}.userdata (log in once if prompted — it persists)`);
+console.log(`↻ persistent profile: .portico/profiles/${profileName}.userdata (log in once if prompted — it persists)`);
 if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });

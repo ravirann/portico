@@ -1,5 +1,5 @@
 /**
- * Unit tests for the flow-spec → Libretto compiler and its pure helpers.
+ * Unit tests for the flow-spec → in-house compiler (ADR-0004) and its pure helpers.
  * No browser / no model — these assert the deterministic, keyless contract.
  */
 
@@ -10,7 +10,6 @@ import type { Flow, Target } from "@portico/flow-spec";
 import {
   compileFlow,
   effectiveTimeouts,
-  emitWorkflowModule,
   isMutatingAct,
   locatorRoot,
   parseCondition,
@@ -52,7 +51,7 @@ test("validateAgainst never throws and reports failure", () => {
   assert.ok(bad.error);
 });
 
-test("compileFlow builds a canonical workflow carrying schemas + credentials + profile", () => {
+test("compileFlow builds an instrumented step plan carrying credentials + profile", () => {
   const flow: Flow = {
     key: "login-and-read",
     version: 1,
@@ -64,15 +63,11 @@ test("compileFlow builds a canonical workflow carrying schemas + credentials + p
       { type: "extract", label: "title", extract: { key: "page_title", schema: { type: "string" } } },
     ],
   };
-  const { workflow, plan, credentialNames } = compileFlow(flow, target, { profileName: "urmc-mychart" });
-  assert.equal(workflow.name, "login-and-read");
-  assert.equal(workflow.authProfileName, "urmc-mychart");
-  assert.equal(workflow.authProfileRefresh, true);
-  assert.equal(workflow.startUrl, "https://example.com");
+  const { plan, profileName, credentialNames } = compileFlow(flow, target, { profileName: "urmc-mychart" });
+  assert.equal(profileName, "urmc-mychart");
   assert.deepEqual([...credentialNames].sort(), ["password", "username"]);
   assert.equal(plan.length, 4);
-  // No recovery model configured → no recoveryAction on the deterministic workflow.
-  assert.equal(workflow.recoveryAction, undefined);
+  assert.deepEqual(plan.map((s) => s.type), ["navigate", "act", "act", "extract"]);
 });
 
 test("compileFlow refuses a no_booking flow that contains a booking action", () => {
@@ -258,11 +253,11 @@ test("wait fails loud if the value never arrives", async () => {
   await assert.rejects(() => plan[0]!.run(rt), /not populated/);
 });
 
-test("resolveProfile normalizes the profile id and points at .libretto/profiles", () => {
+test("resolveProfile normalizes the profile id and points at .portico/profiles", () => {
   const p = resolveProfile("URMC MyChart!", { cwd: "/tmp/repo" });
   assert.equal(p.name, "urmc-mychart");
-  assert.equal(p.path, "/tmp/repo/.libretto/profiles/urmc-mychart.json");
-  assert.equal(p.userDataDir, "/tmp/repo/.libretto/profiles/urmc-mychart.userdata");
+  assert.equal(p.path, "/tmp/repo/.portico/profiles/urmc-mychart.json");
+  assert.equal(p.userDataDir, "/tmp/repo/.portico/profiles/urmc-mychart.userdata");
   assert.equal(p.loadPath, undefined); // does not exist
   assert.equal(p.refresh, true);
 });
@@ -1043,8 +1038,15 @@ test("compileFlow threads a non-generic sector profile into act retries end to e
     template: (s: string) => s,
   } as unknown as StepRuntime;
   await assert.rejects(() => plan[0]!.run(rt), /always fails/);
-  // commerce.retry.actMax = 2 → 1 initial attempt + 2 retries = 3.
-  assert.equal(attempts, 3);
+  // commerce.retry.actMax = 2 → 1 initial attempt + 2 retries = 3 from the
+  // candidate ladder's own retry loop (settled()), PLUS 1 more: since
+  // ADR-0004, recover.ts's attemptWithRecovery runs by DEFAULT after settled()
+  // fails (deterministic overlay dismissal — finds nothing here, this page
+  // stub exposes no dismiss affordances — then one re-attempt of the action),
+  // even with no heal model configured (`heal: null` above). That re-attempt
+  // is call #4; it also fails "always fails", so the run still rejects with
+  // that same message (recover.ts wraps it, preserving the substring).
+  assert.equal(attempts, 4);
 });
 
 // ---------------------------------------------------------------------------
@@ -1365,42 +1367,3 @@ test("act method 'click' forces a click even when a value is present (no fill)",
   assert.deepEqual(calls, ["click"]);
 });
 
-// ---------------------------------------------------------------------------
-// CLI-runner (subprocess) guard: press/type/frame steps block emission
-// ---------------------------------------------------------------------------
-
-test("emitWorkflowModule throws for a 'press' method step — not supported by the cli runner", () => {
-  const flow: Flow = {
-    key: "cli-press",
-    version: 1,
-    steps: [{ type: "act", label: "send", method: "press", value: "Control+Enter" }],
-  };
-  assert.throws(() => emitWorkflowModule(flow, target), /not supported by the cli runner/);
-});
-
-test("emitWorkflowModule throws for a 'type' method step", () => {
-  const flow: Flow = {
-    key: "cli-type",
-    version: 1,
-    steps: [{ type: "act", label: "compose", method: "type", value: "hi" }],
-  };
-  assert.throws(() => emitWorkflowModule(flow, target), /not supported by the cli runner/);
-});
-
-test("emitWorkflowModule throws for a frame-scoped locator", () => {
-  const flow: Flow = {
-    key: "cli-frame",
-    version: 1,
-    steps: [{ type: "act", label: "in-frame", locator: { frame: ["iframe.editor"], semantic: { intent: "x" } } }],
-  };
-  assert.throws(() => emitWorkflowModule(flow, target), /not supported by the cli runner/);
-});
-
-test("emitWorkflowModule does NOT throw for ordinary click/fill steps (default path unaffected)", () => {
-  const flow: Flow = {
-    key: "cli-fine",
-    version: 1,
-    steps: [{ type: "act", label: "click", locator: { semantic: { role: "button", name: "Go", intent: "go" } } }],
-  };
-  assert.doesNotThrow(() => emitWorkflowModule(flow, target));
-});

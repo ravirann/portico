@@ -9,7 +9,7 @@
 //
 //   node scripts/record-attach.mjs --cdp http://localhost:9222 --name rec_abc123 [--base-url URL]
 //
-// Writes .libretto/recordings/<name>/recording.json → { baseUrl, clicks[], network[] }
+// Writes .portico/recordings/<name>/recording.json → { baseUrl, clicks[], network[] }
 // incrementally (survives a hard kill) and once more on SIGTERM.
 import { createRequire } from "module";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -32,7 +32,7 @@ if (!cdp) {
   process.exit(2);
 }
 
-const recordingPath = resolve(".libretto/recordings", name, "recording.json");
+const recordingPath = resolve(".portico/recordings", name, "recording.json");
 mkdirSync(dirname(recordingPath), { recursive: true });
 
 // --- Network capture policy: same as record.mjs (document/xhr/fetch + writes,

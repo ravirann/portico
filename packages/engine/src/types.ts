@@ -1,7 +1,8 @@
 /**
  * The engine boundary. Everything Portico's platform layer needs from an
- * execution engine is expressed here; the concrete engine (Libretto today,
- * a fallback) lives behind `EngineAdapter`. See ADR-0001.
+ * execution engine is expressed here; the concrete engine (Portico's own,
+ * on Playwright — see adapters/portico.ts — plus a fallback) lives behind
+ * `EngineAdapter`. See ADR-0001 and ADR-0004.
  */
 
 import type { Flow, Target } from "@portico/flow-spec";
@@ -50,7 +51,7 @@ export interface EngineRunResult {
   /** Output keys whose extracted/intercepted value did NOT pass its declared
    *  schema — the raw value is still stored (never dropped), just flagged. */
   unvalidatedOutputKeys?: string[];
-  /** The Libretto auth profile this run loaded/refreshed, if any. */
+  /** The auth profile (auth-profile.ts) this run loaded/refreshed, if any. */
   authProfile?: string;
   /** Mutating `act` steps skipped outside live mode (dry-run safety gate). Only set when non-empty. */
   skippedMutations?: string[];
@@ -75,10 +76,10 @@ export interface EngineRunOptions {
   /** Run the browser headless (true) or headed (false). Defaults to headless. */
   headless?: boolean;
   /**
-   * Stable id used to derive the Libretto **auth profile** name so that a
-   * one-time login persists to `.libretto/profiles/<name>.json` and later runs
-   * skip auth. Typically a target/credential id. When absent, no profile is
-   * loaded or written (fresh browser every run).
+   * Stable id used to derive the **auth profile** name (auth-profile.ts) so
+   * that a one-time login persists to `.portico/profiles/<name>.json` and
+   * later runs skip auth. Typically a target/credential id. When absent, no
+   * profile is loaded or written (fresh browser every run).
    */
   profileId?: string;
   /**
@@ -110,8 +111,8 @@ export interface EngineRunOptions {
 }
 
 export interface EngineCapabilities {
-  /** Can execute API-tier steps directly (via Libretto `pageRequest`), for
-   *  steps/flows the flow-spec marks API-eligible. */
+  /** Can execute API-tier steps directly (via page-request.ts's `pageRequest`),
+   *  for steps/flows the flow-spec marks API-eligible. */
   apiPromotion: boolean;
   /** Self-heals at run time via the recovery model. HONEST + dynamic: true only
    *  when a heal model is configured (PORTICO_HEAL_* / provider API key). With no

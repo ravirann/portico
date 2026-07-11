@@ -5,10 +5,10 @@
 // human deciding which endpoints to promote — no external dependencies.
 //
 //   node scripts/analyze-network.mjs --session conversion-flow
-//   node scripts/analyze-network.mjs --file .libretto/sessions/foo/network.jsonl
+//   node scripts/analyze-network.mjs --file .portico/sessions/foo/network.jsonl
 //
 // Notes:
-//  - `--session <name>` reads `.libretto/sessions/<name>/network.jsonl` (default
+//  - `--session <name>` reads `.portico/sessions/<name>/network.jsonl` (default
 //    session name: "conversion-flow"). `--file <path>` points at an explicit
 //    file instead. Both are resolved relative to process.cwd().
 //  - Malformed JSON lines are skipped and counted rather than crashing the run.
@@ -32,7 +32,7 @@ const sessionName = arg("--session") ?? "conversion-flow";
 const fileArg = arg("--file");
 const networkFilePath = fileArg
   ? resolve(process.cwd(), fileArg)
-  : resolve(process.cwd(), ".libretto/sessions", sessionName, "network.jsonl");
+  : resolve(process.cwd(), ".portico/sessions", sessionName, "network.jsonl");
 const sessionDir = dirname(networkFilePath);
 
 if (!existsSync(networkFilePath)) {

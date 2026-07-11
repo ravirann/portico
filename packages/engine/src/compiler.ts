@@ -1,26 +1,32 @@
 /**
- * flow-spec → Libretto compiler.
+ * flow-spec → in-house compiler (ADR-0004).
  *
- * Compiles a Portico `Flow` into Libretto's **canonical `workflow()` artifact**
- * (ADR-0001) *and* an instrumented step "plan" the in-process runner drives.
- * Both share one interpreter, so the deterministic behaviour is identical whether
- * a run goes through `LibrettoWorkflow.run` (subprocess / `npx libretto run`) or
- * the programmatic runner.
+ * Compiles a Portico `Flow` into an instrumented step "plan" — an ordered list
+ * of `CompiledStep` closures — that the programmatic runner (runner.ts) drives
+ * directly. Through ADR-0001 this also emitted a second artifact, a
+ * third-party `workflow()` object, for an alternate CLI/subprocess runner;
+ * ADR-0004 retired that runner (see runner.ts's `runnerMode`/
+ * `PORTICO_LIBRETTO_RUNNER`) and the artifact along with it, so the plan is
+ * now the ONLY product of `compileFlow`.
  *
  * Step mapping:
- *   navigate → page.goto            (wrapped by recoveryAction)
- *   act      → page.fill/click/press/pressSequentially (attemptWithRecovery — model retry on failure)
- *   extract  → cached-locator DOM read (deterministic) | extractFromPage (model) |
+ *   navigate → page.goto
+ *   act      → page.fill/click/press/pressSequentially (recover.ts's
+ *              attemptWithRecovery — deterministic overlay dismissal + one
+ *              retry on failure, optionally model-assisted)
+ *   extract  → cached-locator DOM read (deterministic) | model extraction |
  *              fail loud (no cached locator, no model)
- *   <step>.api → pageRequest        (API-tier / direct-HTTP)
+ *   <step>.api → page-request.ts's pageRequest (API-tier / direct-HTTP)
  *   assert/guard → policy assertion (+ optional condition check)
- *   human    → pause(session) / interactive HITL (+ lenient condition gate)
- *   subflow (auth) → librettoAuthenticate + authProfile
+ *   human    → runHuman's own "paused" status (+ lenient condition gate) —
+ *              interactive HITL is the runner's `onHuman` callback
+ *   subflow (auth) → scripted sign-in + authProfile (see runAuthSubflow)
  *
  * HARD INVARIANT (docs/ARCHITECTURE.md §4): a promoted deterministic replay makes
- * ZERO model calls. Recovery (attemptWithRecovery) only fires *after* a failure,
- * and extractFromPage only when a step has no cached locator — i.e. the model is
- * the author/heal tier, never the steady-state hot path.
+ * ZERO model calls. Recovery (attemptWithRecovery) only fires *after* a failure
+ * (and even then defaults to fully deterministic — see recover.ts), and model
+ * extraction only when a step has no cached locator — i.e. the model is the
+ * author/heal tier, never the steady-state hot path.
  *
  * Reliability defaults (timeouts, retries, readiness gates, mutation guards,
  * locator trust) come from a `SectorProfile` (@portico/flow-spec) resolved by
@@ -29,18 +35,6 @@
  * defaults bit-for-bit — see sectors.ts's no-regression contract.
  */
 
-import {
-  attemptWithRecovery,
-  extractFromPage,
-  librettoAuthenticate,
-  pageRequest,
-  pause,
-  workflow,
-  type LibrettoWorkflow,
-  type LibrettoWorkflowContext,
-  type RecoveryAction,
-  type RequestConfig,
-} from "libretto";
 import type { FrameLocator, Locator, Page } from "playwright";
 import { z } from "zod";
 import { resolveSectorProfile } from "@portico/flow-spec";
@@ -51,6 +45,8 @@ import { resolveIntent } from "./resolve-intent.js";
 import { pickByPolicy, type PickPolicy } from "./pick-slot.js";
 import type { HealModel } from "./model.js";
 import { PorticoStepError } from "./errors.js";
+import { attemptWithRecovery } from "./recover.js";
+import { pageRequest, type RequestConfig } from "./page-request.js";
 
 /** An API-tier marker a flow can attach to a step (extra flow-spec field). */
 interface ApiStepSpec {
@@ -122,7 +118,6 @@ export function isMutatingAct(step: Step, keywords: string[]): boolean {
 }
 
 export interface CompileResult {
-  workflow: LibrettoWorkflow;
   plan: CompiledStep[];
   profileName?: string;
   credentialNames: string[];
@@ -141,13 +136,16 @@ interface CompileContext {
 }
 
 /**
- * Compile a flow to the canonical workflow + instrumented plan.
+ * Compile a flow to its instrumented step plan — the ONLY product since
+ * ADR-0004 retired the third-party `workflow()` artifact this used to also emit.
  *
  * `profile` supplies the sector's reliability defaults (timeouts, retries,
  * readiness gates, locator trust, mutation-keyword guards) — omitting it
  * resolves to the `generic` profile, which reproduces the engine's
  * historical hardcoded defaults bit-for-bit, so existing callers that don't
- * pass one (tests, `compileToWorkflow`/`emitWorkflowModule`) are unaffected.
+ * pass one (tests) are unaffected. `opts.heal` is threaded into every
+ * compiled step's runtime (see runner.ts's `runProgrammatic`) but never
+ * consulted here at compile time — it only matters once a step actually runs.
  */
 export function compileFlow(
   flow: Flow,
@@ -182,80 +180,7 @@ export function compileFlow(
   // original `index` for tracing.
   const plan = [...compiled.filter((s) => s.type === "intercept"), ...compiled.filter((s) => s.type !== "intercept")];
   const credentialNames = deriveCredentialNames(flow);
-  const wf = buildWorkflow(flow, target, plan, {
-    heal: opts.heal ?? null,
-    profileName: opts.profileName,
-    credentialNames,
-  });
-  return { workflow: wf, plan, profileName: opts.profileName, credentialNames };
-}
-
-/**
- * Build ONLY the canonical Libretto workflow (used by the emitted module / the
- * `npx libretto run` subprocess). Heal model + auth profile come from env.
- */
-export function compileToWorkflow(
-  flow: Flow,
-  target: Target,
-  opts: { heal?: HealModel | null; profileName?: string } = {},
-): LibrettoWorkflow {
-  return compileFlow(flow, target, opts).workflow;
-}
-
-function buildWorkflow(
-  flow: Flow,
-  target: Target,
-  plan: CompiledStep[],
-  ctx: { heal: HealModel | null; profileName?: string; credentialNames: string[] },
-): LibrettoWorkflow {
-  const inputShape: Record<string, z.ZodTypeAny> = {};
-  for (const name of Object.keys(flow.inputs ?? {})) inputShape[name] = z.unknown().optional();
-  const outputShape: Record<string, z.ZodTypeAny> = {};
-  for (const s of flow.steps) {
-    const key = (s as Step).extract?.key;
-    if (key) outputShape[key] = z.unknown().optional();
-  }
-
-  const recoveryAction: RecoveryAction | undefined = ctx.heal?.recoveryAction;
-
-  const handler = async (wfCtx: LibrettoWorkflowContext, input: unknown) => {
-    const inputs = (input ?? {}) as Record<string, unknown>;
-    const output: Record<string, unknown> = {};
-    const rt: StepRuntime = {
-      page: wfCtx.page,
-      rawPage: wfCtx.page,
-      session: wfCtx.session,
-      input: inputs,
-      output,
-      unvalidated: new Set(),
-      target,
-      secrets: {},
-      heal: ctx.heal,
-      profileLoaded: Boolean(ctx.profileName),
-      // The canonical subprocess path can't see the run mode, so default to the
-      // SAFE side: dry-run (mutations skipped). Live writes go through the
-      // programmatic runner, which threads the real mode.
-      mode: "dry_run",
-      skippedMutations: [],
-      template: (s: string) => renderTemplate(s, { inputs, output, secrets: {}, target }),
-    };
-    for (const step of plan) await step.run(rt);
-    return output;
-  };
-
-  return workflow(
-    flow.key,
-    {
-      input: z.object(inputShape).passthrough(),
-      output: z.object(outputShape).passthrough(),
-      credentials: ctx.credentialNames,
-      authProfile: ctx.profileName ? { name: ctx.profileName, refresh: true } : undefined,
-      startUrl: target.base_url || undefined,
-      viewport: { width: 1440, height: 900 },
-      recoveryAction,
-    },
-    handler,
-  );
+  return { plan, profileName: opts.profileName, credentialNames };
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +227,7 @@ function compileStep(step: Step, index: number, ctx: CompileContext): CompiledSt
         type: step.type,
         label,
         run: async () => {
-          throw new Error(`step type '${step.type}' not wired yet in the Libretto compiler`);
+          throw new Error(`step type '${step.type}' not wired yet in the compiler`);
         },
       };
     default:
@@ -552,26 +477,76 @@ async function runAct(
   };
 
   const desc = step.locator?.semantic?.intent ?? step.label ?? "element";
-  // Deterministic hot path: bounded deterministic retries, no model. If those
-  // fail AND a heal model is configured, run `attemptWithRecovery` (popup/
-  // overlay recovery + one retry). No model ⇒ the failure propagates.
-  if (!rt.heal) {
-    await settled();
-    return { status: "ok" };
-  }
+  // Deterministic hot path: bounded deterministic retries, no model. On
+  // failure, recover.ts's attemptWithRecovery runs BY DEFAULT (ADR-0004) —
+  // deterministic overlay/popup dismissal + one retry, no model required —
+  // and additionally consults the heal model (if configured) for a broader
+  // dismissal target when the deterministic step finds nothing. Hard-bounded:
+  // without a ceiling an unfindable element makes recovery hang and the
+  // whole run never completes.
   try {
     await settled();
     return { status: "ok" };
-  } catch {
-    // Self-heal recovery, hard-bounded: without a ceiling an unfindable element
-    // makes the LLM recovery hang and the whole run never completes.
-    await withHardTimeout(
-      attemptWithRecovery(rt.rawPage, doIt, undefined, rt.heal.languageModel),
+  } catch (originalErr) {
+    const recovered = await withHardTimeout(
+      attemptWithRecovery(rt.rawPage, doIt, { languageModel: rt.heal?.languageModel, cause: originalErr }),
       timeout + 15000,
       `self-heal for "${desc}"`,
     );
-    return { status: "healed", detail: "recovered via Libretto popup/overlay recovery", healedFrom: desc, healedTo: desc };
+    const detail = recovered.dismissed
+      ? `recovered — ${recovered.dismissed}`
+      : "recovered — transient failure cleared on retry";
+    return { status: "healed", detail, healedFrom: recovered.dismissed ?? desc, healedTo: desc };
   }
+}
+
+/**
+ * In-house AI extraction (ADR-0004 — replaces the removed dependency's `extractFromPage`).
+ * Author/heal tier only (see runExtract branch 2 below) — screenshots the
+ * current viewport, captures a length-capped HTML snapshot for context, and
+ * asks the configured model to extract structured data matching `schema`.
+ * Reproduces only the whole-page path of the original: `runExtract` never
+ * passed a CSS-selector-scoped extraction target.
+ */
+async function extractViaModel<T extends z.ZodType>(opts: {
+  page: Page;
+  instruction: string;
+  schema: T;
+  model: HealModel["languageModel"];
+}): Promise<z.infer<T>> {
+  const screenshot = (await opts.page.screenshot({ type: "png" })).toString("base64");
+  let domContent: string | undefined;
+  try {
+    const html = await opts.page.content();
+    domContent = html.length > 50000 ? `${html.slice(0, 50000)}\n... [truncated]` : html;
+  } catch {
+    domContent = undefined; // best-effort context only — extraction still proceeds off the screenshot
+  }
+  const prompt =
+    `You are analyzing a screenshot from a web page to extract structured data.\n\n` +
+    `Instruction: ${opts.instruction}\n\n` +
+    (domContent ? `Here is the HTML content for additional context:\n<html>\n${domContent}\n</html>\n\n` : "") +
+    `Extract the requested information from the screenshot and return it in the specified format. Be precise and only extract what is visible.`;
+
+  // Dynamic import: the deterministic hot path never loads the AI SDK (same
+  // convention as model.ts) — this function only runs when a heal model is
+  // already configured and a step has no cached locator.
+  const { generateObject } = await import("ai");
+  const { object } = await generateObject({
+    model: opts.model,
+    schema: opts.schema,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image", image: `data:image/png;base64,${screenshot}` },
+        ],
+      },
+    ],
+    temperature: 0,
+  });
+  return object as z.infer<T>;
 }
 
 async function runExtract(rt: StepRuntime, step: Step, profile: SectorProfile): Promise<StepOutcome> {
@@ -625,7 +600,7 @@ async function runExtract(rt: StepRuntime, step: Step, profile: SectorProfile): 
   if (rt.heal) {
     const envelope = envelopeForExtraction(schema);
     const zschema = jsonSchemaToZod(envelope.schema);
-    const raw = await extractFromPage({
+    const raw = await extractViaModel({
       page: rt.rawPage,
       instruction: step.locator?.semantic.intent ?? step.label ?? `extract ${key}`,
       schema: zschema as z.ZodType,
@@ -638,7 +613,7 @@ async function runExtract(rt: StepRuntime, step: Step, profile: SectorProfile): 
     if (!check.ok) rt.unvalidated.add(key);
     return {
       status: "ok",
-      detail: check.ok ? "ai-extracted (extractFromPage, validated)" : `ai-extracted (unvalidated: ${check.error})`,
+      detail: check.ok ? "ai-extracted (validated)" : `ai-extracted (unvalidated: ${check.error})`,
     };
   }
 
@@ -1024,10 +999,11 @@ function apiStep(step: Step, api: ApiStepSpec, index: number, profile: SectorPro
 }
 
 /**
- * Auth subflow → Libretto `librettoAuthenticate` bound to the loaded auth profile.
- * `isSignedIn` short-circuits when a profile was loaded; `signIn` drives a scripted
- * login only when credentials + login locators are authored, otherwise it throws so
- * the runner falls back to interactive/paused HITL (the "first login manual" rule).
+ * Auth subflow — bound to the loaded auth profile (ADR-0004: in-house,
+ * replaces the removed dependency's scripted-authenticate helper).
+ * `isSignedIn` short-circuits when a profile was loaded; the scripted sign-in below only runs when
+ * credentials are vaulted, otherwise it throws so the runner falls back to
+ * interactive/paused HITL (the "first login manual" rule).
  */
 async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Promise<StepOutcome> {
   const isLogin = (step.use ?? "").includes("login") || (target.auth ?? "").includes("login");
@@ -1035,40 +1011,38 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
 
   const page = rt.rawPage;
   const onLoginPage = () => /log[\s-]?in|sign[\s-]?in|authenticate/i.test(page.url());
+  // Signed in if a trusted profile was loaded, or we're no longer on a login URL.
+  const isSignedIn = () => rt.profileLoaded || !onLoginPage();
 
-  const result = await librettoAuthenticate(
-    { session: rt.session, page },
-    {
-      // Signed in if a trusted profile was loaded, or we're no longer on a login URL.
-      isSignedIn: () => rt.profileLoaded || !onLoginPage(),
-      // Best-effort scripted login from vaulted credentials. Resolves fields by
-      // accessible label/role (works on standard forms without a capture). Fills
-      // an authenticator-app OTP if a totp_seed is provided; SMS 2FA still needs
-      // a manual tap (run headed) — after which the session persists to the profile.
-      signIn: async (_ctx, creds) => {
-        const username = String(creds.username ?? rt.secrets.username ?? "");
-        const password = String(creds.password ?? rt.secrets.password ?? "");
-        const totpSeed = String(creds.totp_seed ?? rt.secrets.totp_seed ?? "");
-        if (!username || !password) {
-          throw new Error("scripted login needs username + password — set PORTICO_SECRET_*_USERNAME/PASSWORD (.env)");
-        }
-        await page.getByLabel(/user|login|email/i).first().fill(username, { timeout: 15000 });
-        await page.getByLabel(/password/i).first().fill(password, { timeout: 15000 });
-        await page.getByRole("button", { name: /sign ?in|log ?in|continue/i }).first().click({ timeout: 15000 });
-        await page.waitForLoadState("domcontentloaded").catch(() => {});
-        if (totpSeed) {
-          const otp = page.getByLabel(/code|otp|verification|token|passcode/i).first();
-          if (await otp.count().catch(() => 0)) {
-            await otp.fill(generateTotp(totpSeed), { timeout: 15000 });
-            await page.getByRole("button", { name: /verify|submit|continue|sign ?in/i }).first().click({ timeout: 15000 }).catch(() => {});
-            await page.waitForLoadState("domcontentloaded").catch(() => {});
-          }
-        }
-      },
-      credentials: rt.secrets,
-    },
-  );
-  return { status: "ok", detail: result.usedProfile ? "auth via saved profile" : "scripted login completed" };
+  if (isSignedIn()) return { status: "ok", detail: "auth via saved profile" };
+
+  // Best-effort scripted login from vaulted credentials. Resolves fields by
+  // accessible label/role (works on standard forms without a capture). Fills
+  // an authenticator-app OTP if a totp_seed is provided; SMS 2FA still needs
+  // a manual tap (run headed) — after which the session persists to the profile.
+  const username = rt.secrets.username ?? "";
+  const password = rt.secrets.password ?? "";
+  const totpSeed = rt.secrets.totp_seed ?? "";
+  if (!username || !password) {
+    throw new Error("scripted login needs username + password — set PORTICO_SECRET_*_USERNAME/PASSWORD (.env)");
+  }
+  await page.getByLabel(/user|login|email/i).first().fill(username, { timeout: 15000 });
+  await page.getByLabel(/password/i).first().fill(password, { timeout: 15000 });
+  await page.getByRole("button", { name: /sign ?in|log ?in|continue/i }).first().click({ timeout: 15000 });
+  await page.waitForLoadState("domcontentloaded").catch(() => {});
+  if (totpSeed) {
+    const otp = page.getByLabel(/code|otp|verification|token|passcode/i).first();
+    if (await otp.count().catch(() => 0)) {
+      await otp.fill(generateTotp(totpSeed), { timeout: 15000 });
+      await page.getByRole("button", { name: /verify|submit|continue|sign ?in/i }).first().click({ timeout: 15000 }).catch(() => {});
+      await page.waitForLoadState("domcontentloaded").catch(() => {});
+    }
+  }
+
+  if (!isSignedIn()) {
+    throw new Error("Sign-in completed, but the session is still not signed in.");
+  }
+  return { status: "ok", detail: "scripted login completed" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,26 +1205,6 @@ function buildSemanticCandidates(
   return out;
 }
 
-function renderTemplate(
-  input: string,
-  ctx: {
-    inputs: Record<string, unknown>;
-    output?: Record<string, unknown>;
-    secrets: Record<string, string>;
-    target: Target;
-  },
-): string {
-  return input.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, key: string) => {
-    if (key === "base_url") return ctx.target.base_url;
-    if (key.startsWith("secrets.")) return ctx.secrets[key.slice(8)] ?? "";
-    // Resolve dotted paths against inputs first, then step output (so a `resolve`
-    // step's `as` key and extracted objects are usable downstream, e.g.
-    // "{{location_resolved}}" or "{{selected.time}}").
-    const v = lookupPath(key, ctx.inputs, ctx.output ?? {});
-    return v == null ? "" : String(v);
-  });
-}
-
 /** Walk a dotted key ("selected.time") through inputs, falling back to output. */
 function lookupPath(key: string, inputs?: Record<string, unknown>, output?: Record<string, unknown>): unknown {
   const inp = inputs ?? {};
@@ -1310,52 +1264,3 @@ function assertPolicyAtCompileTime(flow: Flow): void {
   }
 }
 
-/**
- * CLI-runner (subprocess) guard. `press`/`type` methods and frame-scoped
- * locators (`locator.frame`) need live Playwright Locator/Keyboard calls the
- * programmatic runner drives directly; the emitted module re-runs the SAME
- * compiled plan through Libretto's own subprocess machinery, which does not
- * thread these through today. Fail at EMISSION time — before a subprocess
- * even spawns — naming exactly which step blocks it, instead of a confusing
- * runtime error N steps into `npx libretto run`. Does not affect the default
- * programmatic path: `runProgrammatic` never calls `emitWorkflowModule`.
- */
-function assertCliRunnerSupported(flow: Flow): void {
-  for (const step of flow.steps) {
-    if (step.method === "press" || step.method === "type") {
-      throw new Error(
-        `step "${step.label ?? step.type}" uses method "${step.method}", which is not supported by the cli runner; ` +
-          "use the default programmatic runner",
-      );
-    }
-    if (step.locator?.frame && step.locator.frame.length > 0) {
-      throw new Error(
-        `step "${step.label ?? step.type}" targets a frame (locator.frame), which is not supported by the cli runner; ` +
-          "use the default programmatic runner",
-      );
-    }
-  }
-}
-
-/**
- * Emit a standalone Libretto workflow **module** (the generated `workflow()` file)
- * for the `npx libretto run ./file.ts` subprocess path. It embeds the flow + target
- * and rebuilds the canonical workflow via `compileToWorkflow` (heal model + profile
- * resolved from env inside), so there is a single interpreter.
- */
-export function emitWorkflowModule(flow: Flow, target: Target, profileId?: string): string {
-  assertCliRunnerSupported(flow);
-  const flowJson = JSON.stringify(flow, null, 2);
-  const targetJson = JSON.stringify(target, null, 2);
-  const profileArg = profileId ? `, profileName: ${JSON.stringify(profileId)}` : "";
-  return `// AUTO-GENERATED by @portico/engine compiler — do not edit by hand.
-// Canonical Libretto workflow module: run with \`npx libretto run ./this-file.ts\`.
-import { resolveHealModel, compileToWorkflow } from "@portico/engine";
-
-const flow = ${flowJson} as const;
-const target = ${targetJson} as const;
-
-const heal = await resolveHealModel();
-export default compileToWorkflow(flow as any, target as any, { heal${profileArg} });
-`;
-}

@@ -6,7 +6,7 @@
 //     --base-url https://mychart.urmc.rochester.edu --profile mychart-urmc --name schedule
 //
 // Log in, drive the workflow to completion (stop BEFORE booking), press Enter.
-// Output: .libretto/recordings/<name>.json  →  { baseUrl, clicks[], network[] }
+// Output: .portico/recordings/<name>.json  →  { baseUrl, clicks[], network[] }
 // Then:  compile it into a flow draft (CLI `compile`, coming with the store).
 import { createRequire } from "module";
 import { createInterface } from "node:readline/promises";
@@ -26,7 +26,7 @@ const baseUrl = arg("--base-url", "");
 const profileArg = arg("--profile", "default");
 const name = arg("--name", "recording");
 const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
-const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
+const userDataDir = resolve(".portico/profiles", `${profileName}.userdata`);
 
 // --- Network capture policy: same as Libretto's (document/xhr/fetch, drop
 //     images/fonts/media/stylesheets + analytics/ad noise). ------------------
@@ -49,7 +49,7 @@ const shouldLog = (method, url, rt) => {
 const isTextLike = (ct) => ct != null && TEXT_CONTENT_TYPE_RE.test(ct);
 const preview = (s) => s.slice(0, BODY_PREVIEW_CHARS);
 
-const recDir = resolve(".libretto/recordings", name);
+const recDir = resolve(".portico/recordings", name);
 const rawNetworkDir = join(recDir, "raw-network");
 mkdirSync(recDir, { recursive: true });
 
@@ -135,7 +135,7 @@ const page = context.pages()[0] ?? (await context.newPage());
 attachNetwork(page);
 context.on("page", (p) => attachNetwork(p));
 
-console.log(`↻ persistent profile: .libretto/profiles/${profileName}.userdata`);
+console.log(`↻ persistent profile: .portico/profiles/${profileName}.userdata`);
 console.log("● recording clicks + network — drive the workflow normally");
 if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 

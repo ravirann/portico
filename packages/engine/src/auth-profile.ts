@@ -1,31 +1,32 @@
 /**
- * Libretto **auth-profile** persistence — the "log in once, hands-free after" fix.
+ * Auth-profile persistence — the "log in once, hands-free after" fix.
  *
- * Libretto persists a browser storage-state per named profile under
- * `.libretto/profiles/<name>.json`. A workflow authored with
- * `authProfile: { name, refresh: true }` loads that state on launch (skipping
- * login) and writes the updated state back on success.
+ * A per-target browser storage-state is persisted under
+ * `.portico/profiles/<name>.json`. A run started with `--profile <name>`
+ * loads that state on launch (skipping login) and writes the updated state
+ * back on success.
  *
- * `launchBrowser` only accepts a `storageStatePath` string, so this module owns
- * the mapping profileId → profile path, loads it as the launch storage-state, and
- * (when `refresh`) writes the post-run `context.storageState()` back to the same
- * file. That closes the loop the old adapter left open (it returned an object the
- * CLI dropped, so login never persisted).
+ * `launch.ts`'s ephemeral launcher only accepts a `storageStatePath` string,
+ * so this module owns the mapping profileId → profile path, loads it as the
+ * launch storage-state, and (when `refresh`) writes the post-run
+ * `context.storageState()` back to the same file.
  *
- * The on-disk file is a Playwright storage-state JSON, which is exactly what
- * `storageStatePath` consumes — so profiles written here and by `npx libretto` are
- * interchangeable for the login-skip purpose.
+ * ADR-0004 moved this directory from `.libretto/profiles/` — which sat
+ * outside the Docker data volume, so image rebuilds silently dropped every
+ * persisted login (see docs/DEPLOY.md and deploy/docker-compose.yml's
+ * `portico-profiles` volume) — to `.portico/profiles/`, inside it.
+ * `migrateLegacyProfile` below is the one-time, read-fallback shim: existing
+ * `.libretto/profiles/` state is copied forward transparently on first use
+ * rather than silently orphaned.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { BrowserContext } from "playwright";
 
 /**
- * Normalize a profile id to a safe filename stem, matching Libretto's own
- * profile-name convention (lowercase, non-alphanumerics → single dash). Libretto
- * ships `normalizeProfileName` internally but does not re-export it from its
- * package barrel, so we mirror it here.
+ * Normalize a profile id to a safe filename stem (lowercase, non-alphanumerics
+ * → single dash).
  */
 function normalizeProfileName(name: string): string {
   return (
@@ -39,24 +40,61 @@ function normalizeProfileName(name: string): string {
 
 export interface ResolvedProfile {
   name: string;
-  /** Absolute path to `.libretto/profiles/<name>.json` (storage-state snapshot). */
+  /** Absolute path to `.portico/profiles/<name>.json` (storage-state snapshot). */
   path: string;
-  /** Path to hand to `launchBrowser({ storageStatePath })`, if it exists. */
+  /** Path to hand to `launchEphemeralBrowser({ storageStatePath })`, if it exists. */
   loadPath: string | undefined;
   /**
-   * Absolute path to `.libretto/profiles/<name>.userdata/` — a PERSISTENT
+   * Absolute path to `.portico/profiles/<name>.userdata/` — a PERSISTENT
    * on-disk browser profile. Preferred over the storage-state snapshot because
    * it keeps sessionStorage + cache + fingerprint, so login survives across
    * runs on portals (like Epic/MyChart) that a cookie snapshot can't restore.
-   * Shared by the CLI runner and the record/inspect scripts, so one login
-   * serves them all.
+   * Shared with `scripts/serve-browser.mjs`, so a login made there also
+   * serves runs that pass the same `--profile` name.
    */
   userDataDir: string;
   refresh: boolean;
 }
 
 export function profilesDir(cwd = process.cwd()): string {
+  return resolve(cwd, ".portico", "profiles");
+}
+
+/** The pre-ADR-0004 location — read-fallback only, never written to. */
+function legacyProfilesDir(cwd = process.cwd()): string {
   return resolve(cwd, ".libretto", "profiles");
+}
+
+/**
+ * One-time copy-forward: for each artifact (the `.json` storage-state
+ * snapshot, the `.userdata` persistent-context directory) that's missing at
+ * the new (`.portico`) location but present at the old (`.libretto`) one,
+ * copy it forward before the caller reads/writes anything at the new
+ * location. Idempotent — once copied, the new location has it, so later
+ * calls see nothing to migrate. Best-effort: a failed copy must not fail the
+ * run, same as `refreshProfile` below — it just means this run starts fresh,
+ * same as any other profile-not-found case.
+ */
+function migrateLegacyProfile(name: string, cwd?: string): void {
+  const newDir = profilesDir(cwd);
+  const oldDir = legacyProfilesDir(cwd);
+  const newJson = join(newDir, `${name}.json`);
+  const oldJson = join(oldDir, `${name}.json`);
+  const newUserData = join(newDir, `${name}.userdata`);
+  const oldUserData = join(oldDir, `${name}.userdata`);
+
+  const migrateJson = !existsSync(newJson) && existsSync(oldJson);
+  const migrateUserData = !existsSync(newUserData) && existsSync(oldUserData);
+  if (!migrateJson && !migrateUserData) return;
+
+  try {
+    mkdirSync(newDir, { recursive: true });
+    if (migrateJson) cpSync(oldJson, newJson);
+    if (migrateUserData) cpSync(oldUserData, newUserData, { recursive: true });
+    console.log(`↻ migrated auth profile "${name}" from .libretto/profiles to .portico/profiles (ADR-0004, one-time)`);
+  } catch {
+    /* best-effort — see doc comment above */
+  }
 }
 
 /** Map a caller-supplied profile id to a normalized on-disk auth profile. */
@@ -65,6 +103,7 @@ export function resolveProfile(
   opts: { refresh?: boolean; cwd?: string } = {},
 ): ResolvedProfile {
   const name = normalizeProfileName(profileId);
+  migrateLegacyProfile(name, opts.cwd);
   const dir = profilesDir(opts.cwd);
   const path = join(dir, `${name}.json`);
   return {

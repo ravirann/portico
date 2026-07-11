@@ -9,7 +9,7 @@
 //     --session conversion-flow
 //
 // Auth persistence: we launch a PERSISTENT browser context (a real on-disk
-// profile at .libretto/profiles/<name>.userdata/) rather than a storage-state
+// profile at .portico/profiles/<name>.userdata/) rather than a storage-state
 // snapshot. Storage-state only carries cookies + localStorage, which is NOT
 // enough to restore an Epic/MyChart session (it also keeps state in
 // sessionStorage and invalidates server-side on browser close). A persistent
@@ -33,7 +33,7 @@ const baseUrl = arg("--base-url", "");
 const profileArg = arg("--profile", "default");
 const sessionName = arg("--session", "conversion-flow");
 const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
-const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
+const userDataDir = resolve(".portico/profiles", `${profileName}.userdata`);
 
 // --- Capture policy: identical to Libretto's session-telemetry so the output is
 //     directly comparable. Log document/xhr/fetch (and any write method); drop
@@ -57,7 +57,7 @@ function shouldLog(method, url, resourceType) {
 const isTextLike = (ct) => ct != null && TEXT_CONTENT_TYPE_RE.test(ct);
 const preview = (s) => s.slice(0, BODY_PREVIEW_CHARS);
 
-const sessionDir = resolve(".libretto/sessions", sessionName);
+const sessionDir = resolve(".portico/sessions", sessionName);
 const jsonlPath = join(sessionDir, "network.jsonl");
 const rawNetworkDir = join(sessionDir, "raw-network");
 mkdirSync(sessionDir, { recursive: true });
@@ -170,8 +170,8 @@ const page = context.pages()[0] ?? (await context.newPage());
 attach(page, pageIndex);
 context.on("page", (p) => attach(p, ++pageIndex));
 
-console.log(`↻ persistent profile: .libretto/profiles/${profileName}.userdata (login persists here across runs)`);
-console.log(`● recording network → .libretto/sessions/${sessionName}/network.jsonl`);
+console.log(`↻ persistent profile: .portico/profiles/${profileName}.userdata (login persists here across runs)`);
+console.log(`● recording network → .portico/sessions/${sessionName}/network.jsonl`);
 if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -180,6 +180,6 @@ rl.close();
 
 // Persistent context flushes the profile to disk on close — no manual save.
 await context.close();
-console.log(`\n✔ captured ${logged} request(s) → .libretto/sessions/${sessionName}/network.jsonl`);
+console.log(`\n✔ captured ${logged} request(s) → .portico/sessions/${sessionName}/network.jsonl`);
 console.log(`  next: node scripts/analyze-network.mjs --session ${sessionName}`);
 process.exit(0);

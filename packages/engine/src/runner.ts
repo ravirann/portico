@@ -1,43 +1,54 @@
 /**
  * Engine runner.
  *
- * Default = **programmatic / in-process**: `launchBrowser` → a page → drive the
- * compiled plan step-by-step, with tracing, per-step screenshots, HITL, model-
- * gated recovery, and auth-profile load/refresh. This is the path the CLI + console
- * use; it needs no model and no network to Libretto Cloud, so the smoke flow stays
+ * Programmatic / in-process, the only runner since ADR-0004: launch a browser
+ * (`launch.ts`, or a persistent profile / CDP attach — see `runProgrammatic`
+ * below) → a page → drive the compiled plan step-by-step, with tracing,
+ * per-step screenshots, HITL, model-gated recovery, and auth-profile
+ * load/refresh. This is the path the CLI + console use; it needs no model and
+ * no network to any third-party automation cloud, so the smoke flow stays
  * green keyless.
  *
- * Opt-in (`PORTICO_LIBRETTO_RUNNER=cli`) = **subprocess**: emit the generated
- * `workflow()` module and run it with `npx libretto run`, for when you want
- * Libretto's own auth-profile/pause/resume machinery end-to-end.
+ * Through ADR-0001 there was a second, opt-in (`PORTICO_LIBRETTO_RUNNER=cli`)
+ * subprocess runner that emitted a generated workflow module and ran it via a
+ * third-party CLI. ADR-0004 retired it — see `runnerMode` below, which now
+ * fails fast if that env var is still set, instead of silently doing nothing.
  */
 
-import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { createRecoveryPage, launchBrowser } from "libretto";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { chromium } from "playwright";
 import type { BrowserContext, Page } from "playwright";
 import { redact } from "@portico/vault";
 import { resolveSectorProfile } from "@portico/flow-spec";
 import type { Flow, Target } from "@portico/flow-spec";
 import type { EngineRunOptions, EngineRunResult, StepTrace } from "./types.js";
-import { compileFlow, emitWorkflowModule, waitForDomQuiet, type StepRuntime } from "./compiler.js";
+import { compileFlow, waitForDomQuiet, type StepRuntime } from "./compiler.js";
 import { missingFlowInputs } from "./validate-flow.js";
 import { resolveHealModel } from "./model.js";
 import { resolveProfile } from "./auth-profile.js";
 import { createRecorder } from "./recording.js";
 import { classifyError, PorticoStepError } from "./errors.js";
+import { launchEphemeralBrowser } from "./launch.js";
 
 const now = () => Date.now();
 
-export function runnerMode(env: NodeJS.ProcessEnv = process.env): "programmatic" | "cli" {
-  return env.PORTICO_LIBRETTO_RUNNER === "cli" ? "cli" : "programmatic";
+/**
+ * Always `"programmatic"` — the only runner since ADR-0004. Still validates
+ * `PORTICO_LIBRETTO_RUNNER`: an operator's stale env var from before the
+ * migration should fail loudly, not silently no-op into the (now the only)
+ * default. Kept as a real function — rather than inlining the check into
+ * `runFlow` — because `capabilities()` (adapters/portico.ts) also probes it.
+ */
+export function runnerMode(env: NodeJS.ProcessEnv = process.env): "programmatic" {
+  if (env.PORTICO_LIBRETTO_RUNNER) {
+    throw new Error("the libretto cli runner was removed (ADR-0004); unset PORTICO_LIBRETTO_RUNNER");
+  }
+  return "programmatic";
 }
 
 export async function runFlow(opts: EngineRunOptions): Promise<EngineRunResult> {
-  if (runnerMode() === "cli") return runViaCli(opts);
+  runnerMode(); // fail fast if PORTICO_LIBRETTO_RUNNER is still set (see above)
   return runProgrammatic(opts);
 }
 
@@ -180,7 +191,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
   // record/inspect scripts, so one login serves them all. Storage-state snapshots
   // (cookies + localStorage only) can't restore portals like Epic/MyChart that
   // also keep sessionStorage / bind the session server-side. Profile-less runs
-  // use an ephemeral Libretto session (storage-state path still honored).
+  // use an ephemeral browser session (storage-state path still honored).
   const cdpEndpoint = opts.cdpEndpoint ?? process.env.PORTICO_CDP_ENDPOINT;
   let context: BrowserContext;
   let rawPage: Page;
@@ -209,8 +220,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
     rawPage = context.pages()[0] ?? (await context.newPage());
     closeSession = () => context.close();
   } else {
-    const session = await launchBrowser({
-      sessionName: runId,
+    const session = await launchEphemeralBrowser({
       headless: opts.headless ?? true,
       viewport: { width: 1440, height: 900 },
       storageStatePath,
@@ -219,7 +229,13 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
     rawPage = session.page;
     closeSession = () => session.close();
   }
-  const page: Page = heal ? createRecoveryPage(rawPage, { recoveryAction: heal.recoveryAction }) : rawPage;
+  // Recovery is explicit now (recover.ts, invoked only from runAct's heal
+  // path) rather than an implicit Proxy wrapping every page/locator method —
+  // so `page` and `rawPage` are simply the same object. Both names are kept
+  // on StepRuntime (compiler.ts) for their distinct call-site meaning: `page`
+  // is what step compilers resolve locators against, `rawPage` is what
+  // recovery/evaluate/url() work against directly.
+  const page: Page = rawPage;
 
   const recorder = createRecorder(rawPage, {
     runId,
@@ -525,65 +541,5 @@ export function renderTemplate(input: string, opts: EngineRunOptions, output: Re
       base = (base as Record<string, unknown>)[seg];
     }
     return base == null ? "" : String(base);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Subprocess runner (opt-in): emit a workflow module and `npx libretto run` it.
-// ---------------------------------------------------------------------------
-
-async function runViaCli(opts: EngineRunOptions): Promise<EngineRunResult> {
-  const dir = mkdtempSync(join(tmpdir(), "portico-wf-"));
-  const modulePath = join(dir, `${opts.flow.key}.workflow.ts`);
-  writeFileSync(modulePath, emitWorkflowModule(opts.flow, opts.target, opts.profileId), "utf8");
-
-  const args = ["libretto", "run", modulePath, opts.headless === false ? "--headed" : "--headless"];
-  if (opts.profileId) args.push("--session", opts.profileId);
-
-  const startedAt = now();
-  const { code, stdout, stderr } = await spawnCollect("npx", args, opts.signal);
-  const traces: StepTrace[] = [
-    {
-      index: 0,
-      type: "subprocess",
-      label: `npx ${args.join(" ")}`,
-      status: code === 0 ? "ok" : "failed",
-      detail: (code === 0 ? stdout : stderr).trim().slice(-2000) || undefined,
-      startedAt,
-      endedAt: now(),
-    },
-  ];
-  if (code === 0) return { status: "completed", output: parseTailJson(stdout), traces };
-  return {
-    status: "failed",
-    output: {},
-    traces,
-    failure: { stepIndex: 0, reason: stderr.trim().slice(-500) || `libretto run exited ${code}`, resumable: false },
-  };
-}
-
-function parseTailJson(out: string): Record<string, unknown> {
-  const line = out.trim().split("\n").filter(Boolean).pop() ?? "";
-  if (!line.startsWith("{")) return {};
-  try {
-    return JSON.parse(line) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
-function spawnCollect(
-  cmd: string,
-  args: string[],
-  signal?: AbortSignal,
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((res, rej) => {
-    const child = spawn(cmd, args, { env: process.env, signal });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
-    child.on("error", rej);
-    child.on("close", (code) => res({ code, stdout, stderr }));
   });
 }

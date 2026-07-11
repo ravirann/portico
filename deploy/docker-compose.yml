@@ -35,8 +35,14 @@ services:
       # Everything Portico persists — SQLite store (runs/steps/sessions/
       # flows/audit) + run artifacts — lives under /app/data (see
       # packages/store/src/store.ts's DEFAULT_DB_PATH). Named volume so it
-      # survives image rebuilds/recreates; nothing else is stateful.
+      # survives image rebuilds/recreates.
       - portico-data:/app/data
+      # Auth profiles (packages/engine/src/auth-profile.ts) — persisted
+      # storage-state + persistent-context userdata that let a run skip
+      # login. ADR-0004: this used to live at .libretto/profiles, OUTSIDE any
+      # volume, so a rebuild silently dropped every persisted login. Now
+      # under /app/.portico, covered by its own named volume.
+      - portico-profiles:/app/.portico
     # Playwright's own Docker guidance: avoid Chromium crashing under the
     # default 64MB /dev/shm, and reap zombie child processes since Chromium's
     # multi-process model assumes a real init as PID 1.
@@ -46,3 +52,4 @@ services:
 
 volumes:
   portico-data:
+  portico-profiles:

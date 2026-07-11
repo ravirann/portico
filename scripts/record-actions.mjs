@@ -25,7 +25,7 @@ const arg = (flag, def) => {
 const baseUrl = arg("--base-url", "");
 const profileArg = arg("--profile", "default");
 const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
-const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
+const userDataDir = resolve(".portico/profiles", `${profileName}.userdata`);
 
 const clicks = [];
 
@@ -69,7 +69,7 @@ await context.addInitScript(() => {
 });
 
 const page = context.pages()[0] ?? (await context.newPage());
-console.log(`↻ persistent profile: .libretto/profiles/${profileName}.userdata`);
+console.log(`↻ persistent profile: .portico/profiles/${profileName}.userdata`);
 console.log("● recording clicks (role · text) — drive the wizard normally");
 if (baseUrl) await page.goto(baseUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
 

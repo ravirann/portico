@@ -6,7 +6,7 @@
  * trying to decide "should I retry this run, or is it going to fail the same
  * way forever?" `PorticoStepError` lets a throw site name what KIND of
  * failure this is; `classifyError` recovers a kind (and its resumability)
- * from ANY thrown value, including the plain Errors Playwright/Node/Libretto
+ * from ANY thrown value, including the plain Errors Playwright/Node
  * themselves raise, so the runner can make that call uniformly regardless of
  * where the error came from.
  */

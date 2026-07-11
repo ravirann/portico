@@ -3,7 +3,7 @@
  * not a hardcoded label. The console badge should tell the truth: a flow that
  * harvested data purely from passive network capture is cheaper and more robust
  * than one that drove the DOM, which in turn is cheaper than one that needed a
- * model to self-heal. See adapters/libretto.ts for the tiers themselves.
+ * model to self-heal. See adapters/portico.ts for the tiers themselves.
  */
 import type { StepTrace } from "./types.js";
 

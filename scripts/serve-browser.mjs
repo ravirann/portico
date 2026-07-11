@@ -50,7 +50,10 @@ const port = portArg ? Number(portArg) : await findFreePort();
 const tenant = arg("--tenant", "default");
 const connector = arg("--connector", "");
 const profileName = profileArg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default";
-const userDataDir = resolve(".libretto/profiles", `${profileName}.userdata`);
+// ADR-0004: profiles moved from .libretto/profiles to .portico/profiles (the
+// former sat outside the Docker data volume, so image rebuilds silently
+// dropped every persisted login). Matches auth-profile.ts's profilesDir().
+const userDataDir = resolve(".portico/profiles", `${profileName}.userdata`);
 
 // Track this browser as a long-lived session so it shows up in the store
 // (visible in the console, kept alive via a keep-alive touch, and closable).
@@ -96,7 +99,7 @@ if (store) {
 }
 
 console.log(`\n● browser ready — CDP endpoint: ${cdpEndpoint}`);
-console.log(`  profile: .libretto/profiles/${profileName}.userdata`);
+console.log(`  profile: .portico/profiles/${profileName}.userdata`);
 if (store) console.log(`  session:  ${sessionId} (tenant: ${tenant})`);
 console.log("\n  1) Log into the portal in this window.");
 console.log("  2) Leave it open.");

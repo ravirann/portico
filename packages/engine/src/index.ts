@@ -2,16 +2,17 @@
  * @portico/engine — the engine boundary + adapter registry.
  *
  * Portico's platform layer depends only on `EngineAdapter`. The concrete engine
- * is selected here (Libretto for the pilot; a fallback adapter is retained).
- * See docs/decisions/0001-execution-engine.md.
+ * is selected here (Portico's own in-house engine; a fallback adapter is
+ * retained). See docs/decisions/0001-execution-engine.md and
+ * docs/decisions/0004-own-engine.md.
  */
 
 export * from "./types.js";
-export { LibrettoAdapter } from "./adapters/libretto.js";
+export { PorticoAdapter } from "./adapters/portico.js";
 export { FallbackAdapter } from "./adapters/fallback.js";
 
-// Compiler + runner surface (used by generated workflow modules + tooling).
-export { compileFlow, compileToWorkflow, emitWorkflowModule, waitForDomQuiet } from "./compiler.js";
+// Compiler + runner surface.
+export { compileFlow, waitForDomQuiet } from "./compiler.js";
 export type { CompileResult, CompiledStep, StepRuntime } from "./compiler.js";
 export { runFlow, runnerMode } from "./runner.js";
 export { resolveHealModel, healModelConfigured } from "./model.js";
@@ -33,18 +34,23 @@ export { deriveTier } from "./tier.js";
 export type { Tier } from "./tier.js";
 
 import type { EngineAdapter } from "./types.js";
-import { LibrettoAdapter } from "./adapters/libretto.js";
+import { PorticoAdapter } from "./adapters/portico.js";
 import { FallbackAdapter } from "./adapters/fallback.js";
 
-export type EngineName = "libretto" | "fallback";
+// "portico" is the canonical engine since ADR-0004; "libretto" survives only
+// as a deprecated selector alias for external callers that pinned the old
+// name — it resolves to the same in-house adapter, not to the removed npm
+// dependency. See adapters/portico.ts's header.
+export type EngineName = "portico" | "libretto" | "fallback";
 
 const REGISTRY: Record<EngineName, () => EngineAdapter> = {
-  libretto: () => new LibrettoAdapter(),
+  portico: () => new PorticoAdapter(),
+  libretto: () => new PorticoAdapter(),
   fallback: () => new FallbackAdapter(),
 };
 
-/** Resolve the engine for a run. Defaults to the pilot engine (Libretto). */
-export function getEngine(name: EngineName = "libretto"): EngineAdapter {
+/** Resolve the engine for a run. Defaults to Portico's own engine. */
+export function getEngine(name: EngineName = "portico"): EngineAdapter {
   const make = REGISTRY[name];
   if (!make) throw new Error(`Unknown engine '${name}'. Known: ${Object.keys(REGISTRY).join(", ")}`);
   return make();

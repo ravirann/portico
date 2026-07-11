@@ -18,13 +18,11 @@
  */
 
 import type { LanguageModel } from "ai";
-import { popupRecoveryAction, type RecoveryAction } from "libretto";
 
 export interface HealModel {
-  /** ai-SDK LanguageModel for `extractFromPage` / `attemptWithRecovery`. */
+  /** ai-SDK LanguageModel for extraction (compiler.ts's `runExtract`) and the
+   *  optional model-assisted dismissal step in `recover.ts`. */
   languageModel: LanguageModel;
-  /** Libretto recovery action (popup/overlay recovery) for `recoveryAction`. */
-  recoveryAction: RecoveryAction;
   provider: string;
   modelId: string;
 }
@@ -80,7 +78,6 @@ async function build(env: NodeJS.ProcessEnv): Promise<HealModel | null> {
 
   return {
     languageModel,
-    recoveryAction: popupRecoveryAction({ languageModel }),
     provider,
     modelId,
   };
