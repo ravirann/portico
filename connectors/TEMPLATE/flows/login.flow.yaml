@@ -29,5 +29,9 @@ steps:
     condition: two_factor_challenge_present
   - type: assert
     label: Logged in
-    condition: dashboard_visible
+    # PLACEHOLDER — supported forms: "page_loaded", "url_contains:<text>",
+    # "text_visible:<text>", "selector_visible:<css>", "output_present:<key>".
+    # Adjust to a URL fragment (or visible text) that only appears once
+    # logged in, e.g. "url_contains:/dashboard" or "text_visible:Welcome".
+    condition: "url_contains:/dashboard"
 # On success the engine persists the trusted-device session back to the vault.

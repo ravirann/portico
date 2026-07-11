@@ -8,7 +8,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compileAgentRun, idFreeMatch, idsInUrl, type AuthorResult } from "./index.js";
+import type { Flow } from "@portico/flow-spec";
+import { resolveSectorProfile } from "@portico/flow-spec";
+import { compileAgentRun, applySectorProfile, idFreeMatch, idsInUrl, type AuthorResult } from "./index.js";
 
 const FINAL_URL = "https://pulse.clinikk.com/claims/workspace?claimId=4305";
 
@@ -211,4 +213,128 @@ test("a search/read goal never emits a mutation (intent gate blocks session/hear
   }) as unknown as Array<{ api: { url: string } }>;
   assert.equal(writes.length, 1);
   assert.ok(writes[0]!.api.url.includes("/api/orders"));
+});
+
+// ---------------------------------------------------------------------------
+// Sector profiles: additive noise filtering, authPattern gating, stamping
+// ---------------------------------------------------------------------------
+
+test("compileAgentRun applies a sector profile's noisePatterns additively alongside INTEGRATION_NOISE_RE (lookup/mutation classification)", () => {
+  const goal = "search phone 9717352594 and update the customer's LOP to English";
+  const requests = [
+    { method: "GET", url: "https://x/api/customers?phoneNumber=9717352594", pathname: "/api/customers", resourceType: "fetch" },
+    // Hardcoded INTEGRATION_NOISE_RE term — must still be excluded regardless of profile.
+    { method: "GET", url: "https://x/api/kaleyra/status?phoneNumber=9717352594", pathname: "/api/kaleyra/status", resourceType: "fetch" },
+    // "cloudsearch" is a communications-only sector noise term — NOT in INTEGRATION_NOISE_RE
+    // or BOOT_NOISE_RE — so this is only excluded when the profile is applied.
+    { method: "GET", url: "https://x/api/cloudsearch?phoneNumber=9717352594", pathname: "/api/cloudsearch", resourceType: "fetch" },
+    { method: "PUT", url: "https://x/api/customers/125884/lop", pathname: "/api/customers/125884/lop", resourceType: "fetch", postData: JSON.stringify({ lop: "english" }) },
+  ];
+  const bodies = new Map([["/api/customers", JSON.stringify({ id: 125884 })]]);
+  const profile = resolveSectorProfile("communications");
+  const flow = compileAgentRun(
+    goal,
+    "https://x/customer-lens",
+    [],
+    "lop-sector-noise",
+    requests,
+    bodies,
+    {},
+    [{ name: "phone_number", value: "9717352594", description: "" }],
+    "update",
+    profile,
+  );
+  const lookupMatches = flow.steps.filter((s) => s.type === "intercept").map((s) => s.intercept!.url_contains);
+  assert.ok(!lookupMatches.some((m) => m.includes("kaleyra")), "INTEGRATION_NOISE_RE must still exclude kaleyra");
+  assert.ok(!lookupMatches.some((m) => m.includes("cloudsearch")), "sector noisePatterns must additively exclude cloudsearch");
+  assert.ok(lookupMatches.some((m) => m.includes("customers")), "the real lookup must still be captured");
+});
+
+test("compileAgentRun's navigate+harvest ranking also excludes sector noisePatterns from data-response candidates", () => {
+  const localResponses = [
+    // Biggest response by far, and NOT matched by BOOT_NOISE_RE — without the
+    // sector hook this would win the ranking outright.
+    { url: "https://x/api/cloudsearch/blob", pathname: "/api/cloudsearch/blob", bytes: 999999, contentType: "application/json" },
+    { url: "https://x/api/orders", pathname: "/api/orders", bytes: 5000, contentType: "application/json" },
+  ];
+  const profile = resolveSectorProfile("communications");
+  const flow = compileAgentRun("open list", "https://x/orders", localResponses, "orders-list-sector", [], new Map(), {}, [], "read", profile);
+  const first = flow.steps.find((s) => s.type === "intercept")!;
+  assert.equal(first.intercept!.url_contains, "/api/orders");
+});
+
+test("without a sector profile, a communications-only noise term is NOT excluded (no-regression default)", () => {
+  const localResponses = [
+    { url: "https://x/api/cloudsearch/blob", pathname: "/api/cloudsearch/blob", bytes: 999999, contentType: "application/json" },
+    { url: "https://x/api/orders", pathname: "/api/orders", bytes: 5000, contentType: "application/json" },
+  ];
+  // No profile argument at all — defaults to generic (empty noisePatterns).
+  const flow = compileAgentRun("open list", "https://x/orders", localResponses, "orders-list-generic");
+  const first = flow.steps.find((s) => s.type === "intercept")!;
+  assert.equal(first.intercept!.url_contains, "/api/cloudsearch/blob"); // biggest wins — proves filtering is opt-in via a sector
+});
+
+test("cookie-session authPattern skips localStorage header-chaining discovery entirely", () => {
+  const goal = "search phone 9717352594 and set the customer's LOP to English";
+  const requests = [
+    { method: "GET", url: "https://pulse.clinikk.com/api/proxy/v3/customers?phoneNumber=9717352594", pathname: "/api/proxy/v3/customers", resourceType: "fetch" },
+    {
+      method: "PUT",
+      url: "https://pulse.clinikk.com/api/proxy/v3/family/109862/members/125884/lop",
+      pathname: "/api/proxy/v3/family/109862/members/125884/lop",
+      resourceType: "fetch",
+      postData: JSON.stringify({ lop: "english" }),
+      headers: { authorization: "Bearer JWT_TOKEN_VALUE", "content-type": "application/json", "x-clinic-id": "42" },
+    },
+  ];
+  const bodies = new Map([["/api/proxy/v3/customers", JSON.stringify({ id: 125884, family: { id: 109862 } })]]);
+  const ls = { userToken: "JWT_TOKEN_VALUE", selectedClinicId: "42" };
+  const profile = resolveSectorProfile("healthcare");
+  assert.equal(profile.authoring.authPattern, "cookie-session");
+
+  const flow = compileAgentRun(goal, "https://pulse.clinikk.com/customer-lens", [], "lop-cookie", requests, bodies, ls, [], "update", profile);
+  // No localStorage-discovered auth-read steps — cookie-session never chains headers to
+  // localStorage. (The mutation step itself is also type "read" — the read+api+extract
+  // shape — so filter on the `.read` property, like the localStorage-discovery test above.)
+  const reads = flow.steps.filter((s) => s.type === "read" && (s as { read?: unknown }).read);
+  assert.equal(reads.length, 0);
+  // Header values are kept verbatim (not rewritten to {{...}} refs) since discovery was skipped.
+  const write = flow.steps.find((s) => (s as unknown as { api?: { method?: string } }).api?.method === "PUT") as unknown as {
+    api: { headers: Record<string, string> };
+  };
+  assert.equal(write.api.headers.authorization, "Bearer JWT_TOKEN_VALUE");
+  assert.equal(write.api.headers["x-clinic-id"], "42");
+});
+
+test("applySectorProfile is a no-op when no sector was requested", () => {
+  const flow: Flow = { key: "k", version: 1, steps: [] };
+  const profile = resolveSectorProfile(undefined); // generic
+  const out = applySectorProfile(flow, undefined, profile, "read");
+  assert.equal(out, flow);
+  assert.equal(out.sector, undefined);
+});
+
+test("applySectorProfile stamps sector and defaults dry_run_only for an update-intent flow under a dryRunDefaultForWrites profile", () => {
+  const flow: Flow = { key: "k", version: 1, steps: [] };
+  const profile = resolveSectorProfile("healthcare");
+  assert.equal(profile.guards.dryRunDefaultForWrites, true);
+  const out = applySectorProfile(flow, "healthcare", profile, "update");
+  assert.equal(out.sector, "healthcare");
+  assert.equal(out.guard?.dry_run_only, true);
+});
+
+test("applySectorProfile never clobbers an explicit dry_run_only:false", () => {
+  const flow: Flow = { key: "k", version: 1, guard: { dry_run_only: false }, steps: [] };
+  const profile = resolveSectorProfile("healthcare");
+  const out = applySectorProfile(flow, "healthcare", profile, "update");
+  assert.equal(out.guard?.dry_run_only, false);
+  assert.equal(out.sector, "healthcare"); // sector is still stamped independently
+});
+
+test("applySectorProfile does not default dry_run_only for a read-intent flow even under a dryRunDefaultForWrites profile", () => {
+  const flow: Flow = { key: "k", version: 1, steps: [] };
+  const profile = resolveSectorProfile("healthcare");
+  const out = applySectorProfile(flow, "healthcare", profile, "read");
+  assert.equal(out.guard?.dry_run_only, undefined);
+  assert.equal(out.sector, "healthcare");
 });

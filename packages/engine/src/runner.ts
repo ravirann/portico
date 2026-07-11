@@ -20,6 +20,7 @@ import { createRecoveryPage, launchBrowser } from "libretto";
 import { chromium } from "playwright";
 import type { BrowserContext, Page } from "playwright";
 import { redact } from "@portico/vault";
+import { resolveSectorProfile } from "@portico/flow-spec";
 import type { Flow, Target } from "@portico/flow-spec";
 import type { EngineRunOptions, EngineRunResult, StepTrace } from "./types.js";
 import { compileFlow, emitWorkflowModule, waitForDomQuiet, type StepRuntime } from "./compiler.js";
@@ -27,6 +28,7 @@ import { missingFlowInputs } from "./validate-flow.js";
 import { resolveHealModel } from "./model.js";
 import { resolveProfile } from "./auth-profile.js";
 import { createRecorder } from "./recording.js";
+import { classifyError, PorticoStepError } from "./errors.js";
 
 const now = () => Date.now();
 
@@ -39,8 +41,74 @@ export async function runFlow(opts: EngineRunOptions): Promise<EngineRunResult> 
   return runProgrammatic(opts);
 }
 
+/**
+ * Exact match or dot-suffix match: "sub.example.com" is allowed by
+ * "example.com", but "evilexample.com" is not (no accidental prefix match).
+ * Case-insensitive (hostnames are). Pure — exported for unit tests.
+ */
+export function hostAllowed(host: string, allowed: string[]): boolean {
+  const h = host.toLowerCase();
+  return allowed.some((raw) => {
+    const domain = raw.toLowerCase();
+    return domain.length > 0 && (h === domain || h.endsWith(`.${domain}`));
+  });
+}
+
+export interface EgressCheckInput {
+  method: string;
+  host: string;
+  isMainFrameNavigation: boolean;
+}
+
+/**
+ * Decide whether to block a request under the egress boundary:
+ *   (a) a main-frame navigation to a non-allowed host, or
+ *   (b) a non-GET/HEAD/OPTIONS (mutating) request to a non-allowed host.
+ * GET subresources (CDNs, fonts, analytics beacons) always pass — the
+ * boundary stops actions and navigations, not third-party rendering. Pure —
+ * exported for unit tests (no Playwright Route/Request object needed).
+ */
+export function shouldBlockEgress(input: EgressCheckInput, allowedDomains: string[]): boolean {
+  if (hostAllowed(input.host, allowedDomains)) return false;
+  if (input.isMainFrameNavigation) return true;
+  return !["GET", "HEAD", "OPTIONS"].includes(input.method.toUpperCase());
+}
+
+/**
+ * Race `promise` against `signal` firing. On abort, rejects with
+ * `PorticoStepError("aborted")` WITHOUT cancelling the underlying operation
+ * (Playwright ops aren't cancellable mid-flight) — the step fails fast while
+ * the page op finishes in the background; the run's `finally` teardown closes
+ * the browser shortly after, cutting it off. Always removes its own abort
+ * listener (on either branch), so one call per step never leaks listeners
+ * onto a long-lived signal. Exported for unit tests.
+ */
+export function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new PorticoStepError("aborted", "run was aborted"));
+  return new Promise<T>((res, rej) => {
+    const onAbort = () => rej(new PorticoStepError("aborted", "run was aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    promise.then(
+      (v) => {
+        cleanup();
+        res(v);
+      },
+      (e) => {
+        cleanup();
+        rej(e);
+      },
+    );
+  });
+}
+
 async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult> {
   const { flow, target } = opts;
+  // Sector profile: caller-supplied override, else the flow's own stamped
+  // sector, else `generic` (bit-identical to the engine's historical
+  // hardcoded defaults) — see @portico/flow-spec sectors.ts.
+  const sectorProfile = resolveSectorProfile(opts.sector ?? flow.sector);
 
   // Fail FAST on missing inputs — before any browser launches. A templated
   // locator name that renders to "" either throws a cryptic locator error
@@ -54,9 +122,41 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
       status: "failed",
       output: {},
       traces: [
-        { index: 0, type: "inputs", label: "Validate run inputs", status: "failed", detail: reason, startedAt: now(), endedAt: now() },
+        {
+          index: 0,
+          type: "inputs",
+          label: "Validate run inputs",
+          status: "failed",
+          detail: reason,
+          startedAt: now(),
+          endedAt: now(),
+          errorKind: "validation",
+        },
       ],
-      failure: { stepIndex: 0, reason, resumable: false },
+      failure: { stepIndex: 0, reason, resumable: false, kind: "validation" },
+    };
+  }
+
+  // A flow guarded dry_run_only refuses to run live at all — same "before any
+  // browser launches" spirit as the missing-inputs gate above.
+  if (flow.guard?.dry_run_only && opts.mode === "live") {
+    const reason = "flow is guarded dry_run_only; refusing live mode";
+    return {
+      status: "failed",
+      output: {},
+      traces: [
+        {
+          index: 0,
+          type: "guard",
+          label: "Guard: dry_run_only",
+          status: "failed",
+          detail: reason,
+          startedAt: now(),
+          endedAt: now(),
+          errorKind: "guard",
+        },
+      ],
+      failure: { stepIndex: 0, reason, resumable: false, kind: "guard" },
     };
   }
 
@@ -130,9 +230,12 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
   });
   await recorder.start();
 
-  const { plan, profileName } = compileFlow(flow, target, { heal, profileName: profile?.name });
+  const { plan, profileName } = compileFlow(flow, target, { heal, profileName: profile?.name }, sectorProfile);
   const traces: StepTrace[] = [];
-  const output: Record<string, unknown> = {};
+  // Seed prior output (paired with resumeFrom) so a resumed run's templated
+  // {{output.x}} references resolve to what an earlier attempt already
+  // produced, instead of "".
+  const output: Record<string, unknown> = seedOutput(opts.resumeOutput);
   const unvalidated = new Set<string>();
 
   const rt: StepRuntime = {
@@ -147,7 +250,47 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
     heal,
     profileLoaded: Boolean(profile?.loadPath),
     mode: opts.mode,
+    skippedMutations: [],
     template: (s: string) => renderTemplate(s, opts, output),
+  };
+
+  // Egress boundary: abort any request outside opts.allowedDomains before it
+  // leaves the browser — a main-frame navigation, or any mutating (non-GET)
+  // request. GET subresources always pass (CDNs/fonts/analytics render
+  // fine); the boundary stops ACTIONS and NAVIGATIONS, not rendering.
+  // Opt-out via PORTICO_EGRESS_ENFORCE=0 for local/dev setups (e.g. a proxy).
+  const allowedDomains = opts.allowedDomains ?? [];
+  const egressEnabled = allowedDomains.length > 0 && process.env.PORTICO_EGRESS_ENFORCE !== "0";
+  const blockedRequests: string[] = [];
+  if (egressEnabled) {
+    await context.route("**/*", async (route, request) => {
+      let host = "";
+      try {
+        host = new URL(request.url()).hostname;
+      } catch {
+        /* malformed/opaque URL (e.g. data:) — empty host never matches an allow-list entry */
+      }
+      let isMainFrameNavigation = false;
+      try {
+        isMainFrameNavigation = request.isNavigationRequest() && request.frame().parentFrame() === null;
+      } catch {
+        /* service-worker requests have no frame() — never a main-frame navigation */
+      }
+      if (shouldBlockEgress({ method: request.method(), host, isMainFrameNavigation }, allowedDomains)) {
+        blockedRequests.push(`${request.method()} ${host}`);
+        await route.abort("blockedbyclient");
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  /** Non-empty-only extras shared by every RunResult this function returns. */
+  const resultExtras = (): Partial<Pick<EngineRunResult, "skippedMutations" | "blockedRequests">> => {
+    const extra: Partial<Pick<EngineRunResult, "skippedMutations" | "blockedRequests">> = {};
+    if (rt.skippedMutations.length > 0) extra.skippedMutations = [...rt.skippedMutations];
+    if (blockedRequests.length > 0) extra.blockedRequests = [...blockedRequests];
+    return extra;
   };
 
   try {
@@ -184,6 +327,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
           detail: reason,
           startedAt,
           endedAt: now(),
+          errorKind: "navigation",
         };
         traces.push(trace);
         opts.onStep?.(trace);
@@ -193,9 +337,10 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
           output,
           traces,
           rrwebRef,
-          failure: { stepIndex: firstPageStep.index, reason, resumable: true },
+          failure: { stepIndex: firstPageStep.index, reason, resumable: true, kind: "navigation" },
           unvalidatedOutputKeys: [...unvalidated],
           authProfile: profileName,
+          ...resultExtras(),
         };
       }
     }
@@ -207,7 +352,6 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
       // the console maps traces back to the authored YAML by index.
       const stepIndex = step.index;
       const startedAt = now();
-      opts.signal?.throwIfAborted();
 
       const emit = (status: StepTrace["status"], detail?: string, extra?: Partial<StepTrace>): StepTrace => {
         const trace: StepTrace = {
@@ -225,13 +369,28 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
         return trace;
       };
 
+      // Sector pacing: a deliberate pause between steps for bot-heuristic-
+      // sensitive portals (finance/government). Never after the LAST step —
+      // nothing follows it, so waiting only makes the run slower to no benefit.
+      const pace = async () => {
+        if (i < plan.length - 1 && sectorProfile.timing.actionDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, sectorProfile.timing.actionDelayMs));
+        }
+      };
+
       try {
+        // Checked INSIDE the try (not before it) so an abort that lands
+        // between steps is caught by the same handler below and returns a
+        // clean `status: "failed"` result — not an unhandled rejection.
+        if (opts.signal?.aborted) throw new PorticoStepError("aborted", "run was aborted");
+
         if (step.type === "human") {
           // Attached (CDP) browser is already logged in → the login gate is
           // moot; skip it so CDP runs are fully unattended.
           if (cdpEndpoint) {
             const shot = await recorder.screenshot(stepIndex);
             emit("ok", "skipped — attached browser already authenticated (CDP)", { screenshotRef: shot });
+            await pace();
             continue;
           }
           // Interactive HITL: if the caller can service the step (headed
@@ -240,15 +399,18 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
             await opts.onHuman({ index: stepIndex, label: step.label });
             const shot = await recorder.screenshot(stepIndex);
             emit("ok", "human step completed interactively", { screenshotRef: shot });
+            await pace();
             continue;
           }
         }
 
-        const outcome = await step.run(rt);
+        const outcome = await raceAbort(step.run(rt), opts.signal);
         const shot = await recorder.screenshot(stepIndex);
 
         if (outcome.status === "paused") {
-          emit("paused", `HITL required at step ${stepIndex} (${step.label ?? step.type})`, { screenshotRef: shot });
+          emit("paused", outcome.detail ?? `HITL required at step ${stepIndex} (${step.label ?? step.type})`, {
+            screenshotRef: shot,
+          });
           const rrwebRef = await recorder.finalize("paused");
           return {
             status: "paused",
@@ -259,6 +421,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
             sessionState: await context.storageState(),
             unvalidatedOutputKeys: [...unvalidated],
             authProfile: profileName,
+            ...resultExtras(),
           };
         }
 
@@ -267,19 +430,22 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
           healedFrom: outcome.healedFrom,
           healedTo: outcome.healedTo,
         });
+        await pace();
       } catch (err) {
+        const { kind, resumable } = classifyError(err);
         const reason = scrub(err instanceof Error ? err.message : String(err));
         const shot = await recorder.screenshot(stepIndex);
-        emit("failed", reason, { screenshotRef: shot });
+        emit("failed", reason, { screenshotRef: shot, errorKind: kind });
         const rrwebRef = await recorder.finalize("failed");
         return {
           status: "failed",
           output,
           traces,
           rrwebRef,
-          failure: { stepIndex: stepIndex, reason, resumable: true },
+          failure: { stepIndex: stepIndex, reason, resumable, kind },
           unvalidatedOutputKeys: [...unvalidated],
           authProfile: profileName,
+          ...resultExtras(),
         };
       }
     }
@@ -294,8 +460,13 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
       sessionState: await context.storageState(),
       unvalidatedOutputKeys: [...unvalidated],
       authProfile: profileName,
+      ...resultExtras(),
     };
   } finally {
+    // CRITICAL: unroute before closing — contexts can be shared CDP
+    // attachments that outlive this run, and a leaked route handler would
+    // silently intercept (and mis-block) every other tab/run sharing it.
+    if (egressEnabled) await context.unroute("**/*").catch(() => {});
     await closeSession();
   }
 }
@@ -324,12 +495,26 @@ export function inferStartOrigin(steps: Flow["steps"]): string | undefined {
 }
 
 /**
+ * Seed a fresh output object from a prior (paused) run's output — the
+ * `resumeFrom` + `resumeOutput` pairing: without this, a resumed run's
+ * templated `{{output.x}}` references (see renderTemplate) resolve to "" for
+ * everything an earlier attempt already produced, since `output` starts
+ * empty. Always returns a NEW object (never the caller's own reference).
+ * Exported for unit tests — the seam of runProgrammatic's output-init that
+ * doesn't need a browser to exercise.
+ */
+export function seedOutput(resumeOutput?: Record<string, unknown>): Record<string, unknown> {
+  return { ...(resumeOutput ?? {}) };
+}
+
+/**
  * Substitute {{input}}, {{secrets.x}}, {{base_url}}, and dotted paths into prior
  * step OUTPUT (e.g. {{customer.family.id}}) for the programmatic runner. Output
  * support is what lets a write step chain off a lookup — resolve inputs first,
  * then walk the dotted path through `output` (mirrors the compiler's resolver).
+ * Exported for unit tests.
  */
-function renderTemplate(input: string, opts: EngineRunOptions, output: Record<string, unknown> = {}): string {
+export function renderTemplate(input: string, opts: EngineRunOptions, output: Record<string, unknown> = {}): string {
   return input.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, key: string) => {
     if (key === "base_url") return opts.target.base_url;
     if (key.startsWith("secrets.")) return opts.auth.secrets[key.slice(8)] ?? "";

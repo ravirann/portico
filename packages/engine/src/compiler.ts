@@ -9,18 +9,24 @@
  *
  * Step mapping:
  *   navigate → page.goto            (wrapped by recoveryAction)
- *   act      → page.fill/click      (attemptWithRecovery — model retry on failure)
+ *   act      → page.fill/click/press/pressSequentially (attemptWithRecovery — model retry on failure)
  *   extract  → cached-locator DOM read (deterministic) | extractFromPage (model) |
- *              raw-DOM fallback (unvalidated)
+ *              fail loud (no cached locator, no model)
  *   <step>.api → pageRequest        (API-tier / direct-HTTP)
- *   assert/guard → policy assertion
- *   human    → pause(session) / interactive HITL
+ *   assert/guard → policy assertion (+ optional condition check)
+ *   human    → pause(session) / interactive HITL (+ lenient condition gate)
  *   subflow (auth) → librettoAuthenticate + authProfile
  *
  * HARD INVARIANT (docs/ARCHITECTURE.md §4): a promoted deterministic replay makes
  * ZERO model calls. Recovery (attemptWithRecovery) only fires *after* a failure,
  * and extractFromPage only when a step has no cached locator — i.e. the model is
  * the author/heal tier, never the steady-state hot path.
+ *
+ * Reliability defaults (timeouts, retries, readiness gates, mutation guards,
+ * locator trust) come from a `SectorProfile` (@portico/flow-spec) resolved by
+ * the caller (see runner.ts) and threaded into `compileFlow`. Omitting a
+ * profile uses `generic`, which reproduces the engine's historical hardcoded
+ * defaults bit-for-bit — see sectors.ts's no-regression contract.
  */
 
 import {
@@ -35,14 +41,16 @@ import {
   type RecoveryAction,
   type RequestConfig,
 } from "libretto";
-import type { Locator, Page } from "playwright";
+import type { FrameLocator, Locator, Page } from "playwright";
 import { z } from "zod";
-import type { Flow, Step, Target } from "@portico/flow-spec";
+import { resolveSectorProfile } from "@portico/flow-spec";
+import type { Flow, SectorProfile, Step, Target } from "@portico/flow-spec";
 import { generateTotp } from "@portico/vault";
 import { envelopeForExtraction, jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 import { resolveIntent } from "./resolve-intent.js";
 import { pickByPolicy, type PickPolicy } from "./pick-slot.js";
 import type { HealModel } from "./model.js";
+import { PorticoStepError } from "./errors.js";
 
 /** An API-tier marker a flow can attach to a step (extra flow-spec field). */
 interface ApiStepSpec {
@@ -72,6 +80,10 @@ export interface StepRuntime {
    *  skipped, never executed — a dry-run of a write flow is side-effect-free.
    *  Only "live" performs mutations. Defaults to "dry_run" where unset (safe). */
   mode?: "dry_run" | "live";
+  /** Mutating `act` steps skipped outside live mode — see runAct's safety gate.
+   *  Always initialized (empty) by the runner/workflow handler; surfaced as
+   *  RunResult.skippedMutations when non-empty. */
+  skippedMutations: string[];
   template: (s: string) => string;
 }
 
@@ -91,6 +103,24 @@ export interface CompiledStep {
 
 const BOOKING = /\b(book|schedule it|confirm appointment|submit appointment|place order|pay now)\b/i;
 
+/**
+ * True when `step` LOOKS like a mutating act — its label, locator semantic
+ * name, or value contains one of `keywords` as a case-insensitive substring.
+ * Same spirit as the `no_booking` structural scan (assertPolicyAtCompileTime)
+ * but evaluated per-step at RUN time against a caller-supplied keyword set
+ * (sector mutationKeywords ∪ forbiddenInValidation ∪ flow.guard.
+ * forbidden_actions — see compileFlow). Deliberately checks the STATIC,
+ * authored fields rather than the runtime-templated value: a flow author
+ * writing "Submit login" or "Delete the record" is the signal, and a dynamic
+ * {{value}} rarely carries a mutation keyword on its own. Pure — exported for
+ * unit tests.
+ */
+export function isMutatingAct(step: Step, keywords: string[]): boolean {
+  if (keywords.length === 0) return false;
+  const text = `${step.label ?? ""} ${step.locator?.semantic?.name ?? ""} ${step.value ?? ""}`.toLowerCase();
+  return keywords.some((k) => k.length > 0 && text.includes(k.toLowerCase()));
+}
+
 export interface CompileResult {
   workflow: LibrettoWorkflow;
   plan: CompiledStep[];
@@ -98,14 +128,52 @@ export interface CompileResult {
   credentialNames: string[];
 }
 
-/** Compile a flow to the canonical workflow + instrumented plan. */
+/** Compile-time context threaded into every step compiler: the target site,
+ *  the resolved sector profile (reliability defaults), the intercept steps
+ *  marked `required` (keyed by their output name, for runWait's fail-loud
+ *  timeout), and the full mutation-keyword set (sector ∪ flow guard) for the
+ *  dry-run act gate. Built once per `compileFlow` call. */
+interface CompileContext {
+  target: Target;
+  profile: SectorProfile;
+  requiredIntercepts: Map<string, { url_contains: string }>;
+  mutationKeywords: string[];
+}
+
+/**
+ * Compile a flow to the canonical workflow + instrumented plan.
+ *
+ * `profile` supplies the sector's reliability defaults (timeouts, retries,
+ * readiness gates, locator trust, mutation-keyword guards) — omitting it
+ * resolves to the `generic` profile, which reproduces the engine's
+ * historical hardcoded defaults bit-for-bit, so existing callers that don't
+ * pass one (tests, `compileToWorkflow`/`emitWorkflowModule`) are unaffected.
+ */
 export function compileFlow(
   flow: Flow,
   target: Target,
   opts: { heal?: HealModel | null; profileName?: string } = {},
+  profile: SectorProfile = resolveSectorProfile(undefined),
 ): CompileResult {
   assertPolicyAtCompileTime(flow);
-  const compiled = flow.steps.map((step, index) => compileStep(step, index, target));
+
+  const requiredIntercepts = new Map<string, { url_contains: string }>();
+  for (const step of flow.steps) {
+    if (step.type === "intercept" && step.intercept?.required && step.intercept.as) {
+      requiredIntercepts.set(step.intercept.as, { url_contains: step.intercept.url_contains });
+    }
+  }
+  // Mutation keywords a dry-run must refuse to touch: the sector's own
+  // guard vocabulary (mutationKeywords ∪ forbiddenInValidation) PLUS
+  // whatever this specific flow additionally forbids.
+  const mutationKeywords = [
+    ...profile.guards.mutationKeywords,
+    ...profile.guards.forbiddenInValidation,
+    ...(flow.guard?.forbidden_actions ?? []),
+  ];
+  const ctx: CompileContext = { target, profile, requiredIntercepts, mutationKeywords };
+
+  const compiled = flow.steps.map((step, index) => compileStep(step, index, ctx));
   // Intercept steps are passive listener registrations — hoist them ahead of
   // everything else so a response fired DURING the initial page load (SPAs
   // fetch their data on mount) is never missed because the listener was
@@ -168,6 +236,7 @@ function buildWorkflow(
       // SAFE side: dry-run (mutations skipped). Live writes go through the
       // programmatic runner, which threads the real mode.
       mode: "dry_run",
+      skippedMutations: [],
       template: (s: string) => renderTemplate(s, { inputs, output, secrets: {}, target }),
     };
     for (const step of plan) await step.run(rt);
@@ -193,39 +262,39 @@ function buildWorkflow(
 // Per-step compilation
 // ---------------------------------------------------------------------------
 
-function compileStep(step: Step, index: number, target: Target): CompiledStep {
+function compileStep(step: Step, index: number, ctx: CompileContext): CompiledStep {
   const label = step.label;
   const api = (step as unknown as { api?: ApiStepSpec }).api;
 
   // API-tier: any step the flow marks with an `api` block runs via pageRequest,
   // regardless of its declared type. Direct-HTTP inside the browser context.
-  if (api) return apiStep(step, api, index);
+  if (api) return apiStep(step, api, index, ctx.profile);
 
   switch (step.type) {
     case "navigate":
-      return { index, type: "navigate", label, run: (rt) => runNavigate(rt, step, target) };
+      return { index, type: "navigate", label, run: (rt) => runNavigate(rt, step, ctx.target, ctx.profile) };
     case "act":
-      return { index, type: "act", label, run: (rt) => runAct(rt, step) };
+      return { index, type: "act", label, run: (rt) => runAct(rt, step, ctx.profile, ctx.mutationKeywords) };
     case "extract":
-      return { index, type: "extract", label, run: (rt) => runExtract(rt, step) };
+      return { index, type: "extract", label, run: (rt) => runExtract(rt, step, ctx.profile) };
     case "assert":
       return { index, type: "assert", label, run: (rt) => runAssert(rt, step) };
     case "guard":
-      return { index, type: "guard", label, run: async () => ({ status: "ok", detail: "policy asserted at compile time" }) };
+      return { index, type: "guard", label, run: (rt) => runGuard(rt, step) };
     case "human":
-      return { index, type: "human", label, run: async () => ({ status: "paused" }) };
+      return { index, type: "human", label, run: (rt) => runHuman(rt, step) };
     case "resolve":
       return { index, type: "resolve", label, run: (rt) => runResolve(rt, step) };
     case "read":
-      return { index, type: "read", label, run: (rt) => runRead(rt, step) };
+      return { index, type: "read", label, run: (rt) => runRead(rt, step, ctx.profile) };
     case "select":
       return { index, type: "select", label, run: (rt) => runSelect(rt, step) };
     case "intercept":
       return { index, type: "intercept", label, run: (rt) => runIntercept(rt, step) };
     case "wait":
-      return { index, type: "wait", label, run: (rt) => runWait(rt, step) };
+      return { index, type: "wait", label, run: (rt) => runWait(rt, step, ctx.requiredIntercepts) };
     case "subflow":
-      return { index, type: "subflow", label, run: (rt) => runAuthSubflow(rt, step, target) };
+      return { index, type: "subflow", label, run: (rt) => runAuthSubflow(rt, step, ctx.target) };
     case "download":
     case "upload":
       return {
@@ -319,13 +388,52 @@ async function withStepRetry<T>(
   throw lastErr;
 }
 
-async function runNavigate(rt: StepRuntime, step: Step, target: Target): Promise<StepOutcome> {
+export interface EffectiveStepPolicy {
+  timeoutMs: number;
+  retryMax: number;
+  backoffMs: number;
+}
+
+/**
+ * Resolve the timeout + retry policy that actually applies to `step` for one
+ * phase of its lifecycle: the step's own `timeoutMs`/`retry.max`/
+ * `retry.backoffMs` ALWAYS win when set; otherwise the sector profile's
+ * default for that phase applies. Centralizes the "step override, else
+ * profile default" rule in ONE place so it's independently testable — pure
+ * numbers in, pure numbers out, no page/locator needed — instead of
+ * re-deriving it inline at every call site. Covers navigate/act/extract; read
+ * has no retry concept and api's retry additionally depends on HTTP-method
+ * idempotency, so those two resolve their timeout/retry inline instead.
+ */
+export function effectiveTimeouts(
+  profile: SectorProfile,
+  step: Step,
+  phase: "navigate" | "act" | "extract",
+): EffectiveStepPolicy {
+  const base: Record<"navigate" | "act" | "extract", EffectiveStepPolicy> = {
+    navigate: { timeoutMs: profile.timing.navTimeoutMs, retryMax: profile.retry.navigateMax, backoffMs: profile.retry.backoffMs },
+    act: { timeoutMs: profile.timing.stepTimeoutMs, retryMax: profile.retry.actMax, backoffMs: profile.retry.backoffMs },
+    extract: { timeoutMs: profile.timing.extractTimeoutMs, retryMax: profile.retry.extractMax, backoffMs: profile.retry.backoffMs },
+  };
+  const b = base[phase];
+  return {
+    timeoutMs: step.timeoutMs ?? b.timeoutMs,
+    retryMax: step.retry?.max ?? b.retryMax,
+    backoffMs: step.retry?.backoffMs ?? b.backoffMs,
+  };
+}
+
+async function runNavigate(rt: StepRuntime, step: Step, target: Target, profile: SectorProfile): Promise<StepOutcome> {
   const url = rt.template(step.url ?? target.base_url);
-  await withStepRetry(step, { max: 1, backoffMs: 1000 }, async () => {
-    await rt.page.goto(url, { waitUntil: "domcontentloaded", timeout: step.timeoutMs ?? 60000 });
+  const policy = effectiveTimeouts(profile, step, "navigate");
+  await withStepRetry(step, { max: policy.retryMax, backoffMs: policy.backoffMs }, async () => {
+    await rt.page.goto(url, { waitUntil: "domcontentloaded", timeout: policy.timeoutMs });
   });
   // SPA readiness: don't hand the next step a half-hydrated page.
-  await waitForDomQuiet(rt.rawPage, { quietMs: 500, timeoutMs: 8000 });
+  await waitForDomQuiet(rt.rawPage, {
+    quietMs: profile.readiness.navigateQuietMs,
+    timeoutMs: profile.readiness.navigateTimeoutMs,
+  });
   return { status: "ok" };
 }
 
@@ -335,14 +443,20 @@ async function runNavigate(rt: StepRuntime, step: Step, target: Target): Promise
  * turns a step FAILURE into an indefinite HANG — the run never completes and the
  * validation gate never returns a verdict. A hard ceiling converts that into a
  * fast, legible failure ("couldn't act on X in N ms") the caller can surface.
+ * Also the shared mechanism behind the api/read step ceilings (see apiStep,
+ * runRead) — throws a classified PorticoStepError("timeout", …) so any caller
+ * (ours or a hard deadline elsewhere) reports the SAME error kind.
  */
-async function withHardTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+export async function withHardTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       p,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${what} exceeded ${ms}ms — failing fast instead of hanging`)), ms);
+        timer = setTimeout(
+          () => reject(new PorticoStepError("timeout", `${what} exceeded ${ms}ms — failing fast instead of hanging`)),
+          ms,
+        );
       }),
     ]);
   } finally {
@@ -350,10 +464,34 @@ async function withHardTimeout<T>(p: Promise<T>, ms: number, what: string): Prom
   }
 }
 
-async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
-  const value = step.value != null ? rt.template(step.value) : undefined;
-  const timeout = step.timeoutMs ?? 15000;
+async function runAct(
+  rt: StepRuntime,
+  step: Step,
+  profile: SectorProfile,
+  mutationKeywords: string[],
+): Promise<StepOutcome> {
+  // SAFETY GATE: outside live mode, a mutating act — one whose label/locator
+  // name/value hits a sector or flow-declared mutation keyword — is never
+  // touched (same spirit as the api-tier dry-run skip, for the DOM path).
+  // Recorded on the runtime so the caller can see exactly what was skipped.
+  if ((rt.mode ?? "dry_run") !== "live" && isMutatingAct(step, mutationKeywords)) {
+    const detail = `skipped mutating act in dry_run: ${step.label ?? step.locator?.semantic?.intent ?? step.type}`;
+    rt.skippedMutations.push(detail);
+    return { status: "ok", detail };
+  }
+
+  const templatedValue = step.value != null ? rt.template(step.value) : undefined;
+  // Explicit method wins outright; with none, infer from value presence
+  // (unchanged default behavior: a value fills, no value clicks).
+  const method = step.method ?? (templatedValue !== undefined ? "fill" : "click");
+  // click/press can trigger an SPA transition (navigation, tab switch, a
+  // Gmail-style send-on-Ctrl+Enter); fill/type are text entry, no transition
+  // expected — matches the original "wait for quiet only on click" rule.
+  const expectsTransition = method === "click" || method === "press";
+  const policy = effectiveTimeouts(profile, step, "act");
+  const timeout = policy.timeoutMs;
   const probe = Math.min(timeout, 5000);
+
   // Try the ordered resilient candidates in turn: the first that becomes visible
   // is acted on. Most-specific first (cached / strict role+name), loosening to a
   // role-agnostic name match and finally text — so a link captured as a button
@@ -361,17 +499,40 @@ async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   // already-working flow picks (its precise candidate matches first). Candidates
   // are re-resolved per retry so a re-render between attempts is picked up fresh.
   const doIt = async () => {
-    const { candidates, desc } = resolveActLocator(rt, step);
+    // A keyboard chord with no target element (e.g. a global "Escape" or a
+    // compose-window "Control+Enter" send) goes straight to the keyboard —
+    // there is no locator ladder to resolve.
+    if (method === "press" && !step.locator) {
+      await rt.page.keyboard.press(templatedValue ?? "");
+      return;
+    }
+    const { candidates, desc } = resolveActLocator(rt, step, { cssCacheTrusted: profile.locator.cssCacheTrusted });
     let lastErr: unknown;
     for (let i = 0; i < candidates.length; i++) {
       const loc = candidates[i]!;
       // Earlier (more specific) candidates get a short probe; the last gets the
       // full timeout so a slow-hydrating correct element isn't skipped.
       const t = i === candidates.length - 1 ? timeout : probe;
+      // Virtualized lists (Gmail-class) detach/re-render rows outside the
+      // viewport — nudge the candidate into view before waiting on it so the
+      // visibility gate isn't racing a layout that hasn't happened yet.
+      // Best-effort: an element that can't be scrolled just falls through to
+      // the (likely failing) visibility wait below, same as before this existed.
+      await loc.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
       try {
         await loc.waitFor({ state: "visible", timeout: t });
-        if (value !== undefined) await loc.fill(value, { timeout });
-        else await loc.click({ timeout });
+        if (method === "fill") {
+          await loc.fill(templatedValue ?? "", { timeout });
+        } else if (method === "press") {
+          await loc.press(templatedValue ?? "", { timeout });
+        } else if (method === "type") {
+          // Real key events for contenteditable/rich-text editors, where
+          // fill() doesn't fire the input handlers the app listens for.
+          await loc.click({ timeout });
+          await loc.pressSequentially(templatedValue ?? "", { delay: 20, timeout });
+        } else {
+          await loc.click({ timeout });
+        }
         return;
       } catch (err) {
         lastErr = err;
@@ -382,10 +543,12 @@ async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   const settled = async () => {
     // One retry (not two): the candidate cascade already IS the fallback layer,
     // so a second full sweep mostly just doubles a genuine failure's wall-clock.
-    await withStepRetry(step, { max: 1, backoffMs: 500 }, doIt);
-    // Clicks trigger SPA transitions (detail views, tab switches) — give the
-    // render a short quiet window so the next step doesn't race it.
-    if (value === undefined) await waitForDomQuiet(rt.rawPage, { quietMs: 300, timeoutMs: 3000 });
+    await withStepRetry(step, { max: policy.retryMax, backoffMs: policy.backoffMs }, doIt);
+    // Clicks/presses can trigger SPA transitions — give the render a short
+    // quiet window so the next step doesn't race it.
+    if (expectsTransition) {
+      await waitForDomQuiet(rt.rawPage, { quietMs: profile.readiness.actQuietMs, timeoutMs: profile.readiness.actTimeoutMs });
+    }
   };
 
   const desc = step.locator?.semantic?.intent ?? step.label ?? "element";
@@ -404,23 +567,32 @@ async function runAct(rt: StepRuntime, step: Step): Promise<StepOutcome> {
     // makes the LLM recovery hang and the whole run never completes.
     await withHardTimeout(
       attemptWithRecovery(rt.rawPage, doIt, undefined, rt.heal.languageModel),
-      (step.timeoutMs ?? 15000) + 15000,
+      timeout + 15000,
       `self-heal for "${desc}"`,
     );
     return { status: "healed", detail: "recovered via Libretto popup/overlay recovery", healedFrom: desc, healedTo: desc };
   }
 }
 
-async function runExtract(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+async function runExtract(rt: StepRuntime, step: Step, profile: SectorProfile): Promise<StepOutcome> {
   const key = step.extract?.key ?? "result";
   const schema = step.extract?.schema;
   const cached = step.locator?.cached;
 
   // 1) Deterministic hot path: a cached locator → plain DOM read, validate, no model.
   if (cached) {
-    const timeout = step.timeoutMs ?? 10000;
-    const value = await withStepRetry(step, { max: 2, backoffMs: 500 }, async () => {
-      const loc = rt.page.locator(rt.template(cached));
+    const policy = effectiveTimeouts(profile, step, "extract");
+    const timeout = policy.timeoutMs;
+    const value = await withStepRetry(step, { max: policy.retryMax, backoffMs: policy.backoffMs }, async () => {
+      // Frame-scoped locators (locator.frame) resolve through the same
+      // outermost→innermost FrameLocator chain the act path uses (see
+      // locatorRoot). Note: unlike resolveActLocator, this cached path has no
+      // semantic ladder to fall back on yet (no buildSemanticCandidates
+      // equivalent for reads) — so cssCacheTrusted does NOT gate it; an
+      // untrusted-CSS sector still uses the cached selector for extraction
+      // because there is no deterministic alternative today.
+      const root = locatorRoot(rt.page, step.locator);
+      const loc = root.locator(rt.template(cached));
       // Extraction MUST wait for the element: SPAs render data async, and a
       // waitless read returns "" — which then flows downstream as a silently
       // wrong value. Empty results are a hard failure, never an "ok".
@@ -470,11 +642,16 @@ async function runExtract(rt: StepRuntime, step: Step): Promise<StepOutcome> {
     };
   }
 
-  // 3) Keyless fallback: raw DOM. Marked UNVALIDATED — no structured guarantee.
-  const raw = await rt.page.title();
-  rt.output[key] = raw;
-  rt.unvalidated.add(key);
-  return { status: "ok", detail: "raw-DOM fallback (unvalidated — no model)" };
+  // 3) No cached locator and no heal model: refuse to guess. A silent
+  //    page.title() fallback used to stand in here — a WRONG value
+  //    masquerading as a successful extraction (nothing downstream could tell
+  //    "no data" from "the page title, coincidentally"). Fail loud instead,
+  //    naming the output key and why.
+  throw new PorticoStepError(
+    "not_found",
+    `extract "${key}" has no cached locator and no heal model is configured — nothing to extract from. ` +
+      "Add a locator.cached selector, configure PORTICO_HEAL_* for AI extraction, or remove this step.",
+  );
 }
 
 /**
@@ -539,7 +716,7 @@ async function runResolve(rt: StepRuntime, step: Step): Promise<StepOutcome> {
  * or an option list) so downstream API-tier steps can send it. The expression is
  * evaluated in page context — flows are trusted, authored artifacts.
  */
-async function runRead(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+async function runRead(rt: StepRuntime, step: Step, profile: SectorProfile): Promise<StepOutcome> {
   const spec = step.read;
   if (!spec) throw new Error(`read step "${step.label ?? "?"}" is missing its read config`);
   // Reads evaluate in page context. On about:blank — nothing has navigated yet —
@@ -552,7 +729,10 @@ async function runRead(rt: StepRuntime, step: Step): Promise<StepOutcome> {
         `target's base_url so the runner opens the app first.`,
     );
   }
-  const value = await rt.rawPage.evaluate(spec.expression);
+  // Universal ceiling: page.evaluate() has no built-in timeout, so a hung
+  // expression (or a page that never settles) would otherwise hang the run.
+  const timeoutMs = step.timeoutMs ?? profile.timing.readTimeoutMs;
+  const value = await withHardTimeout(rt.rawPage.evaluate(spec.expression), timeoutMs, `read "${spec.as}"`);
   rt.output[spec.as] = value;
   const preview = Array.isArray(value) ? `${value.length} items` : String(value ?? "").slice(0, 24);
   return { status: "ok", detail: `read ${spec.as} (${preview})` };
@@ -580,6 +760,10 @@ async function runSelect(rt: StepRuntime, step: Step): Promise<StepOutcome> {
  * match in output. Harvests API-tier data (e.g. GetSlots) without replaying the
  * request — the robust path when the endpoint is anti-replay / anti-forgery
  * protected. Register before the action (human selection / clicks) that triggers it.
+ *
+ * `intercept.schema`, when present, validates the captured JSON the same way
+ * extract's cached path does: on failure the RAW value is still stored (never
+ * dropped) and the key is marked `unvalidated` for the caller to see.
  */
 async function runIntercept(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   const spec = step.intercept;
@@ -588,18 +772,36 @@ async function runIntercept(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   rt.rawPage.on("response", async (resp) => {
     try {
       if (!resp.url().includes(spec.url_contains) || !resp.ok()) return;
-      rt.output[spec.as] = await resp.json(); // latest matching response wins
+      const body: unknown = await resp.json(); // latest matching response wins
+      if (spec.schema) {
+        const check = validateAgainst(spec.schema, body);
+        rt.output[spec.as] = check.ok ? check.value : body;
+        if (!check.ok) rt.unvalidated.add(spec.as);
+      } else {
+        rt.output[spec.as] = body;
+      }
       captured++;
       rt.output[`${spec.as}__count`] = captured;
     } catch {
       /* non-JSON body or a torn-down response — ignore, keep listening */
     }
   });
-  return { status: "ok", detail: `intercepting responses matching "${spec.url_contains}" → ${spec.as}` };
+  return {
+    status: "ok",
+    detail: `intercepting responses matching "${spec.url_contains}"${spec.schema ? " (schema-validated)" : ""} → ${spec.as}`,
+  };
 }
 
-/** Block until an output key is populated (e.g. by an interceptor) or time out. */
-async function runWait(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+/** Block until an output key is populated (e.g. by an interceptor) or time out.
+ *  When the awaited key traces back to an `intercept` step marked `required`,
+ *  a timeout is a hard, classified failure — the flow's committed product
+ *  never showed up, which is never a recoverable-by-retrying-blindly state
+ *  without knowing why (see PorticoStepError kind "timeout"). */
+async function runWait(
+  rt: StepRuntime,
+  step: Step,
+  requiredIntercepts: Map<string, { url_contains: string }>,
+): Promise<StepOutcome> {
   const spec = step.wait;
   if (!spec) throw new Error(`wait step "${step.label ?? "?"}" is missing its wait config`);
   const timeout = spec.timeout_ms ?? 15000;
@@ -607,6 +809,13 @@ async function runWait(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   while (Date.now() - start < timeout) {
     if (rt.output[spec.for] != null) return { status: "ok", detail: `${spec.for} ready in ${Date.now() - start}ms` };
     await new Promise((r) => setTimeout(r, 200));
+  }
+  const required = requiredIntercepts.get(spec.for);
+  if (required) {
+    throw new PorticoStepError(
+      "timeout",
+      `required intercept "${spec.for}" (url_contains "${required.url_contains}") never fired within ${timeout}ms`,
+    );
   }
   throw new Error(`wait: "${spec.for}" was not populated within ${timeout}ms`);
 }
@@ -619,17 +828,113 @@ async function runAssert(rt: StepRuntime, step: Step): Promise<StepOutcome> {
   return { status: "ok", detail: `assert ${condition}` };
 }
 
-/** Condition registry. Unknown conditions pass (wired per-connector later). */
-async function evaluateCondition(rt: StepRuntime, condition: string): Promise<boolean> {
-  switch (condition) {
-    case "page_loaded":
-      return Boolean(await rt.page.title().catch(() => ""));
-    default:
-      return true;
+/** A structural `guard` step: today's ONLY enforcement is compile-time
+ *  (assertPolicyAtCompileTime — no_booking/forbidden_actions). An optional
+ *  `condition` layers a run-time check on top, using the same registry as
+ *  assert; a guard step with no condition keeps the original unconditional
+ *  "ok" behavior. */
+async function runGuard(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+  if (!step.condition) return { status: "ok", detail: "policy asserted at compile time" };
+  const ok = await evaluateCondition(rt, step.condition);
+  if (!ok) throw new Error(`guard failed: condition '${step.condition}' is false`);
+  return { status: "ok", detail: `guard ${step.condition} (policy asserted at compile time)` };
+}
+
+/**
+ * Human (HITL) gate. With no `condition`, always pauses — the original,
+ * unconditional behavior (login/2FA/CAPTCHA steps rarely declare one). With a
+ * condition, it's evaluated through the shared registry — but LENIENTLY: an
+ * unknown condition (e.g. `two_factor_challenge_present`, which no
+ * deterministic check in this registry can answer) is treated as true so the
+ * pause still fires — conservative, so an unrecognized 2FA-style gate never
+ * silently skips human review. A RECOGNIZED condition that evaluates false
+ * skips the pause (nothing to review).
+ */
+async function runHuman(rt: StepRuntime, step: Step): Promise<StepOutcome> {
+  if (!step.condition) return { status: "paused" };
+  const parsed = parseCondition(step.condition);
+  if (parsed.kind === "unknown") {
+    return {
+      status: "paused",
+      detail: `condition "${parsed.raw}" is not a recognized form — pausing conservatively (lenient)`,
+    };
+  }
+  const ok = await evaluateCondition(rt, step.condition);
+  return ok
+    ? { status: "paused" }
+    : { status: "ok", detail: `condition "${step.condition}" is false — no human input needed` };
+}
+
+export type ParsedCondition =
+  | { kind: "page_loaded" }
+  | { kind: "url_contains" | "text_visible" | "selector_visible" | "output_present"; arg: string }
+  | { kind: "unknown"; raw: string };
+
+/**
+ * Parse an assert/guard/human `condition` string into a structured form.
+ * Grammar: "page_loaded" (no arg) | "<kind>:<arg>" — split on the FIRST colon
+ * so an arg that itself contains ":" (a URL fragment, say) survives intact —
+ * | anything else → { kind: "unknown", raw }. Pure; exported for unit tests.
+ */
+export function parseCondition(spec: string): ParsedCondition {
+  if (spec === "page_loaded") return { kind: "page_loaded" };
+  const i = spec.indexOf(":");
+  if (i === -1) return { kind: "unknown", raw: spec };
+  const kind = spec.slice(0, i);
+  const arg = spec.slice(i + 1);
+  if (kind === "url_contains" || kind === "text_visible" || kind === "selector_visible" || kind === "output_present") {
+    return { kind, arg };
+  }
+  return { kind: "unknown", raw: spec };
+}
+
+/** True if `loc` becomes visible within `timeoutMs`; false on timeout —
+ *  NEVER throws (a condition check is a yes/no question, not a step failure). */
+async function visibleWithin(loc: Locator, timeoutMs: number): Promise<boolean> {
+  try {
+    await loc.waitFor({ state: "visible", timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function apiStep(step: Step, api: ApiStepSpec, index: number): CompiledStep {
+/**
+ * Condition registry for assert/guard/human steps. Recognized forms:
+ *   page_loaded             — the page has a title (original behavior)
+ *   url_contains:<text>     — page.url() includes <text>
+ *   text_visible:<text>     — that text is visible within 3s
+ *   selector_visible:<css>  — that CSS selector is visible within 3s
+ *   output_present:<key>    — rt.output[<key>] is set and a non-empty string
+ * Anything else is "unknown" — throws PorticoStepError("unsupported", …)
+ * naming the supported forms. It is up to the CALLER whether "unknown" is
+ * fatal: assert/guard propagate this throw (fail loud); human steps check
+ * `parseCondition` themselves first and never reach this branch for an
+ * unknown condition (see runHuman's lenient pause-anyway).
+ */
+async function evaluateCondition(rt: StepRuntime, condition: string): Promise<boolean> {
+  const parsed = parseCondition(condition);
+  switch (parsed.kind) {
+    case "page_loaded":
+      return Boolean(await rt.page.title().catch(() => ""));
+    case "url_contains":
+      return rt.rawPage.url().includes(parsed.arg);
+    case "text_visible":
+      return visibleWithin(rt.page.getByText(parsed.arg, { exact: false }).first(), 3000);
+    case "selector_visible":
+      return visibleWithin(rt.page.locator(parsed.arg).first(), 3000);
+    case "output_present":
+      return rt.output[parsed.arg] != null && rt.output[parsed.arg] !== "";
+    case "unknown":
+      throw new PorticoStepError(
+        "unsupported",
+        `condition "${parsed.raw}" is not a supported form — use "page_loaded", "url_contains:<text>", ` +
+          `"text_visible:<text>", "selector_visible:<css>", or "output_present:<output_key>"`,
+      );
+  }
+}
+
+function apiStep(step: Step, api: ApiStepSpec, index: number, profile: SectorProfile): CompiledStep {
   return {
     index,
     type: "api",
@@ -679,10 +984,27 @@ function apiStep(step: Step, api: ApiStepSpec, index: number): CompiledStep {
           return config.url;
         }
       })();
+      const timeoutMs = step.timeoutMs ?? profile.timing.apiTimeoutMs;
+      // Idempotent (GET/HEAD/OPTIONS) reads get bounded auto-retry from the
+      // sector profile. A NON-idempotent (mutating) call is NEVER
+      // auto-retried by default — a silently-retried POST/PUT/PATCH/DELETE
+      // risks a double-write the caller never asked for. `step.retry.max` is
+      // still honored when the flow author explicitly opts a specific
+      // mutating step into retries (an informed, per-step choice).
+      const retryDefaults = { max: isMutation ? 0 : profile.retry.apiIdempotentMax, backoffMs: profile.retry.backoffMs };
       let data: unknown;
       try {
-        data = await pageRequest(rt.rawPage, config, zschema ? { schema: zschema } : {});
+        data = await withStepRetry(step, retryDefaults, () =>
+          withHardTimeout(
+            pageRequest(rt.rawPage, config, zschema ? { schema: zschema } : {}),
+            timeoutMs,
+            `api ${config.method} ${path}`,
+          ),
+        );
       } catch (e) {
+        // Preserve a classified error (e.g. our own hard-timeout) as-is;
+        // only wrap genuine pageRequest failures with the enriched message.
+        if (e instanceof PorticoStepError) throw e;
         const msg = e instanceof Error ? e.message : String(e);
         // A JSON endpoint that returns HTML almost always means the request was
         // rejected as a non-AJAX / anti-forgery-missing call and redirected to a
@@ -754,6 +1076,21 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
 // ---------------------------------------------------------------------------
 
 /**
+ * Resolve the frame root a locator's candidates should be built against.
+ * `locator.frame` is a chain of iframe CSS selectors resolved
+ * outermost→innermost via `frameLocator()`; absent (or empty) means the main
+ * frame — `page` itself. Both `Page` and `FrameLocator` implement
+ * locator()/getByRole()/getByLabel()/getByText(), so callers (resolveActLocator,
+ * buildSemanticCandidates, extract's cached path) can treat the result
+ * uniformly. Exported for unit tests.
+ */
+export function locatorRoot(page: Page, locator?: Step["locator"]): Page | FrameLocator {
+  let root: Page | FrameLocator = page;
+  for (const sel of locator?.frame ?? []) root = root.frameLocator(sel);
+  return root;
+}
+
+/**
  * Resolve an `act` target to a Playwright Locator. Prefers a cached CSS/XPath
  * selector (deterministic replay); falls back to the semantic descriptor
  * (accessible role + name, then label, then placeholder/text) so authored flows
@@ -775,24 +1112,31 @@ async function runAuthSubflow(rt: StepRuntime, step: Step, target: Target): Prom
  * Cached + semantic on the same step is NOT either-or: the cached selector is
  * the fast deterministic primary, and the semantic descriptor comes back as
  * `fallback` — runAct retries with it when the cached selector has gone stale
- * (still deterministic; no model involved).
+ * (still deterministic; no model involved). `opts.cssCacheTrusted` (default
+ * true) — false for sectors with obfuscated/rotating build-artifact class
+ * names — skips the cached candidate entirely rather than trying-then-
+ * falling-back: a stale-but-still-MATCHING selector there is more likely to
+ * hit the WRONG recycled element than to simply fail visibly.
  *
  * Exported for unit tests (see compiler.test.ts); not part of the public API.
  */
 export function resolveActLocator(
   rt: StepRuntime,
   step: Step,
+  opts: { cssCacheTrusted?: boolean } = {},
 ): { candidates: Locator[]; desc: string } {
   const s = step.locator?.semantic;
   const desc = s?.intent ?? step.label ?? "element";
+  const cssCacheTrusted = opts.cssCacheTrusted ?? true;
+  const root = locatorRoot(rt.page, step.locator);
 
   // Ordered, most-specific-first candidate list (a layered fallback — the
   // community-standard cure for brittle single locators). A cached selector is
   // the first candidate; the semantic descriptor contributes the rest.
   const candidates: Locator[] = [];
   const cached = step.locator?.cached;
-  if (cached) candidates.push(rt.page.locator(rt.template(cached)));
-  if (s) candidates.push(...buildSemanticCandidates(rt, s));
+  if (cached && cssCacheTrusted) candidates.push(root.locator(rt.template(cached)));
+  if (s) candidates.push(...buildSemanticCandidates(root, rt, s));
 
   if (candidates.length === 0) {
     throw new Error(
@@ -838,8 +1182,15 @@ function shortLabel(name: string): string {
  *      than the element's actual accessible name
  *   4. label/text fallback — role-blind last resort (and the PRIMARY match for a
  *      role-less name, e.g. a person's row)
+ *
+ * `root` is the Page or FrameLocator candidates are built against — see
+ * locatorRoot (frame-scoped locators resolve inside their iframe chain).
  */
-function buildSemanticCandidates(rt: StepRuntime, s: NonNullable<Step["locator"]>["semantic"]): Locator[] {
+function buildSemanticCandidates(
+  root: Page | FrameLocator,
+  rt: StepRuntime,
+  s: NonNullable<Step["locator"]>["semantic"],
+): Locator[] {
   // The accessible name may be an input reference (e.g. "{{specialty}}") — render
   // it before matching, exactly like act values and api params.
   const name = s.name != null ? rt.template(s.name) : undefined;
@@ -854,16 +1205,15 @@ function buildSemanticCandidates(rt: StepRuntime, s: NonNullable<Step["locator"]
     );
   }
 
-  const page = rt.page;
   const byRole = (role: string, nm: string) =>
-    page.getByRole(role as Parameters<Page["getByRole"]>[0], { name: nm, exact: false });
+    root.getByRole(role as Parameters<Page["getByRole"]>[0], { name: nm, exact: false });
   const roleAgnostic = (nm: string): Locator => {
     let loc = byRole(INTERACTIVE_ROLES[0], nm);
     for (let i = 1; i < INTERACTIVE_ROLES.length; i++) loc = loc.or(byRole(INTERACTIVE_ROLES[i]!, nm));
     return loc.first();
   };
   const byText = (nm: string): Locator =>
-    page.getByLabel(nm, { exact: false }).or(page.getByText(nm, { exact: false })).first();
+    root.getByLabel(nm, { exact: false }).or(root.getByText(nm, { exact: false })).first();
 
   const out: Locator[] = [];
   if (name && name.trim()) {
@@ -876,7 +1226,7 @@ function buildSemanticCandidates(rt: StepRuntime, s: NonNullable<Step["locator"]
     out.push(byText(name)); // 4. text (primary for a role-less name)
     if (short !== name) out.push(byText(short));
   } else if (s.role) {
-    out.push(page.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first());
+    out.push(root.getByRole(s.role as Parameters<Page["getByRole"]>[0]).first());
   }
   return out;
 }
@@ -961,12 +1311,40 @@ function assertPolicyAtCompileTime(flow: Flow): void {
 }
 
 /**
+ * CLI-runner (subprocess) guard. `press`/`type` methods and frame-scoped
+ * locators (`locator.frame`) need live Playwright Locator/Keyboard calls the
+ * programmatic runner drives directly; the emitted module re-runs the SAME
+ * compiled plan through Libretto's own subprocess machinery, which does not
+ * thread these through today. Fail at EMISSION time — before a subprocess
+ * even spawns — naming exactly which step blocks it, instead of a confusing
+ * runtime error N steps into `npx libretto run`. Does not affect the default
+ * programmatic path: `runProgrammatic` never calls `emitWorkflowModule`.
+ */
+function assertCliRunnerSupported(flow: Flow): void {
+  for (const step of flow.steps) {
+    if (step.method === "press" || step.method === "type") {
+      throw new Error(
+        `step "${step.label ?? step.type}" uses method "${step.method}", which is not supported by the cli runner; ` +
+          "use the default programmatic runner",
+      );
+    }
+    if (step.locator?.frame && step.locator.frame.length > 0) {
+      throw new Error(
+        `step "${step.label ?? step.type}" targets a frame (locator.frame), which is not supported by the cli runner; ` +
+          "use the default programmatic runner",
+      );
+    }
+  }
+}
+
+/**
  * Emit a standalone Libretto workflow **module** (the generated `workflow()` file)
  * for the `npx libretto run ./file.ts` subprocess path. It embeds the flow + target
  * and rebuilds the canonical workflow via `compileToWorkflow` (heal model + profile
  * resolved from env inside), so there is a single interpreter.
  */
 export function emitWorkflowModule(flow: Flow, target: Target, profileId?: string): string {
+  assertCliRunnerSupported(flow);
   const flowJson = JSON.stringify(flow, null, 2);
   const targetJson = JSON.stringify(target, null, 2);
   const profileArg = profileId ? `, profileName: ${JSON.stringify(profileId)}` : "";

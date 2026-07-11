@@ -5,11 +5,23 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { SECTOR_PROFILES } from "@portico/flow-spec";
 import type { Flow, Target } from "@portico/flow-spec";
-import { compileFlow, resolveActLocator, type StepRuntime } from "./compiler.js";
+import {
+  compileFlow,
+  effectiveTimeouts,
+  emitWorkflowModule,
+  isMutatingAct,
+  locatorRoot,
+  parseCondition,
+  resolveActLocator,
+  withHardTimeout,
+  type StepRuntime,
+} from "./compiler.js";
 import { envelopeForExtraction, jsonSchemaToZod, validateAgainst } from "./json-schema.js";
 import { healModelConfigured } from "./model.js";
 import { resolveProfile } from "./auth-profile.js";
+import { PorticoStepError } from "./errors.js";
 
 const target: Target = {
   key: "t",
@@ -202,7 +214,11 @@ test("act templates the locator's accessible name from inputs (not a literal {{.
   };
   const { plan } = compileFlow(flow, target);
   let seenName: string | undefined;
-  const fakeLocator: Record<string, unknown> = { waitFor: async () => {}, click: async () => {} };
+  const fakeLocator: Record<string, unknown> = {
+    waitFor: async () => {},
+    click: async () => {},
+    scrollIntoViewIfNeeded: async () => {},
+  };
   fakeLocator.or = () => fakeLocator;
   fakeLocator.first = () => fakeLocator;
   const page = {
@@ -352,13 +368,23 @@ test("act self-heals from a stale cached selector to the semantic descriptor (no
   const { plan } = compileFlow(flow, target);
   const clicked: string[] = [];
   const chain = (onClick?: () => void): Record<string, unknown> => {
-    const loc: Record<string, unknown> = { waitFor: async () => {}, click: async () => onClick?.(), or: () => loc, first: () => loc };
+    const loc: Record<string, unknown> = {
+      waitFor: async () => {},
+      click: async () => onClick?.(),
+      scrollIntoViewIfNeeded: async () => {},
+      or: () => loc,
+      first: () => loc,
+    };
     return loc;
   };
   const page = {
     // The stale cached selector fails at the visibility gate, exactly like a
     // real Playwright locator whose element no longer exists.
-    locator: (sel: string) => ({ waitFor: async () => { throw new Error(`stale: ${sel}`); }, click: async () => { throw new Error(`stale: ${sel}`); } }),
+    locator: (sel: string) => ({
+      scrollIntoViewIfNeeded: async () => {},
+      waitFor: async () => { throw new Error(`stale: ${sel}`); },
+      click: async () => { throw new Error(`stale: ${sel}`); },
+    }),
     getByRole: (_role: string, opts: { name: string }) => chain(() => clicked.push(opts.name)),
     getByLabel: () => chain(),
     getByText: () => chain(),
@@ -539,6 +565,7 @@ test("act honors the step's retry policy: transient failure, then success", asyn
         attempts++;
         if (attempts < 2) throw new Error("element detached mid-click");
       },
+      scrollIntoViewIfNeeded: async () => {},
       or: () => loc,
       first: () => loc,
     };
@@ -595,4 +622,785 @@ test("a read step before any navigation fails legibly instead of a storage Secur
   // where evaluating a storage read would throw the cryptic SecurityError).
   const rt = { rawPage: { url: () => "about:blank" }, output: {} } as unknown as StepRuntime;
   await assert.rejects(plan[0]!.run(rt), /before any navigation/);
+});
+
+// ---------------------------------------------------------------------------
+// isMutatingAct — the dry-run mutation-keyword scan
+// ---------------------------------------------------------------------------
+
+test("isMutatingAct: matches a keyword in the label, case-insensitively", () => {
+  assert.equal(isMutatingAct({ type: "act", label: "Submit Login" } as Flow["steps"][number], ["submit"]), true);
+  assert.equal(isMutatingAct({ type: "act", label: "SUBMIT login" } as Flow["steps"][number], ["Submit"]), true);
+});
+
+test("isMutatingAct: matches in the locator's semantic name", () => {
+  const step = { type: "act", locator: { semantic: { name: "Delete account", intent: "x" } } } as Flow["steps"][number];
+  assert.equal(isMutatingAct(step, ["delete"]), true);
+});
+
+test("isMutatingAct: matches in the value", () => {
+  assert.equal(isMutatingAct({ type: "act", value: "confirm" } as Flow["steps"][number], ["confirm"]), true);
+});
+
+test("isMutatingAct: no keyword present anywhere returns false", () => {
+  const step = { type: "act", label: "Open the claims tab" } as Flow["steps"][number];
+  assert.equal(isMutatingAct(step, ["delete", "book", "pay", "transfer"]), false);
+});
+
+test("isMutatingAct: an empty keyword list never matches", () => {
+  assert.equal(isMutatingAct({ type: "act", label: "Delete everything" } as Flow["steps"][number], []), false);
+});
+
+// ---------------------------------------------------------------------------
+// parseCondition — the assert/guard/human condition grammar
+// ---------------------------------------------------------------------------
+
+test("parseCondition: page_loaded has no arg", () => {
+  assert.deepEqual(parseCondition("page_loaded"), { kind: "page_loaded" });
+});
+
+test("parseCondition: recognized <kind>:<arg> forms", () => {
+  assert.deepEqual(parseCondition("url_contains:/dashboard"), { kind: "url_contains", arg: "/dashboard" });
+  assert.deepEqual(parseCondition("text_visible:Welcome back"), { kind: "text_visible", arg: "Welcome back" });
+  assert.deepEqual(parseCondition("selector_visible:.nav[data-x]"), { kind: "selector_visible", arg: ".nav[data-x]" });
+  assert.deepEqual(parseCondition("output_present:slots_raw"), { kind: "output_present", arg: "slots_raw" });
+});
+
+test("parseCondition: splits on the FIRST colon only, so a ':'-bearing arg survives intact", () => {
+  assert.deepEqual(parseCondition("url_contains:https://x.com/path"), {
+    kind: "url_contains",
+    arg: "https://x.com/path",
+  });
+});
+
+test("parseCondition: unrecognized kind or no colon at all → unknown", () => {
+  assert.deepEqual(parseCondition("dashboard_visible"), { kind: "unknown", raw: "dashboard_visible" });
+  assert.deepEqual(parseCondition("two_factor_challenge_present"), {
+    kind: "unknown",
+    raw: "two_factor_challenge_present",
+  });
+  assert.deepEqual(parseCondition("bogus_kind:arg"), { kind: "unknown", raw: "bogus_kind:arg" });
+  assert.deepEqual(parseCondition("page_loaded:extra"), { kind: "unknown", raw: "page_loaded:extra" });
+});
+
+// ---------------------------------------------------------------------------
+// Conditions registry wired into assert/guard/human
+// ---------------------------------------------------------------------------
+
+test("assert: an unsupported condition throws PorticoStepError('unsupported', …) listing the supported forms", async () => {
+  const flow: Flow = {
+    key: "a1",
+    version: 1,
+    steps: [{ type: "assert", label: "check", condition: "dashboard_visible" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  const rt = { output: {} } as unknown as StepRuntime;
+  await assert.rejects(
+    () => plan[0]!.run(rt),
+    (err: unknown) => {
+      assert.ok(err instanceof PorticoStepError);
+      assert.equal(err.kind, "unsupported");
+      assert.match(err.message, /page_loaded/);
+      return true;
+    },
+  );
+});
+
+test("assert: url_contains passes/fails based on the page's current URL", async () => {
+  const flow: Flow = {
+    key: "a2",
+    version: 1,
+    steps: [{ type: "assert", label: "on dashboard", condition: "url_contains:/dashboard" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  const rtOn = { rawPage: { url: () => "https://x/app/dashboard" }, output: {} } as unknown as StepRuntime;
+  const r = await plan[0]!.run(rtOn);
+  assert.equal(r.status, "ok");
+
+  const rtOff = { rawPage: { url: () => "https://x/login" }, output: {} } as unknown as StepRuntime;
+  await assert.rejects(() => plan[0]!.run(rtOff), /assertion failed/);
+});
+
+test("assert: output_present checks rt.output for a set, non-empty-string value", async () => {
+  const flow: Flow = {
+    key: "a3",
+    version: 1,
+    steps: [{ type: "assert", label: "has slots", condition: "output_present:slots_raw" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  await assert.rejects(() => plan[0]!.run({ output: {} } as unknown as StepRuntime), /assertion failed/);
+  await assert.rejects(() => plan[0]!.run({ output: { slots_raw: "" } } as unknown as StepRuntime), /assertion failed/);
+  const r = await plan[0]!.run({ output: { slots_raw: { a: 1 } } } as unknown as StepRuntime);
+  assert.equal(r.status, "ok");
+});
+
+test("guard step with no condition keeps the original unconditional-ok behavior", async () => {
+  const flow: Flow = { key: "g1", version: 1, steps: [{ type: "guard", label: "policy" }] };
+  const { plan } = compileFlow(flow, target);
+  const r = await plan[0]!.run({} as unknown as StepRuntime);
+  assert.equal(r.status, "ok");
+  assert.match(r.detail ?? "", /policy asserted at compile time/);
+});
+
+test("guard step: an unsupported condition ALSO throws PorticoStepError('unsupported', …), same as assert", async () => {
+  const flow: Flow = {
+    key: "g2b",
+    version: 1,
+    steps: [{ type: "guard", label: "check", condition: "some_bogus_condition" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  await assert.rejects(
+    () => plan[0]!.run({ output: {} } as unknown as StepRuntime),
+    (err: unknown) => {
+      assert.ok(err instanceof PorticoStepError);
+      assert.equal(err.kind, "unsupported");
+      return true;
+    },
+  );
+});
+
+test("guard step with a condition evaluates it and fails loud (plain Error) when false", async () => {
+  const flow: Flow = {
+    key: "g2",
+    version: 1,
+    steps: [{ type: "guard", label: "must be ready", condition: "output_present:ready" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  await assert.rejects(() => plan[0]!.run({ output: {} } as unknown as StepRuntime), /guard failed/);
+  const r = await plan[0]!.run({ output: { ready: true } } as unknown as StepRuntime);
+  assert.equal(r.status, "ok");
+});
+
+test("human step with no condition always pauses (original unconditional behavior)", async () => {
+  const flow: Flow = { key: "h1", version: 1, steps: [{ type: "human", label: "log in" }] };
+  const { plan } = compileFlow(flow, target);
+  const r = await plan[0]!.run({} as unknown as StepRuntime);
+  assert.equal(r.status, "paused");
+});
+
+test("human step: an UNKNOWN condition still pauses (lenient) and notes it in the detail", async () => {
+  const flow: Flow = {
+    key: "h2",
+    version: 1,
+    steps: [{ type: "human", label: "2fa", condition: "two_factor_challenge_present" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  const r = await plan[0]!.run({} as unknown as StepRuntime);
+  assert.equal(r.status, "paused");
+  assert.match(r.detail ?? "", /not a recognized form/);
+});
+
+test("human step: a RECOGNIZED false condition skips the pause", async () => {
+  const flow: Flow = {
+    key: "h3",
+    version: 1,
+    steps: [{ type: "human", label: "review", condition: "output_present:needs_review" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  const r = await plan[0]!.run({ output: {} } as unknown as StepRuntime);
+  assert.equal(r.status, "ok");
+  assert.match(r.detail ?? "", /no human input needed/);
+});
+
+test("human step: a RECOGNIZED true condition pauses", async () => {
+  const flow: Flow = {
+    key: "h4",
+    version: 1,
+    steps: [{ type: "human", label: "review", condition: "output_present:needs_review" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  const r = await plan[0]!.run({ output: { needs_review: true } } as unknown as StepRuntime);
+  assert.equal(r.status, "paused");
+});
+
+// ---------------------------------------------------------------------------
+// effectiveTimeouts — profile default selection
+// ---------------------------------------------------------------------------
+
+test("effectiveTimeouts: step overrides win over the profile default", () => {
+  const step = { type: "act", timeoutMs: 999, retry: { max: 9, backoffMs: 42 } } as Flow["steps"][number];
+  assert.deepEqual(effectiveTimeouts(SECTOR_PROFILES.generic, step, "act"), { timeoutMs: 999, retryMax: 9, backoffMs: 42 });
+});
+
+test("effectiveTimeouts: falls back to the profile default when the step declares none", () => {
+  const step = { type: "navigate" } as Flow["steps"][number];
+  const profile = SECTOR_PROFILES.healthcare;
+  assert.deepEqual(effectiveTimeouts(profile, step, "navigate"), {
+    timeoutMs: profile.timing.navTimeoutMs,
+    retryMax: profile.retry.navigateMax,
+    backoffMs: profile.retry.backoffMs,
+  });
+});
+
+test("effectiveTimeouts: a partial step override (backoffMs only) still falls back for max/timeout", () => {
+  const step = { type: "extract", retry: { backoffMs: 1 } } as Flow["steps"][number];
+  const profile = SECTOR_PROFILES.generic;
+  assert.deepEqual(effectiveTimeouts(profile, step, "extract"), {
+    timeoutMs: profile.timing.extractTimeoutMs,
+    retryMax: profile.retry.extractMax,
+    backoffMs: 1,
+  });
+});
+
+test("effectiveTimeouts: the generic profile reproduces today's hardcoded per-phase constants", () => {
+  const step = {} as Flow["steps"][number];
+  const g = SECTOR_PROFILES.generic;
+  assert.deepEqual(effectiveTimeouts(g, step, "act"), { timeoutMs: 15000, retryMax: 1, backoffMs: 500 });
+  assert.deepEqual(effectiveTimeouts(g, step, "extract"), { timeoutMs: 10000, retryMax: 2, backoffMs: 500 });
+  assert.deepEqual(effectiveTimeouts(g, step, "navigate"), { timeoutMs: 60000, retryMax: 1, backoffMs: 500 });
+});
+
+// ---------------------------------------------------------------------------
+// locatorRoot — frame-scoped locator resolution
+// ---------------------------------------------------------------------------
+
+test("locatorRoot: no locator.frame → returns the page itself", () => {
+  const page = stubLocatorPage();
+  const root = locatorRoot(page as unknown as Parameters<typeof locatorRoot>[0], { semantic: { intent: "x" } });
+  assert.equal(root, page);
+});
+
+test("locatorRoot: an empty frame array also returns the page unchanged", () => {
+  const page = stubLocatorPage();
+  const root = locatorRoot(page as unknown as Parameters<typeof locatorRoot>[0], { frame: [], semantic: { intent: "x" } });
+  assert.equal(root, page);
+});
+
+test("locatorRoot: chains frameLocator() outermost→innermost for locator.frame", () => {
+  const calls: string[] = [];
+  const makeFrame = (label: string): { label: string; frameLocator: (sel: string) => unknown } => ({
+    label,
+    frameLocator: (sel: string) => {
+      calls.push(`${label} -> frameLocator(${sel})`);
+      return makeFrame(`${label}/${sel}`);
+    },
+  });
+  const page = makeFrame("page");
+  const root = locatorRoot(page as unknown as Parameters<typeof locatorRoot>[0], {
+    frame: ["iframe.outer", "iframe.inner"],
+    semantic: { intent: "x" },
+  }) as unknown as { label: string };
+  assert.deepEqual(calls, ["page -> frameLocator(iframe.outer)", "page/iframe.outer -> frameLocator(iframe.inner)"]);
+  assert.equal(root.label, "page/iframe.outer/iframe.inner");
+});
+
+// ---------------------------------------------------------------------------
+// resolveActLocator: cssCacheTrusted (untrusted-CSS sectors skip the cached candidate)
+// ---------------------------------------------------------------------------
+
+test("resolveActLocator: cssCacheTrusted defaults to true (cached candidate present, first)", () => {
+  const r = resolveActLocator(locatorRt(), {
+    type: "act",
+    locator: { cached: "#claims-tab", semantic: { role: "button", name: "Claims", intent: "Claims tab" } },
+  });
+  assert.equal(chainOf(r.candidates[0]), "css:#claims-tab");
+});
+
+test("resolveActLocator: cssCacheTrusted:false skips the cached candidate, semantic ladder only", () => {
+  const r = resolveActLocator(
+    locatorRt(),
+    { type: "act", locator: { cached: "#claims-tab", semantic: { role: "button", name: "Claims", intent: "Claims tab" } } },
+    { cssCacheTrusted: false },
+  );
+  assert.ok(!r.candidates.some((c) => chainOf(c).startsWith("css:")));
+  assert.equal(chainOf(r.candidates[0]), "role:button:Claims");
+});
+
+// ---------------------------------------------------------------------------
+// withHardTimeout — the shared timeout-race mechanism behind api/read/self-heal
+// ---------------------------------------------------------------------------
+
+test("withHardTimeout: resolves normally when the promise settles before the ceiling", async () => {
+  const result = await withHardTimeout(Promise.resolve("ok"), 1000, "test op");
+  assert.equal(result, "ok");
+});
+
+test("withHardTimeout: rejects with a classified PorticoStepError('timeout', …) when the ceiling fires first", async () => {
+  await assert.rejects(
+    () => withHardTimeout(new Promise(() => {}), 20, "slow op"),
+    (err: unknown) => {
+      assert.ok(err instanceof PorticoStepError);
+      assert.equal(err.kind, "timeout");
+      assert.match(err.message, /slow op exceeded 20ms/);
+      return true;
+    },
+  );
+});
+
+test("withHardTimeout: propagates the promise's own rejection when it loses the race", async () => {
+  await assert.rejects(() => withHardTimeout(Promise.reject(new Error("real failure")), 1000, "op"), /real failure/);
+});
+
+// ---------------------------------------------------------------------------
+// Dry-run act gate (isMutatingAct wired into runAct)
+// ---------------------------------------------------------------------------
+
+test("runAct: a mutating act is skipped (never touches the page) outside live mode, and recorded on the runtime", async () => {
+  const flow: Flow = {
+    key: "dryrun-act",
+    version: 1,
+    steps: [{ type: "act", label: "Delete the record", locator: { semantic: { role: "button", name: "Delete", intent: "delete" } } }],
+  };
+  const { plan } = compileFlow(flow, target);
+  let touched = false;
+  const page = {
+    getByRole: () => { touched = true; return {}; },
+    getByLabel: () => { touched = true; return {}; },
+    getByText: () => { touched = true; return {}; },
+  };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    mode: "dry_run",
+    skippedMutations: [] as string[],
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.equal(touched, false); // never even resolved a locator
+  assert.equal((rt as unknown as { skippedMutations: string[] }).skippedMutations.length, 1);
+  assert.match((rt as unknown as { skippedMutations: string[] }).skippedMutations[0]!, /skipped mutating act in dry_run: Delete the record/);
+  assert.match(r.detail ?? "", /skipped mutating act in dry_run/);
+});
+
+test("runAct: mode 'live' does NOT skip a mutating act", async () => {
+  const flow: Flow = {
+    key: "live-act",
+    version: 1,
+    steps: [{ type: "act", label: "Delete the record", locator: { semantic: { role: "button", name: "Delete", intent: "delete" } } }],
+  };
+  const { plan } = compileFlow(flow, target);
+  const clicked: string[] = [];
+  const loc: Record<string, unknown> = {
+    waitFor: async () => {},
+    click: async () => clicked.push("clicked"),
+    scrollIntoViewIfNeeded: async () => {},
+  };
+  loc.or = () => loc;
+  loc.first = () => loc;
+  const page = { getByRole: () => loc, getByLabel: () => loc, getByText: () => loc };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    mode: "live",
+    skippedMutations: [] as string[],
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.deepEqual(clicked, ["clicked"]);
+  assert.equal((rt as unknown as { skippedMutations: string[] }).skippedMutations.length, 0);
+});
+
+test("compileFlow threads a non-generic sector profile into act retries end to end", async () => {
+  const flow: Flow = {
+    key: "profile-thread",
+    version: 1,
+    steps: [
+      {
+        type: "act",
+        label: "flaky",
+        retry: { backoffMs: 1 }, // keep the test fast; retryMax still comes from the profile
+        // cached + intent-only semantic → resolveActLocator resolves exactly
+        // ONE candidate (buildSemanticCandidates yields none without a
+        // role/name), so the attempt count directly reflects the retry
+        // policy — no locator-candidate-ladder multiplication to account for.
+        locator: { cached: "#send-btn", semantic: { intent: "send button" } },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target, {}, SECTOR_PROFILES.commerce);
+  let attempts = 0;
+  const loc: Record<string, unknown> = {
+    waitFor: async () => {},
+    click: async () => {
+      attempts++;
+      throw new Error("always fails");
+    },
+    scrollIntoViewIfNeeded: async () => {},
+  };
+  const page = { locator: () => loc };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    mode: "live",
+    skippedMutations: [] as string[],
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  await assert.rejects(() => plan[0]!.run(rt), /always fails/);
+  // commerce.retry.actMax = 2 → 1 initial attempt + 2 retries = 3.
+  assert.equal(attempts, 3);
+});
+
+// ---------------------------------------------------------------------------
+// Extract fail-loud: the silent page.title() fallback is gone
+// ---------------------------------------------------------------------------
+
+test("extract: no cached locator and no heal model fails loud (not the old silent page.title() fallback)", async () => {
+  const flow: Flow = {
+    key: "ex-fail-loud",
+    version: 1,
+    steps: [{ type: "extract", label: "mystery", extract: { key: "page_title", schema: { type: "string" } } }],
+  };
+  const { plan } = compileFlow(flow, target);
+  let titleCalled = false;
+  const page = {
+    title: async () => {
+      titleCalled = true;
+      return "Should Not Be Used";
+    },
+  };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    unvalidated: new Set<string>(),
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  await assert.rejects(
+    () => plan[0]!.run(rt),
+    (err: unknown) => {
+      assert.ok(err instanceof PorticoStepError);
+      assert.equal(err.kind, "not_found");
+      assert.match(err.message, /page_title/);
+      return true;
+    },
+  );
+  assert.equal(titleCalled, false); // never fell back to reading the page title
+});
+
+// ---------------------------------------------------------------------------
+// intercept.schema
+// ---------------------------------------------------------------------------
+
+test("intercept: schema validates the captured JSON; failure keeps the raw value and marks it unvalidated", async () => {
+  const flow: Flow = {
+    key: "icept-schema",
+    version: 1,
+    steps: [
+      {
+        type: "intercept",
+        label: "grab",
+        intercept: {
+          url_contains: "/api/slots",
+          as: "slots",
+          schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+        },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  let handler: ((resp: unknown) => Promise<void>) | undefined;
+  const out: Record<string, unknown> = {};
+  const unvalidated = new Set<string>();
+  const rt = {
+    output: out,
+    unvalidated,
+    rawPage: { on: (evt: string, h: (resp: unknown) => Promise<void>) => { if (evt === "response") handler = h; } },
+  } as unknown as StepRuntime;
+  await plan[0]!.run(rt);
+
+  const resp = (url: string, body: unknown) => ({ url: () => url, ok: () => true, json: async () => body });
+  await handler!(resp("https://x/api/slots", { ok: true }));
+  assert.deepEqual(out.slots, { ok: true });
+  assert.equal(unvalidated.has("slots"), false);
+
+  await handler!(resp("https://x/api/slots", { nope: 1 }));
+  assert.deepEqual(out.slots, { nope: 1 }); // raw value kept, never dropped
+  assert.equal(unvalidated.has("slots"), true);
+});
+
+test("intercept: no schema stores the raw JSON and never touches rt.unvalidated", async () => {
+  const flow: Flow = {
+    key: "icept-noschema",
+    version: 1,
+    steps: [{ type: "intercept", label: "grab", intercept: { url_contains: "/api/x", as: "raw" } }],
+  };
+  const { plan } = compileFlow(flow, target);
+  let handler: ((resp: unknown) => Promise<void>) | undefined;
+  const out: Record<string, unknown> = {};
+  const rt = {
+    output: out,
+    rawPage: { on: (evt: string, h: (resp: unknown) => Promise<void>) => { if (evt === "response") handler = h; } },
+  } as unknown as StepRuntime; // deliberately no `unvalidated` field — must not be touched
+  await plan[0]!.run(rt);
+  const resp = (url: string, body: unknown) => ({ url: () => url, ok: () => true, json: async () => body });
+  await handler!(resp("https://x/api/x", { a: 1 }));
+  assert.deepEqual(out.raw, { a: 1 });
+});
+
+// ---------------------------------------------------------------------------
+// runWait: required intercepts fail loud + classified on timeout
+// ---------------------------------------------------------------------------
+
+test("wait: a required intercept that never fires throws PorticoStepError('timeout', …) naming the pattern", async () => {
+  const flow: Flow = {
+    key: "wait-required",
+    version: 1,
+    steps: [
+      { type: "intercept", label: "grab", intercept: { url_contains: "/api/GetSlots", as: "slots_raw", required: true } },
+      { type: "wait", wait: { for: "slots_raw", timeout_ms: 80 } },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  const waitStep = plan.find((s) => s.type === "wait")!;
+  await assert.rejects(
+    () => waitStep.run({ output: {} } as unknown as StepRuntime),
+    (err: unknown) => {
+      assert.ok(err instanceof PorticoStepError);
+      assert.equal(err.kind, "timeout");
+      assert.match(err.message, /required intercept "slots_raw"/);
+      assert.match(err.message, /url_contains "\/api\/GetSlots"/);
+      return true;
+    },
+  );
+});
+
+test("wait: a non-required key that never fires keeps the original plain-Error message", async () => {
+  const flow: Flow = {
+    key: "wait-optional",
+    version: 1,
+    steps: [{ type: "wait", wait: { for: "opportunistic", timeout_ms: 80 } }],
+  };
+  const { plan } = compileFlow(flow, target);
+  await assert.rejects(
+    () => plan[0]!.run({ output: {} } as unknown as StepRuntime),
+    (err: unknown) => {
+      assert.ok(!(err instanceof PorticoStepError));
+      assert.match((err as Error).message, /not populated/);
+      return true;
+    },
+  );
+});
+
+test("wait: waiting on a NON-required key stays a plain Error even when a DIFFERENT intercept in the flow is required", async () => {
+  const flow: Flow = {
+    key: "wait-mixed",
+    version: 1,
+    steps: [
+      { type: "intercept", intercept: { url_contains: "/critical", as: "critical_data", required: true } },
+      { type: "intercept", intercept: { url_contains: "/extra", as: "extra_data" } },
+      { type: "wait", wait: { for: "extra_data", timeout_ms: 80 } },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  const waitStep = plan.find((s) => s.type === "wait")!;
+  await assert.rejects(
+    () => waitStep.run({ output: {} } as unknown as StepRuntime),
+    (err: unknown) => {
+      assert.ok(!(err instanceof PorticoStepError));
+      return true;
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Gmail-class act primitives: method press/type/click/fill + locator.frame
+// ---------------------------------------------------------------------------
+
+test("act method 'press' with a locator resolves it and calls loc.press(value)", async () => {
+  const flow: Flow = {
+    key: "press-locator",
+    version: 1,
+    steps: [
+      {
+        type: "act",
+        label: "send",
+        method: "press",
+        value: "Control+Enter",
+        locator: { semantic: { role: "textbox", name: "Compose body", intent: "compose body" } },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  const pressed: string[] = [];
+  const loc: Record<string, unknown> = {
+    waitFor: async () => {},
+    press: async (key: string) => pressed.push(key),
+    scrollIntoViewIfNeeded: async () => {},
+  };
+  loc.or = () => loc;
+  loc.first = () => loc;
+  const page = { getByRole: () => loc, getByLabel: () => loc, getByText: () => loc };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    mode: "live", // these tests exercise method dispatch mechanics, not the dry-run gate
+    skippedMutations: [] as string[],
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.deepEqual(pressed, ["Control+Enter"]);
+});
+
+test("act method 'press' with NO locator presses the keyboard chord directly on the page", async () => {
+  const flow: Flow = {
+    key: "press-keyboard",
+    version: 1,
+    steps: [{ type: "act", label: "close", method: "press", value: "Escape" }],
+  };
+  const { plan } = compileFlow(flow, target);
+  const pressed: string[] = [];
+  const page = { keyboard: { press: async (k: string) => pressed.push(k) } };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    mode: "live", // these tests exercise method dispatch mechanics, not the dry-run gate
+    skippedMutations: [] as string[],
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.deepEqual(pressed, ["Escape"]);
+});
+
+test("act method 'type' clicks then pressSequentially's the value (real key events)", async () => {
+  const flow: Flow = {
+    key: "type-method",
+    version: 1,
+    steps: [
+      {
+        type: "act",
+        label: "compose",
+        method: "type",
+        value: "hello",
+        locator: { semantic: { role: "textbox", name: "Body", intent: "body" } },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  const calls: string[] = [];
+  const loc: Record<string, unknown> = {
+    waitFor: async () => {},
+    click: async () => calls.push("click"),
+    pressSequentially: async (text: string) => calls.push(`type:${text}`),
+    scrollIntoViewIfNeeded: async () => {},
+  };
+  loc.or = () => loc;
+  loc.first = () => loc;
+  const page = { getByRole: () => loc, getByLabel: () => loc, getByText: () => loc };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    mode: "live", // these tests exercise method dispatch mechanics, not the dry-run gate
+    skippedMutations: [] as string[],
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.deepEqual(calls, ["click", "type:hello"]);
+});
+
+test("act method 'click' forces a click even when a value is present (no fill)", async () => {
+  const flow: Flow = {
+    key: "click-method",
+    version: 1,
+    steps: [
+      {
+        type: "act",
+        label: "checkbox",
+        method: "click",
+        value: "irrelevant",
+        locator: { semantic: { role: "checkbox", name: "Agree", intent: "agree" } },
+      },
+    ],
+  };
+  const { plan } = compileFlow(flow, target);
+  const calls: string[] = [];
+  const loc: Record<string, unknown> = {
+    waitFor: async () => {},
+    click: async () => calls.push("click"),
+    fill: async () => calls.push("fill"),
+    scrollIntoViewIfNeeded: async () => {},
+  };
+  loc.or = () => loc;
+  loc.first = () => loc;
+  const page = { getByRole: () => loc, getByLabel: () => loc, getByText: () => loc };
+  const rt = {
+    page,
+    rawPage: page,
+    heal: null,
+    output: {},
+    input: {},
+    secrets: {},
+    target,
+    mode: "live", // these tests exercise method dispatch mechanics, not the dry-run gate
+    skippedMutations: [] as string[],
+    template: (s: string) => s,
+  } as unknown as StepRuntime;
+  const r = await plan[0]!.run(rt);
+  assert.equal(r.status, "ok");
+  assert.deepEqual(calls, ["click"]);
+});
+
+// ---------------------------------------------------------------------------
+// CLI-runner (subprocess) guard: press/type/frame steps block emission
+// ---------------------------------------------------------------------------
+
+test("emitWorkflowModule throws for a 'press' method step — not supported by the cli runner", () => {
+  const flow: Flow = {
+    key: "cli-press",
+    version: 1,
+    steps: [{ type: "act", label: "send", method: "press", value: "Control+Enter" }],
+  };
+  assert.throws(() => emitWorkflowModule(flow, target), /not supported by the cli runner/);
+});
+
+test("emitWorkflowModule throws for a 'type' method step", () => {
+  const flow: Flow = {
+    key: "cli-type",
+    version: 1,
+    steps: [{ type: "act", label: "compose", method: "type", value: "hi" }],
+  };
+  assert.throws(() => emitWorkflowModule(flow, target), /not supported by the cli runner/);
+});
+
+test("emitWorkflowModule throws for a frame-scoped locator", () => {
+  const flow: Flow = {
+    key: "cli-frame",
+    version: 1,
+    steps: [{ type: "act", label: "in-frame", locator: { frame: ["iframe.editor"], semantic: { intent: "x" } } }],
+  };
+  assert.throws(() => emitWorkflowModule(flow, target), /not supported by the cli runner/);
+});
+
+test("emitWorkflowModule does NOT throw for ordinary click/fill steps (default path unaffected)", () => {
+  const flow: Flow = {
+    key: "cli-fine",
+    version: 1,
+    steps: [{ type: "act", label: "click", locator: { semantic: { role: "button", name: "Go", intent: "go" } } }],
+  };
+  assert.doesNotThrow(() => emitWorkflowModule(flow, target));
 });

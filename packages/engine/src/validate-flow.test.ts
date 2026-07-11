@@ -52,6 +52,52 @@ test("requiredOutputKeys keeps select/extract + the WAITED intercept, drops oppo
   assert.deepEqual(requiredOutputKeys(flow).sort(), ["chosen", "slots_raw"]);
 });
 
+test("requiredOutputKeys: required:true survives the waited-on narrowing (added, not replacing it)", () => {
+  const withRequired: Flow = {
+    key: "req-intercept-narrowed",
+    version: 1,
+    steps: [
+      { type: "navigate", url: "https://x" },
+      { type: "intercept", intercept: { url_contains: "/critical", as: "critical_data", required: true } },
+      { type: "intercept", intercept: { url_contains: "/wizard-step", as: "wizard_data" } },
+      { type: "wait", wait: { for: "wizard_data" } }, // narrows the waited-on set to wizard_data only
+    ],
+  };
+  // wizard_data is required because it's waited on; critical_data is
+  // required because it's explicitly marked required:true — despite NOT
+  // being the waited-on key, so it must NOT be narrowed away.
+  assert.deepEqual(requiredOutputKeys(withRequired).sort(), ["critical_data", "wizard_data"]);
+});
+
+test("requiredOutputKeys: required:true with no wait at all is still required (on top of the all-intercepts fallback)", () => {
+  const withRequired: Flow = {
+    key: "req-intercept-nowait",
+    version: 1,
+    steps: [
+      { type: "navigate", url: "https://x" },
+      { type: "intercept", intercept: { url_contains: "/critical", as: "critical_data", required: true } },
+      { type: "intercept", intercept: { url_contains: "/optional", as: "optional_data" } },
+    ],
+  };
+  assert.deepEqual(requiredOutputKeys(withRequired).sort(), ["critical_data", "optional_data"]);
+});
+
+test("evaluateValidation: a required:true intercept that never fired fails validation even though nothing waits on it", () => {
+  const withRequired: Flow = {
+    key: "req-intercept-eval",
+    version: 1,
+    steps: [
+      { type: "navigate", url: "https://x" },
+      { type: "intercept", intercept: { url_contains: "/critical", as: "critical_data", required: true } },
+      { type: "intercept", intercept: { url_contains: "/wizard-step", as: "wizard_data" } },
+      { type: "wait", wait: { for: "wizard_data" } },
+    ],
+  };
+  const r = evaluateValidation(withRequired, { status: "completed", output: { wizard_data: { a: 1 } } }); // critical_data missing
+  assert.equal(r.passed, false);
+  assert.ok(r.reasons.some((x) => x.includes("critical_data")));
+});
+
 test("opportunistic (non-waited) wizard intercepts do NOT gate validation — the URMC scheduling case", () => {
   // Three intercepts captured while the agent clicked through the scheduler, but
   // the deterministic flow only navigates + waits on the primary. GetSpecialtyData

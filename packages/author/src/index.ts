@@ -19,8 +19,8 @@
 import { Stagehand } from "@browserbasehq/stagehand";
 import { chromium } from "playwright";
 import type { BrowserContext } from "playwright";
-import type { Flow, Step, ClickEvent, NetworkEntry } from "@portico/flow-spec";
-import { compileRecording } from "@portico/flow-spec";
+import type { Flow, Step, ClickEvent, NetworkEntry, SectorProfile } from "@portico/flow-spec";
+import { compileRecording, resolveSectorProfile } from "@portico/flow-spec";
 import { rewriteGoal, countPlanSteps, type GoalPlan, type GoalParameter } from "./rewrite.js";
 import { extractAgentActions, reconcileClicks, type AgentActionRecord, type ReconcileMeta } from "./agent-actions.js";
 
@@ -48,6 +48,16 @@ export interface AuthorOptions {
   maxSteps?: number;
   /** Emit progress lines. */
   onLog?: (line: string) => void;
+  /**
+   * Industry/app-class this authoring run targets — resolves a SectorProfile
+   * (@portico/flow-spec) that drives: domain vocabulary injected into the
+   * rewriter prompt, additive network-noise filters, localStorage
+   * auth-header-chaining gating, and guard defaulting on the compiled flow.
+   * Undefined (the default) resolves to the generic profile, whose empty
+   * noisePatterns / authPattern "either" / vocabulary "" reproduce today's
+   * behavior byte-for-byte — a hard no-regression contract.
+   */
+  sector?: string;
 }
 
 /** A JSON API response the agent's actions caused the page to make. */
@@ -435,6 +445,8 @@ function buildMutationStep(
   bodies: Map<string, string>,
   localStorageSnapshot: Record<string, string> = {},
   nameForValue: (value: string, fallbackKey: string) => string = (_v, k) => inputNameFor(k),
+  /** SectorProfile.authoring.authPattern — gates localStorage header-chaining discovery below. */
+  authPattern: SectorProfile["authoring"]["authPattern"] = "either",
 ): { step: Step; inputs: Record<string, string>; authReads: Step[] } | null {
   let u: URL;
   try {
@@ -505,7 +517,10 @@ function buildMutationStep(
     const m = /^(Bearer\s+)(.+)$/i.exec(rawVal);
     const prefix = m ? m[1] : "";
     const valuePart = m ? m[2]! : rawVal;
-    const lsKey = localStorageKeyForValue(valuePart, localStorageSnapshot);
+    // cookie-session apps carry auth via the browser's cookie jar, not a token mirrored
+    // into localStorage — skip discovery entirely so a value that coincidentally matches
+    // localStorage never binds the header to unrelated page state (garbage chaining).
+    const lsKey = authPattern === "cookie-session" ? null : localStorageKeyForValue(valuePart, localStorageSnapshot);
     if (lsKey) {
       const inputName = inputNameFor(lsKey);
       if (!seenReads.has(inputName)) {
@@ -549,7 +564,24 @@ export function compileAgentRun(
   localStorageSnapshot: Record<string, string> = {},
   planParams: GoalParameter[] = [],
   intent: GoalPlan["intent"] = "update",
+  /**
+   * Sector profile (@portico/flow-spec). Defaults to the generic profile,
+   * whose empty noisePatterns / authPattern "either" reproduce this
+   * function's pre-sector behavior byte-for-byte (no-regression contract).
+   */
+  profile: SectorProfile = resolveSectorProfile(),
 ): Flow {
+  // Sector authoring noise: regex sources ADDED to the base BOOT_NOISE_RE /
+  // INTEGRATION_NOISE_RE filters below — never a replacement (see
+  // SectorProfile["authoring"]["noisePatterns"]'s doc comment in
+  // flow-spec/sectors.ts). Compiled ONCE per call; reused at both
+  // consultation sites this function has for network-URL noise matching:
+  // the lookup/mutation classification loop (alongside INTEGRATION_NOISE_RE)
+  // and the harvested-data-response ranking in `score` (alongside
+  // BOOT_NOISE_RE) further below.
+  const sectorNoisePatterns = profile.authoring.noisePatterns.map((p) => new RegExp(p, "i"));
+  const isSectorNoise = (pathname: string): boolean => sectorNoisePatterns.some((re) => re.test(pathname));
+
   // Preferred path: the goal names specific values (a phone/id) and the agent's
   // actions carried them. A GET LOOKUP (search by phone) is frozen as a
   // deep-link harvest — navigate the app page with the value as a query param
@@ -576,7 +608,7 @@ export function compileAgentRun(
 
     // First pass: classify lookups (GET carrying a goal value) and mutations.
     for (const r of dedupeRequests(requests)) {
-      if (INTEGRATION_NOISE_RE.test(r.pathname)) continue; // peripheral integration
+      if (INTEGRATION_NOISE_RE.test(r.pathname) || isSectorNoise(r.pathname)) continue; // peripheral integration (+ sector-specific, additive)
       const method = r.method.toUpperCase();
       if (method === "GET" || method === "HEAD") {
         let u: URL;
@@ -618,7 +650,7 @@ export function compileAgentRun(
     const authReadSteps: Step[] = [];
     const seenAuthRead = new Set<string>();
     for (const r of mutations) {
-      const built = buildMutationStep(r, tokens, lookups, responseBodies, localStorageSnapshot, nameForValue);
+      const built = buildMutationStep(r, tokens, lookups, responseBodies, localStorageSnapshot, nameForValue, profile.authoring.authPattern);
       if (!built) continue;
       for (const rd of built.authReads) {
         const as = (rd as unknown as { read?: { as?: string } }).read?.as ?? "";
@@ -698,7 +730,7 @@ export function compileAgentRun(
   }
 
   const score = (r: HarvestedResponse): number => {
-    if (BOOT_NOISE_RE.test(r.pathname)) return -1; // never harvest infra/boot noise
+    if (BOOT_NOISE_RE.test(r.pathname) || isSectorNoise(r.pathname)) return -1; // never harvest infra/boot noise (+ sector-specific, additive)
     let s = Math.log10(Math.max(1, r.bytes)); // size is a weak tiebreak, not primary
     if (idValues.some((id) => r.url.includes(id))) s += 100; // carries the navigated claim's id
     return s;
@@ -743,6 +775,36 @@ export function compileAgentRun(
     inputs: Object.keys(inputs).length ? inputs : undefined,
     guard: { no_booking: true, forbidden_actions: ["ReserveAppointment", "book", "confirm"], dry_run_only: true },
     steps,
+  };
+}
+
+/**
+ * Pipeline-level sector application, shared by BOTH compiled-flow shapes —
+ * compileAgentRun's navigate+harvest/api-write flows AND compileRecording's
+ * action-replay flows (the latter lives in @portico/flow-spec and has no
+ * sector awareness of its own) — applied once in authorFlow right after
+ * either path produces a `Flow`, so the two compilers don't duplicate this
+ * logic. A no-op unless `sector` is truthy (the caller actually requested
+ * one), which preserves the no-regression contract for authoring runs that
+ * don't specify a sector. When the resolved profile defaults writes to
+ * dry-run AND the compiled flow is write-intent (intent === "update"),
+ * ensures `guard.dry_run_only` is true unless the flow already set it
+ * explicitly (an explicit `false` is never clobbered). Pure — no I/O — so
+ * it's unit-testable against a synthetic Flow.
+ */
+export function applySectorProfile(
+  flow: Flow,
+  sector: string | undefined,
+  profile: SectorProfile,
+  intent: GoalPlan["intent"],
+): Flow {
+  if (!sector) return flow;
+  const shouldDefaultDryRun =
+    profile.guards.dryRunDefaultForWrites && intent === "update" && flow.guard?.dry_run_only === undefined;
+  return {
+    ...flow,
+    sector: profile.key,
+    guard: shouldDefaultDryRun ? { ...flow.guard, dry_run_only: true } : flow.guard,
   };
 }
 
@@ -953,6 +1015,15 @@ export function stopAtEphemeralSlot(clicks: ClickEvent[]): { clicks: ClickEvent[
  * docs/REBUILD-PROPOSAL.md §3.3). Fine for staging/synthetic authoring.
  */
 export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
+  // Resolved ONCE for the whole run: drives the rewriter's vocabulary block,
+  // additive noise filtering, localStorage auth-chaining gating, and the
+  // compiled flow's sector stamp / guard defaulting below. Undefined
+  // opts.sector resolves to the generic profile (empty noisePatterns,
+  // authPattern "either", vocabulary "") — behavior stays byte-identical to
+  // pre-sector authoring.
+  const profile = resolveSectorProfile(opts.sector);
+  if (opts.sector) log(opts, `sector profile: ${profile.key}`);
+
   const responses: HarvestedResponse[] = [];
   const requests: CapturedRequest[] = [];
   // Latest response body per pathname (non-boot JSON, capped) — lets the compiler
@@ -1058,6 +1129,8 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
     apiKey: opts.apiKey,
     startUrl: opts.startUrl,
     onLog: opts.onLog,
+    vocabulary: profile.authoring.vocabulary,
+    sectorKey: profile.key,
   });
   log(opts, `plan: intent=${plan.intent}, params=[${plan.parameters.map((p) => p.name).join(", ")}]`);
 
@@ -1226,8 +1299,14 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
         localStorageSnapshot,
         plan.parameters,
         plan.intent,
+        profile,
       );
     }
+    // Shared post-compile step for BOTH flow shapes above: stamp the sector
+    // (only when the caller actually requested one) and, for a profile that
+    // defaults writes to dry-run, backstop guard.dry_run_only on a write-intent
+    // flow that didn't already set it explicitly. See applySectorProfile.
+    flow = applySectorProfile(flow, opts.sector, profile, plan.intent);
     return {
       flow,
       evidence: {

@@ -51,18 +51,53 @@ recorded on every authored flow (`flows.provenance_json`).
 - ✅ **Connector pack template** — `connectors/TEMPLATE/` +
   [docs/ADAPTER-SDK.md](ADAPTER-SDK.md).
 
-## Phase 5 — Ecosystem (OSS) ⬜
+## Phase 5 — Reliability & sector profiles 🟡 in progress
 
-- **Public adapter SDK** — the `EngineAdapter` seam documented + packaged, so a
-  different engine can be dropped in.
-- **Example connector packs & templates** — starter connectors beyond the
-  example portal.
-- **Local benchmark suite** — measure API / DOM tier latencies against a local
-  target, tracked over time.
-- Hosted demo environment · community templates (later).
+- **Sector-profile registry** — [`packages/flow-spec/src/sectors.ts`](../packages/flow-spec/src/sectors.ts),
+  consumed by both the engine and authoring: readiness gates, timeouts,
+  retries, locator-cache trust and mutation guards keyed by industry/app-class
+  instead of one hardcoded bundle. Full reference: [docs/SECTORS.md](SECTORS.md).
+- **Universal step ceilings and a structured error taxonomy** — every step
+  type gets a hard ceiling; failures classify instead of surfacing as opaque
+  exceptions.
+- **Safety gates** — dry-run mutation gate on API-tier writes, runtime
+  enforcement of `guard.dry_run_only`, `allowed_domains` egress enforcement,
+  fail-loud extraction and asserts (no silent empty-result passes).
+- **Gmail-class primitives** — `press` / `type` step methods, iframe chains
+  (`locator.frame`), scroll-into-view, landed in the flow spec together with a
+  worked reference connector, [`connectors/gmail-web/`](../connectors/gmail-web/)
+  (communications sector, DRAFT — locators need live validation).
+- **Worker reliability** — distinguishes paused (HITL/resume needed) runs from
+  failed ones; retries transient failures with backoff instead of treating
+  every failure the same.
+
+## Phase 6 — planned ⬜
+
+- Live validation of `connectors/gmail-web/` against a real Gmail account, and
+  authoring tooling for keyboard-first flows.
+- Scroll-container harvesting, so virtualized lists (Gmail-class UIs) yield
+  more than what's currently on screen.
+- Notifications + a review queue for paused runs.
+- Console resume UI wired to `resumeOutput`.
+- Scheduler.
+- Postgres/RLS per [ADR-0003](decisions/0003-postgres-rls.md).
+
+## Phase 7 — Ecosystem (OSS) 🟡
+
+- ✅ **Public adapter SDK** — the `EngineAdapter` seam documented + packaged
+  ([docs/ADAPTER-SDK.md](ADAPTER-SDK.md)), so a different engine can be
+  dropped in.
+- ✅ **Example connector packs & templates** — starter connectors beyond the
+  example portal (`connectors/gmail-web/`).
+- ✅ **Local benchmark suite** — `scripts/bench.mjs` measures API / DOM tier
+  latency against a local target and checks it against the SLOs in
+  [docs/ARCHITECTURE.md §4](ARCHITECTURE.md#4-latency-budget--slo); see
+  [docs/BENCHMARKS.md](BENCHMARKS.md).
+- ⬜ Hosted demo environment · community templates (later).
 
 ---
 
-Near-term order of work: finish Phase 3 (eval + version tracking), then land the
-Phase 4/5 OSS-local foundation (local deploy, adapter SDK, benchmark), then the
-heavier Phase 4 items (RBAC, Postgres/RLS path) design-first.
+Near-term order of work: land Phase 5 end to end (sector profiles consumed
+everywhere, safety gates, Gmail-class primitives), then Phase 6 (live Gmail
+validation, virtualized-list harvesting, resume UI, scheduler), then the
+Postgres/RLS path design-first.

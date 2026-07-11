@@ -1,0 +1,83 @@
+# REFERENCE FLOW — DRAFT: locators are representative and MUST be validated live
+# before confirm.
+#
+# WRITE INTENT — composes a draft and NEVER sends. `guard.dry_run_only` keeps
+# this flow out of live runs entirely, and "send" is a hard `forbidden_actions`
+# entry as defense in depth even if that guard is ever loosened later. The
+# flow ends by autosaving the draft; no Send button is ever located or clicked.
+key: gmail-compose-draft
+version: 1
+description: Compose a Gmail draft (recipient, subject, body) and autosave it. Never sends.
+inputs:
+  recipient: string
+  subject: string
+  body: string
+
+guard:
+  dry_run_only: true
+  forbidden_actions: ["send"]
+
+steps:
+  - type: subflow
+    use: gmail-login                          # reuse the persisted --profile session (or paused HITL login)
+
+  - type: act
+    label: Open a new compose window
+    locator: { semantic: { role: button, name: "Compose", intent: "start a new message" } }
+
+  - type: act
+    label: Address the recipient
+    method: type                              # "To" is an autocomplete/chip combobox; needs real keystrokes to register
+    value: "{{recipient}}"
+    locator: { semantic: { role: combobox, name: "To recipients", intent: "the To recipients field" } }
+
+  - type: act
+    label: Commit the recipient chip and move to the next field
+    method: press
+    value: "Tab"
+
+  - type: act
+    label: Enter the subject
+    method: fill                              # plain text input — fill() is fine here (contrast the body step below)
+    value: "{{subject}}"
+    locator: { semantic: { role: textbox, name: "Subject", intent: "the subject field" } }
+
+  - type: act
+    label: Enter the message body
+    # contenteditable editor: fill() sets the DOM value directly and does NOT
+    # fire the keystroke/input events Gmail's editor listens on; type() does.
+    method: type
+    value: "{{body}}"
+    locator: { semantic: { role: textbox, name: "Message Body", intent: "the compose message body" } }
+
+  # Read back the filled-in fields before saving. Beyond confirming the entry
+  # above, this is this flow's data product: `evaluateValidation`
+  # (packages/engine/src/validate-flow.ts) fails any flow with zero
+  # intercept/select/extract steps ("declares no data outputs"), so a
+  # write-intent flow validated on its own — unlike gmail-login, which is only
+  # ever consumed via `subflow` — needs one too.
+  - type: extract
+    label: Read back the composed draft's visible fields
+    locator:
+      semantic: { intent: "the compose window's recipient, subject, and body fields as currently filled in" }
+    extract:
+      key: composed_draft
+      schema:
+        type: object
+        properties:
+          recipient: { type: string }
+          subject:   { type: string }
+          body:      { type: string }
+
+  # Ctrl+S saves the draft immediately without closing the compose window,
+  # which is what the assert below checks for. (Escape also autosaves-and-
+  # closes — an equally valid choice — but leaves nothing on screen to assert
+  # against, so Ctrl+S was picked here.)
+  - type: act
+    label: Save the draft
+    method: press
+    value: "Control+s"
+
+  - type: assert
+    label: Draft saved
+    condition: text_visible:Draft saved        # placeholder assertion — confirm the actual copy during live validation

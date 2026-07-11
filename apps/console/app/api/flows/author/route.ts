@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { NextResponse } from "next/server";
 import { pickLiveSession } from "@/lib/sessions";
 import { getAuthorJob } from "@/lib/store";
+import { listSectors } from "@portico/flow-spec";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +16,8 @@ interface AuthorBody {
   startUrl?: string;
   connector?: string;
   key?: string;
+  /** Industry/app-class to author for — see @portico/flow-spec's SectorProfile. Optional; validated against listSectors(). */
+  sector?: string;
 }
 
 /**
@@ -31,6 +34,11 @@ export async function POST(req: Request) {
   if (!goal || !startUrl) {
     return NextResponse.json({ error: "A goal and a start URL are required." }, { status: 400 });
   }
+  const sector = body.sector?.trim();
+  const validSectors: string[] = listSectors();
+  if (sector && !validSectors.includes(sector)) {
+    return NextResponse.json({ error: `Unknown sector "${sector}" — valid keys: ${validSectors.join(", ")}` }, { status: 400 });
+  }
 
   const picked = await pickLiveSession(body.connector);
   if ("error" in picked) {
@@ -41,6 +49,7 @@ export async function POST(req: Request) {
   const args = ["--import", "tsx", AUTHOR_SCRIPT, "--goal", goal, "--start-url", startUrl, "--cdp", picked.cdpEndpoint, "--job", jobId];
   if (body.key?.trim()) args.push("--key", body.key.trim());
   if (body.connector) args.push("--connector", body.connector);
+  if (sector) args.push("--sector", sector);
 
   // Detached + unref'd so it outlives this request: the user can navigate away
   // and the run keeps going, reporting into the author_jobs row.

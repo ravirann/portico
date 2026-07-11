@@ -1,0 +1,16 @@
+# REFERENCE CONNECTOR — DRAFT. Locators throughout this pack are representative
+# selections from Gmail's stable ARIA surface (role + accessible name), not a
+# captured recording — validate live via `portico validate` before you
+# `portico confirm` a flow from this connector. See README.md for what this
+# connector demonstrates and why DOM-tier extraction is used instead of a
+# network intercept.
+key: gmail-web
+name: Gmail (web)
+framework: gmail                # instances on the same framework share heals
+base_url: https://mail.google.com
+allowed_domains:                # hard network-egress boundary at run time
+  - mail.google.com
+  - accounts.google.com         # Google sign-in redirect target during gmail-login
+  - www.googleapis.com          # Gmail's REST surface, reserved for a future api-tier flow
+auth: gmail-login                # human sign-in subflow (flows/gmail-login.flow.yaml) — see README
+sector: communications            # see docs/SECTORS.md — keyboard-first, obfuscated CSS, virtualized DOM

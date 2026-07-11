@@ -1,0 +1,71 @@
+# REFERENCE FLOW — DRAFT: locators are representative and MUST be validated live
+# before confirm.
+#
+# READ INTENT — searches the mailbox and extracts what's on screen. Read-only:
+# no act label here matches the communications sector's mutationKeywords
+# (send/reply/forward/delete/archive/report spam/unsubscribe/discard — see
+# docs/SECTORS.md), so this flow needs no guard block and is dry-run friendly
+# by construction.
+key: gmail-search-extract
+version: 1
+description: Search Gmail and extract the visible thread rows for the query. Read-only.
+inputs:
+  query: string           # e.g. "from:billing subject:invoice"
+
+steps:
+  - type: subflow
+    use: gmail-login                          # reuse the persisted --profile session (or paused HITL login)
+
+  # `/` is Gmail's global "jump to search" shortcut, but it only fires when the
+  # account has "Keyboard shortcuts: ON" in Gmail settings (off by default for
+  # some accounts) and focus isn't already inside an editable field. The search
+  # combobox locator travels with this step as the deterministic fallback: if
+  # live validation shows the shortcut doesn't land (setting off, or focusing
+  # the box first turns "/" into a literal typed character), replace this step
+  # with a plain click (drop `method`/`value`) on the same locator instead.
+  - type: act
+    label: "Focus search (keyboard shortcut '/'; falls back to clicking the search box)"
+    method: press
+    value: "/"
+    locator: { semantic: { role: combobox, name: "Search mail", intent: "the mailbox search box" } }
+
+  - type: act
+    label: Type the search query
+    method: type                              # autocomplete combobox needs real keystrokes; fill() wouldn't trigger it
+    value: "{{query}}"
+    locator: { semantic: { role: combobox, name: "Search mail", intent: "the mailbox search box" } }
+
+  - type: act
+    label: Submit the search
+    method: press
+    value: "Enter"
+
+  # DOM-tier settle: nothing here backs a network intercept (see README —
+  # Gmail's search/sync endpoints are batched/proprietary, not clean JSON), so
+  # instead of the `wait` step type — which blocks on an output an `intercept`
+  # populates asynchronously, and nothing does that in this flow — this polls
+  # the DOM directly inside a single `read` and returns once at least one
+  # thread row has rendered, or its own timeout elapses, whichever comes first.
+  - type: read
+    label: Wait for the (virtualized) thread list to render
+    read:
+      expression: "(async () => { const t = Date.now() + 8000; while (Date.now() < t) { if (document.querySelectorAll('[role=\"row\"]').length > 0) return true; await new Promise(r => setTimeout(r, 200)); } return false; })()"
+      as: search_results_rendered
+
+  # Virtualized list: only rows currently mounted in the DOM come back. A long
+  # result set yields a strict subset of the true match count — see README
+  # "Reliability notes".
+  - type: extract
+    label: Read the visible thread rows
+    locator:
+      semantic: { role: row, intent: "each visible thread row in the main thread list" }
+    extract:
+      key: threads
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            sender:  { type: string }
+            subject: { type: string }
+            snippet: { type: string }

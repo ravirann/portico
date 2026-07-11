@@ -1,0 +1,25 @@
+# REFERENCE FLOW — DRAFT: locators are representative and MUST be validated live
+# before confirm.
+#
+# Google sign-in is ALWAYS a human step. Automated credential/2FA entry trips
+# Google's bot detection and violates its Terms of Service, so this flow never
+# touches the email/password/OTP fields — it opens Gmail and waits for a human
+# to finish signing in. Run once with a persistent `--profile`; the auth
+# profile carries the resulting session into every later run, so later runs
+# reusing the same --profile skip this human step entirely (see README.md).
+key: gmail-login
+version: 1
+description: Open Gmail and wait for a human to complete Google sign-in (including 2FA). Session then persists via --profile.
+steps:
+  - type: navigate
+    label: Open Gmail
+    url: "{{base_url}}"
+
+  - type: human
+    label: "Complete Google sign-in (including 2FA) in the attached browser"
+
+  - type: assert
+    label: Landed on Gmail, signed in
+    condition: url_contains:mail.google.com
+# No guard block: this flow only navigates and waits on a human — nothing here
+# is a mutation, so it's unconditionally dry-run safe.

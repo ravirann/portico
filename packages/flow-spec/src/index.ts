@@ -6,6 +6,8 @@
  * (Libretto today) interprets it. See docs/ARCHITECTURE.md §7.
  */
 
+import type { SectorKey } from "./sectors.js";
+
 export type StepType =
   | "navigate"
   | "act" // AI-resolvable at author time, cached locator at run time
@@ -24,6 +26,12 @@ export type StepType =
 
 /** A cached deterministic locator plus the semantic descriptor used to heal it. */
 export interface Locator {
+  /**
+   * Chain of iframe CSS selectors (e.g. `iframe[src*="editor"]`) resolved
+   * outermost→innermost via frameLocator before candidate resolution;
+   * absent = main frame.
+   */
+  frame?: string[];
   /** Fast path: the concrete selector captured at authoring time. */
   cached?: string;
   /** Heal path: what the element *is*, so AI can re-find it by meaning. */
@@ -53,6 +61,15 @@ export interface Step {
   url?: string;
   /** For act/upload: value or input reference (e.g. "{{reason}}"). */
   value?: string;
+  /**
+   * Explicit act method; when absent the engine infers (value present →
+   * fill, else click). `press` = keyboard chord in `value` (e.g.
+   * "Control+Enter"), pressed on the located element if a locator is
+   * present, else on the page. `type` = click to focus, then type `value`
+   * via keyboard events (for contenteditable/rich-text editors where
+   * fill() doesn't fire the right events).
+   */
+  method?: "click" | "fill" | "press" | "type";
   /** For extract: the output key + JSON-schema of the shape to return. */
   extract?: { key: string; schema: Record<string, unknown> };
   /** For subflow: the referenced flow key (e.g. "portal-login"). */
@@ -103,8 +120,12 @@ export interface Step {
    * latest match in `output[as]`. Register it before the action that triggers
    * the request. This harvests API-tier data without replaying the request —
    * the robust path for anti-replay/anti-forgery-protected endpoints.
+   * `required` marks the capture as load-bearing (validation treats it as a
+   * required output; a wait on it that times out is a hard failure).
+   * `schema` is an optional JSON-schema gate applied to the captured JSON,
+   * like extract.schema.
    */
-  intercept?: { url_contains: string; as: string };
+  intercept?: { url_contains: string; as: string; required?: boolean; schema?: Record<string, unknown> };
   /**
    * For wait: block until `output[for]` is populated (e.g. by an interceptor
    * after a click triggers the request), or fail after `timeout_ms`.
@@ -133,6 +154,11 @@ export interface Flow {
   /** Declared inputs (name → type hint), referenced as {{name}} in steps. */
   inputs?: Record<string, string>;
   guard?: FlowGuards;
+  /**
+   * Sector profile stamped at authoring time; engine falls back to it when
+   * the caller doesn't specify one.
+   */
+  sector?: SectorKey;
   steps: Step[];
 }
 
@@ -144,6 +170,11 @@ export interface Target {
   base_url: string;
   allowed_domains: string[]; // hard network-egress boundary at run time
   auth: string; // auth strategy / subflow key, e.g. "portal-login"
+  /**
+   * Industry/app-class of the target; selects the SectorProfile with
+   * reliability defaults; see sectors.ts.
+   */
+  sector?: SectorKey;
 }
 
 export const FLOW_SPEC_VERSION = 1 as const;
@@ -153,3 +184,11 @@ export const FLOW_SPEC_VERSION = 1 as const;
 // can compile a captured demonstration into a deterministic action-replay flow.
 export { compileRecording, collapseTogglePairs } from "./compile-recording.js";
 export type { Recording, ClickEvent, NetworkEntry, CompileRecordingOptions } from "./compile-recording.js";
+
+// Sector profiles: named bundles of reliability defaults (readiness gates,
+// timeouts, retries, locator policy, mutation guards, authoring hints)
+// keyed by industry/app-class. Lives in its own zero-dependency module —
+// re-exported here so the engine and author packages can reach it via the
+// single @portico/flow-spec entry point.
+export { SECTOR_PROFILES, resolveSectorProfile, listSectors } from "./sectors.js";
+export type { SectorKey, SectorProfile } from "./sectors.js";

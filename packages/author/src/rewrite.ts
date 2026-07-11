@@ -93,6 +93,27 @@ interface RewriteOptions {
   baseUrl?: string;
   startUrl?: string;
   onLog?: (line: string) => void;
+  /**
+   * Sector-specific domain vocabulary (SectorProfile.authoring.vocabulary) to
+   * inject into the SYSTEM prompt — see buildSystemPrompt. Undefined/"" = no
+   * block appended (the no-regression default for authoring without a sector).
+   */
+  vocabulary?: string;
+  /** Sector key labeling the vocabulary block (e.g. "healthcare"); cosmetic only. */
+  sectorKey?: string;
+}
+
+/**
+ * Assemble the rewriter's SYSTEM prompt: the base planning instructions,
+ * plus — when authoring for a known sector — a clearly delimited domain-
+ * vocabulary block appended at the end. Pure (no network, no model), so the
+ * prompt assembly is unit-testable without an API key. Extracted out of
+ * rewriteGoal so the injection logic has a single, well-tested home.
+ */
+export function buildSystemPrompt(vocabulary?: string, sectorKey?: string): string {
+  const trimmed = (vocabulary ?? "").trim();
+  if (!trimmed) return SYSTEM;
+  return `${SYSTEM}\n\nDomain context (sector: ${sectorKey || "unknown"}):\n${trimmed}`;
 }
 
 /** A safe pass-through plan when planning is unavailable. */
@@ -151,7 +172,7 @@ export async function rewriteGoal(rawGoal: string, opts: RewriteOptions): Promis
       body: JSON.stringify({
         model,
         messages: [
-          { role: "system", content: SYSTEM },
+          { role: "system", content: buildSystemPrompt(opts.vocabulary, opts.sectorKey) },
           { role: "user", content: user },
         ],
         response_format: { type: "json_object" },

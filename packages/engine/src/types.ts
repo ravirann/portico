@@ -30,6 +30,8 @@ export interface StepTrace {
   screenshotRef?: string;
   startedAt: number;
   endedAt: number;
+  /** Classified failure kind (see errors.ts StepErrorKind) — set on "failed" traces. */
+  errorKind?: string;
 }
 
 export type RunStatus = "completed" | "failed" | "paused";
@@ -42,13 +44,18 @@ export interface EngineRunResult {
   /** Reference to the captured session recording (rrweb events file or video). */
   rrwebRef?: string;
   /** Present when status = failed | paused. `paused` ⇒ HITL/resume needed. */
-  failure?: { stepIndex: number; reason: string; resumable: boolean };
+  failure?: { stepIndex: number; reason: string; resumable: boolean; kind?: string };
   /** Updated trusted session to persist back to the vault, if it changed. */
   sessionState?: unknown;
-  /** Output keys that could NOT be schema-validated (no model → raw-DOM fallback). */
+  /** Output keys whose extracted/intercepted value did NOT pass its declared
+   *  schema — the raw value is still stored (never dropped), just flagged. */
   unvalidatedOutputKeys?: string[];
   /** The Libretto auth profile this run loaded/refreshed, if any. */
   authProfile?: string;
+  /** Mutating `act` steps skipped outside live mode (dry-run safety gate). Only set when non-empty. */
+  skippedMutations?: string[];
+  /** Requests blocked by the egress boundary, as "METHOD host" strings. Only set when non-empty. */
+  blockedRequests?: string[];
 }
 
 export interface EngineRunOptions {
@@ -87,6 +94,19 @@ export interface EngineRunOptions {
   artifactsDir?: string;
   /** Capture rrweb/screenshots. Defaults to true; set false for speed. */
   record?: boolean;
+  /** Sector profile key (see @portico/flow-spec SectorKey) selecting
+   *  reliability defaults (timeouts, retries, readiness gates, mutation
+   *  guards). Falls back to `flow.sector`, then the generic profile. */
+  sector?: string;
+  /** Hard network-egress boundary: when non-empty (and PORTICO_EGRESS_ENFORCE
+   *  !== "0"), a main-frame navigation or any mutating (non-GET/HEAD/OPTIONS)
+   *  request to a host outside this list is aborted before it leaves the
+   *  browser. GET subresources (CDNs, fonts, analytics) always pass. */
+  allowedDomains?: string[];
+  /** Seed `output` with prior values before replay — combined with
+   *  `resumeFrom`, this lets a resumed run's templated {{output.x}}
+   *  references resolve to what an earlier (paused) attempt already produced. */
+  resumeOutput?: Record<string, unknown>;
 }
 
 export interface EngineCapabilities {

@@ -109,19 +109,29 @@ export function expectedOutputKeys(flow: Flow): string[] {
  * replay, so they must NOT gate validation. Among intercepts, require the one(s)
  * the flow explicitly WAITS for — its committed product. If nothing is waited on
  * (no signal to narrow), fall back to requiring every intercept (strict).
+ *
+ * An intercept the flow author marked `required: true` is ALWAYS a required
+ * output too, in addition to (not instead of) the waited-on rule above — an
+ * explicit `required` is a stronger, author-declared signal than the
+ * wait-inference heuristic, so it's never narrowed away.
  */
 export function requiredOutputKeys(flow: Flow): string[] {
   const required = new Set<string>();
   const intercepts: string[] = [];
+  const explicitlyRequired = new Set<string>();
   const waited = new Set<string>();
   for (const step of flow.steps) {
     if (step.type === "select" && step.select?.as) required.add(step.select.as);
     if (step.type === "extract" && step.extract?.key) required.add(step.extract.key);
-    if (step.type === "intercept" && step.intercept?.as) intercepts.push(step.intercept.as);
+    if (step.type === "intercept" && step.intercept?.as) {
+      intercepts.push(step.intercept.as);
+      if (step.intercept.required) explicitlyRequired.add(step.intercept.as);
+    }
     if (step.wait?.for) waited.add(step.wait.for);
   }
   const waitedIntercepts = intercepts.filter((k) => waited.has(k));
   for (const k of waitedIntercepts.length > 0 ? waitedIntercepts : intercepts) required.add(k);
+  for (const k of explicitlyRequired) required.add(k);
   return [...required];
 }
 

@@ -11,3 +11,17 @@ base_url: "{{instance.base_url}}"
 allowed_domains:                # hard network-egress boundary at run time
   - "{{instance.host}}"
 auth: login                     # reusable, 2FA-aware auth subflow (flows/login.flow.yaml)
+
+# Sector: picks the reliability defaults (readiness gates, timeouts, retries,
+# locator policy, mutation guards) suited to this portal's industry/app-class.
+# Falls back to Flow.sector, then to `generic` (the engine's historical
+# defaults) if neither is set. Full reference + the "why" behind each
+# profile's numbers: docs/SECTORS.md.
+#   generic         - fallback; reproduces the engine's historical defaults
+#   healthcare      - EHR/payer/clinical scheduling portals (Epic/MyChart, Availity-class)
+#   communications  - email/chat/calendar web clients (Gmail, Outlook Web, Slack)
+#   finance         - banking, insurance and brokerage portals
+#   government      - civic, tax, permits and case-management portals
+#   commerce        - e-commerce and logistics back-offices (Shopify-admin-class)
+#   saas_ops        - internal CRM/support/ops tools (Zendesk-class, ops consoles)
+sector: generic                 # rename: pick the closest sector, or leave generic

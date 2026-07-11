@@ -14,6 +14,7 @@ import { resolve } from "node:path";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { authorFlow } from "./src/index.ts";
 import { PROMPT_VERSION } from "./src/rewrite.ts";
+import { listSectors } from "@portico/flow-spec";
 
 const require = createRequire(resolve("apps/cli") + "/");
 const { Store } = require(resolve("packages/store/dist/index.js"));
@@ -33,11 +34,15 @@ const startUrl = arg("--start-url");
 const cdpUrl = arg("--cdp");
 const connector = arg("--connector");
 const key = arg("--key") || "authored-flow";
+const sector = arg("--sector");
 // Optional async-job id: when set, progress + the final result/error are written
 // to the author_jobs row so the console can poll and survive a page reload.
 const jobId = arg("--job");
 if (!goal || !startUrl || !cdpUrl) {
-  die("usage: author-cli.mjs --goal <text> --start-url <url> --cdp <endpoint> [--key K] [--connector C] [--job J]", 2);
+  die("usage: author-cli.mjs --goal <text> --start-url <url> --cdp <endpoint> [--key K] [--connector C] [--sector S] [--job J]", 2);
+}
+if (sector && !listSectors().includes(sector)) {
+  die(`unknown --sector "${sector}" — valid keys: ${listSectors().join(", ")}`, 2);
 }
 
 const store = new Store();
@@ -100,6 +105,7 @@ try {
     model: `${provider}/${modelName}`,
     apiKey,
     key,
+    sector: sector || undefined,
     onLog: (l) => {
       console.error("·", l);
       logEvent(l);
