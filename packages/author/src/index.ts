@@ -554,6 +554,131 @@ function buildMutationStep(
   return { step, inputs, authReads };
 }
 
+/** Header NAME shapes that carry an auth/session credential — matched by NAME
+ *  so this generalizes across an app's own naming convention (Authorization,
+ *  x-framework-xsrf-token, x-server-token, x-goog-authuser) instead of
+ *  hardcoding one site's exact header list. */
+const CREDENTIAL_HEADER_NAME_RE = /authorization|xsrf|server-token|goog-authuser/i;
+
+/** A Google SAPISIDHASH-family value — the single-use, epoch-stamped hash
+ *  Google's own page JS derives from a live session cookie. Catches the value
+ *  even on a header whose NAME wouldn't otherwise look auth-shaped. */
+const FROZEN_TOKEN_VALUE_RE = /SAPISID(1P|3P)?HASH/;
+
+/** `gsessionid=` in a URL's querystring — a single-use per-session channel id
+ *  some RPC-style APIs (Google's included) carry as a query param rather than
+ *  a header. */
+const GSESSIONID_QUERY_RE = /[?&]gsessionid=/i;
+
+/**
+ * Classify captured mutations by whether they can ever replay.
+ *
+ * A compiled flow re-executes later with ZERO model calls and no live human
+ * session, so a captured write is only reliable if replaying it needs
+ * nothing that dies when the recording ends. Two independent ways a captured
+ * write fails that bar — each request lands in `unreplayable` with whichever
+ * fires (cross_origin checked first, since a foreign host makes the
+ * credential question moot):
+ *
+ *  - cross_origin: the request went to a host other than the app being
+ *    authored (exact hostname inequality — see the call site for why that's
+ *    enough: a foreign host like Gmail's clients6.google.com runs its own
+ *    opaque session protocol the flow has no way to re-derive, unlike a
+ *    same-origin request whose auth can be re-read fresh from the app's own
+ *    localStorage/cookies at replay time).
+ *  - frozen_credential: a header whose NAME reads as a credential, or whose
+ *    VALUE matches Google's SAPISIDHASH family, still holding a literal value
+ *    rather than a `{{…}}` runtime reference — i.e. discovery (see
+ *    buildMutationStep above) could not explain it, so it would be baked into
+ *    the flow verbatim and die the moment the recording session ends. A
+ *    `gsessionid` querystring param is the same failure carried in the URL.
+ *
+ * Pure — no I/O, no knowledge of localStorage or authPattern — so it's
+ * unit-tested directly against synthetic fixtures. The caller (compileAgentRun)
+ * is responsible for handing it requests whose headers already reflect any
+ * runtime substitution it was able to make.
+ */
+export function writeReplayability(
+  mutations: CapturedRequest[],
+  appHost: string,
+): {
+  reliable: CapturedRequest[];
+  unreplayable: Array<{ req: CapturedRequest; reason: "cross_origin" | "frozen_credential" }>;
+  distinctForeignHosts: string[];
+} {
+  const reliable: CapturedRequest[] = [];
+  const unreplayable: Array<{ req: CapturedRequest; reason: "cross_origin" | "frozen_credential" }> = [];
+  const foreignHosts = new Set<string>();
+
+  for (const req of mutations) {
+    let hostname: string | null = null;
+    let search = "";
+    try {
+      const u = new URL(req.url);
+      hostname = u.hostname;
+      search = u.search;
+    } catch {
+      hostname = null; // unparseable — can't prove foreign; falls through to the credential check
+    }
+
+    const crossOrigin = hostname !== null && hostname !== appHost;
+    if (crossOrigin && hostname) foreignHosts.add(hostname);
+
+    const frozenHeader = Object.entries(req.headers ?? {}).some(([name, value]) => {
+      const looksLikeCredential = CREDENTIAL_HEADER_NAME_RE.test(name) || FROZEN_TOKEN_VALUE_RE.test(value);
+      return looksLikeCredential && !value.includes("{{"); // {{…}} means an authRead already resolves it fresh
+    });
+    const frozenCredential = frozenHeader || GSESSIONID_QUERY_RE.test(search);
+
+    if (crossOrigin) {
+      unreplayable.push({ req, reason: "cross_origin" });
+    } else if (frozenCredential) {
+      unreplayable.push({ req, reason: "frozen_credential" });
+    } else {
+      reliable.push(req);
+    }
+  }
+
+  return { reliable, unreplayable, distinctForeignHosts: [...foreignHosts].sort() };
+}
+
+/**
+ * Thrown by compileAgentRun when a captured write can never replay (see
+ * writeReplayability) — a foreign-host credential storm (Gmail-class apps
+ * firing dozens of cross-origin RPCs guarded by single-use tokens that expire
+ * when the recording ends) rather than a genuine same-origin mutation. This is
+ * the FAIL LOUD half of the reliability thesis (docs/RELIABILITY.md): refuse
+ * to emit a confidently-wrong, unrunnable flow — the caller must re-author on
+ * the DOM/keyboard tier instead.
+ */
+export class UnreplayableWriteError extends Error {
+  readonly foreignHosts: string[];
+  readonly unreplayableCount: number;
+
+  constructor(
+    goal: string,
+    info: {
+      unreplayable: Array<{ req: CapturedRequest; reason: "cross_origin" | "frozen_credential" }>;
+      distinctForeignHosts: string[];
+    },
+  ) {
+    const hosts = info.distinctForeignHosts;
+    const scope =
+      hosts.length > 0
+        ? `${hosts.length} third-party API call${hosts.length === 1 ? "" : "s"} (${hosts.join(", ")})`
+        : `${info.unreplayable.length} API call${info.unreplayable.length === 1 ? "" : "s"}`;
+    super(
+      `Refusing to author "${goal}": the recorded write depends on ${scope} guarded by single-use tokens ` +
+        `(SAPISIDHASH/XSRF/server-token) that expire when the recording ends — replaying them would always fail. ` +
+        `Apps like Gmail must be authored on the DOM/keyboard tier instead: see connectors/gmail-web ` +
+        `(click Compose → type → stop at a draft). Re-author with the communications sector and the DOM path.`,
+    );
+    this.name = "UnreplayableWriteError";
+    this.foreignHosts = hosts;
+    this.unreplayableCount = info.unreplayable.length;
+  }
+}
+
 export function compileAgentRun(
   goal: string,
   finalUrl: string,
@@ -649,6 +774,11 @@ export function compileAgentRun(
     const mutationSteps: Step[] = [];
     const authReadSteps: Step[] = [];
     const seenAuthRead = new Set<string>();
+    // Parallel to mutationSteps: each mutation's captured request with headers
+    // overlaid by whatever buildMutationStep just resolved via localStorage —
+    // the replayability guard below must see `{{user_token}}` for anything
+    // discovery explained, not the literal value it was captured with.
+    const checkedMutations: CapturedRequest[] = [];
     for (const r of mutations) {
       const built = buildMutationStep(r, tokens, lookups, responseBodies, localStorageSnapshot, nameForValue, profile.authoring.authPattern);
       if (!built) continue;
@@ -660,6 +790,51 @@ export function compileAgentRun(
       }
       mutationSteps.push(built.step);
       Object.assign(inputs, built.inputs);
+      const compiledHeaders = (built.step as unknown as { api?: ApiBlock }).api?.headers;
+      checkedMutations.push({
+        ...r,
+        // cookie-session apps carry auth via the browser's cookie jar, not a
+        // header value — buildMutationStep (above) never even attempts
+        // localStorage discovery for this authPattern, BY DESIGN, to avoid
+        // binding a coincidentally-matching but unrelated value (see its
+        // `lsKey` comment). For the same reason a header's literal value here
+        // is not a meaningful replayability signal for a cookie-session app,
+        // so headers are excluded from its check; cross-origin detection
+        // below is authPattern-independent and still catches a genuine
+        // foreign-host storm (Gmail-class) regardless.
+        headers: profile.authoring.authPattern === "cookie-session" ? undefined : { ...r.headers, ...compiledHeaders },
+      });
+    }
+
+    // Guard: refuse to author a flow whose write can never replay. A compiled
+    // flow re-executes with ZERO model calls and no live human session, so a
+    // captured write is only reliable if nothing it needs dies when the
+    // recording ends — see writeReplayability's doc comment for the two ways
+    // that happens (foreign host, frozen single-use credential). UNRELIABLE
+    // when at least one entry is unreplayable AND EITHER nothing else is
+    // reliable to fall back on OR the storm spans 2+ distinct foreign hosts
+    // (the Gmail signature: dozens of cross-origin RPCs, not one bad
+    // request) — a single foreign call alongside real same-origin writes
+    // is left to human review rather than failing the whole run.
+    //
+    // No-op for read/search goals: `mutations` (and so `checkedMutations`) is
+    // only ever populated when intent === "update" — the
+    // `if (intent !== "update") continue;` in the first pass above skips
+    // every non-GET request otherwise — so this guard never runs for a
+    // read/search goal.
+    if (checkedMutations.length > 0) {
+      const appHost = (() => {
+        try {
+          return new URL(finalUrl).hostname;
+        } catch {
+          return "";
+        }
+      })();
+      const replayability = writeReplayability(checkedMutations, appHost);
+      const nothingReliable = replayability.reliable.length === 0;
+      if (replayability.unreplayable.length > 0 && (nothingReliable || replayability.distinctForeignHosts.length >= 2)) {
+        throw new UnreplayableWriteError(goal, replayability);
+      }
     }
 
     if (lookups.length > 0 || mutationSteps.length > 0) {
@@ -1289,18 +1464,28 @@ export async function authorFlow(opts: AuthorOptions): Promise<AuthorResult> {
       flow.description = `Agent-authored (action replay) from the goal: ${opts.goal}`;
     } else {
       log(opts, `compiling navigate+harvest flow (${replay.length} interactions, intent=${plan.intent})`);
-      flow = compileAgentRun(
-        opts.goal,
-        finalUrl,
-        responses,
-        key,
-        requests,
-        responseBodies,
-        localStorageSnapshot,
-        plan.parameters,
-        plan.intent,
-        profile,
-      );
+      try {
+        flow = compileAgentRun(
+          opts.goal,
+          finalUrl,
+          responses,
+          key,
+          requests,
+          responseBodies,
+          localStorageSnapshot,
+          plan.parameters,
+          plan.intent,
+          profile,
+        );
+      } catch (err) {
+        // Same failure channel as the auth-wall gate above: log the clean,
+        // actionable reason through onLog (author-cli.mjs mirrors it into the
+        // author_job_events timeline) before it propagates and fails the job —
+        // no flow is ever saved. Any OTHER error type just rethrows unlogged
+        // here, exactly as before this guard existed (no behavior change).
+        if (err instanceof UnreplayableWriteError) log(opts, err.message);
+        throw err;
+      }
     }
     // Shared post-compile step for BOTH flow shapes above: stamp the sector
     // (only when the caller actually requested one) and, for a profile that
