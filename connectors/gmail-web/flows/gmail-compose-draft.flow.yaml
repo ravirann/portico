@@ -1,10 +1,13 @@
-# REFERENCE FLOW — DRAFT: locators are representative and MUST be validated live
-# before confirm.
+# LIVE-VALIDATED 2026-07-11 against mail.google.com (Chrome 149): the Compose,
+# To-recipients, Subject and Message-Body locators below all resolved and the
+# draft autosaved ("Draft saved"). Recipient/subject/body confirmed in the draft.
 #
 # WRITE INTENT — composes a draft and NEVER sends. `guard.dry_run_only` keeps
 # this flow out of live runs entirely, and "send" is a hard `forbidden_actions`
-# entry as defense in depth even if that guard is ever loosened later. The
-# flow ends by autosaving the draft; no Send button is ever located or clicked.
+# entry as defense in depth even if that guard is ever loosened later. Gmail
+# AUTOSAVES the draft as you type — there is no explicit save (Ctrl+S opens the
+# browser's Save-page dialog, so it is deliberately NOT used); the flow just
+# asserts Gmail's own "Draft saved" confirmation. No Send button is ever located.
 key: gmail-compose-draft
 version: 1
 description: Compose a Gmail draft (recipient, subject, body) and autosave it. Never sends.
@@ -50,34 +53,24 @@ steps:
     value: "{{body}}"
     locator: { semantic: { role: textbox, name: "Message Body", intent: "the compose message body" } }
 
-  # Read back the filled-in fields before saving. Beyond confirming the entry
-  # above, this is this flow's data product: `evaluateValidation`
+  # Read back the composed body as this flow's data product. `evaluateValidation`
   # (packages/engine/src/validate-flow.ts) fails any flow with zero
-  # intercept/select/extract steps ("declares no data outputs"), so a
-  # write-intent flow validated on its own — unlike gmail-login, which is only
-  # ever consumed via `subflow` — needs one too.
+  # intercept/select/extract outputs, so a write-intent flow validated on its own
+  # — unlike gmail-login, only ever consumed via `subflow` — needs one. This uses
+  # a CACHED (deterministic) locator on the contenteditable body: it reads the
+  # element's text with NO extract model required. (An earlier draft used a
+  # model-only semantic extract, which now hard-fails when no heal model is set.)
   - type: extract
-    label: Read back the composed draft's visible fields
+    label: Read back the composed body (confirms the message was entered)
     locator:
-      semantic: { intent: "the compose window's recipient, subject, and body fields as currently filled in" }
+      cached: '[role="textbox"][aria-label="Message Body"]'
+      semantic: { role: textbox, name: "Message Body", intent: "the compose message body" }
     extract:
-      key: composed_draft
-      schema:
-        type: object
-        properties:
-          recipient: { type: string }
-          subject:   { type: string }
-          body:      { type: string }
+      key: draft_body
+      schema: { type: string }
 
-  # Ctrl+S saves the draft immediately without closing the compose window,
-  # which is what the assert below checks for. (Escape also autosaves-and-
-  # closes — an equally valid choice — but leaves nothing on screen to assert
-  # against, so Ctrl+S was picked here.)
-  - type: act
-    label: Save the draft
-    method: press
-    value: "Control+s"
-
+  # No explicit save step: Gmail autosaves as you type. The extract above (and
+  # the sector pacing) give it a beat; then we assert Gmail's own confirmation.
   - type: assert
     label: Draft saved
-    condition: text_visible:Draft saved        # placeholder assertion — confirm the actual copy during live validation
+    condition: text_visible:Draft saved        # LIVE-VALIDATED: this is Gmail's exact autosave copy

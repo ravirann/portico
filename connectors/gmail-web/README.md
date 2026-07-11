@@ -1,11 +1,22 @@
 # Connector: gmail-web
 
-> **REFERENCE CONNECTOR — DRAFT.** Every locator in this pack is a
-> representative selection from Gmail's stable ARIA surface (role + accessible
-> name), hand-authored rather than captured from a live record-by-demonstration
-> session. Run `portico validate` against a real Gmail account and read the
-> trace before you `portico confirm` any flow here — see "Live validation"
-> below.
+> **REFERENCE CONNECTOR.** Locators are a representative selection from Gmail's
+> stable ARIA surface (role + accessible name), hand-authored rather than
+> captured from a record-by-demonstration session.
+>
+> **`gmail-compose-draft` is LIVE-VALIDATED** (2026-07-11, mail.google.com on
+> Chrome 149): driven end-to-end through the engine, every step `ok`, the draft
+> autosaved and Gmail's "Draft saved" confirmation asserted — recipient/subject/
+> body all landed, nothing sent. Two corrections came out of that run and are
+> folded in: Gmail **autosaves** (the old `Ctrl+S` step was removed — it opens
+> the browser's Save-page dialog), and the body read-back now uses a
+> **deterministic cached locator** (no extract model needed). One engine gotcha
+> worth knowing: CDP-attach opens a fresh page, so a compose flow must `navigate`
+> to Gmail (the `gmail-login` subflow does) — running the bare compose steps
+> against an already-open tab won't find the page.
+>
+> `gmail-search-extract` is still representative — `portico validate` it against
+> a real account before you `portico confirm`. See "Live validation" below.
 
 ## What this demonstrates
 

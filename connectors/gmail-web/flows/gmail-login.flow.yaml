@@ -15,8 +15,13 @@ steps:
     label: Open Gmail
     url: "{{base_url}}"
 
+  # Pause for a human ONLY when a sign-in form is actually on screen. On an
+  # already-authenticated session (persistent --profile, or an attached
+  # already-signed-in browser) no password field is present, the condition is
+  # false, and this step is skipped — so later runs sail straight through.
   - type: human
     label: "Complete Google sign-in (including 2FA) in the attached browser"
+    condition: selector_visible:input[type="password"]
 
   - type: assert
     label: Landed on Gmail, signed in
