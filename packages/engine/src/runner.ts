@@ -445,6 +445,7 @@ async function runProgrammatic(opts: EngineRunOptions): Promise<EngineRunResult>
           screenshotRef: shot,
           healedFrom: outcome.healedFrom,
           healedTo: outcome.healedTo,
+          healedBy: outcome.healedBy,
         });
         await pace();
       } catch (err) {

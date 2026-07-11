@@ -452,6 +452,7 @@ test("an overlay-blocked click heals via deterministic dismissal (no heal model 
   const actTrace = result.traces.find((t) => t.type === "act");
   assert.ok(actTrace, "expected an act trace");
   assert.equal(actTrace!.status, "healed");
+  assert.equal(actTrace!.healedBy, "deterministic", "no heal model configured — the heal must be flagged deterministic");
   assert.match(actTrace!.detail ?? "", /recovered/i);
 });
 

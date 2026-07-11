@@ -19,6 +19,14 @@ export interface AuthContext {
 
 export type StepStatus = "ok" | "healed" | "failed" | "skipped" | "paused";
 
+/**
+ * What machinery achieved a runtime self-heal. Recovery is deterministic-first
+ * and runs even with no heal model configured (ADR-0004, recover.ts), so a
+ * "healed" status alone does NOT imply a model call — only `"model"` does
+ * (the heal model picked the dismissal target that let the retry succeed).
+ */
+export type HealedBy = "deterministic" | "model";
+
 export interface StepTrace {
   index: number;
   type: string;
@@ -28,6 +36,8 @@ export interface StepTrace {
   /** Set when a locator was self-healed, for the audit/suggestion pipeline. */
   healedFrom?: string;
   healedTo?: string;
+  /** Set alongside a heal — see HealedBy. Drives tier.ts's agent escalation. */
+  healedBy?: HealedBy;
   screenshotRef?: string;
   startedAt: number;
   endedAt: number;

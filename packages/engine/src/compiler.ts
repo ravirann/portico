@@ -46,6 +46,7 @@ import { pickByPolicy, type PickPolicy } from "./pick-slot.js";
 import type { HealModel } from "./model.js";
 import { PorticoStepError } from "./errors.js";
 import { attemptWithRecovery } from "./recover.js";
+import type { HealedBy } from "./types.js";
 import { pageRequest, type RequestConfig } from "./page-request.js";
 
 /** An API-tier marker a flow can attach to a step (extra flow-spec field). */
@@ -88,6 +89,8 @@ export interface StepOutcome {
   detail?: string;
   healedFrom?: string;
   healedTo?: string;
+  /** Set alongside a heal — what the recovery leaned on (StepTrace.healedBy). */
+  healedBy?: HealedBy;
 }
 
 export interface CompiledStep {
@@ -496,7 +499,7 @@ async function runAct(
     const detail = recovered.dismissed
       ? `recovered — ${recovered.dismissed}`
       : "recovered — transient failure cleared on retry";
-    return { status: "healed", detail, healedFrom: recovered.dismissed ?? desc, healedTo: desc };
+    return { status: "healed", detail, healedFrom: recovered.dismissed ?? desc, healedTo: desc, healedBy: recovered.healedBy };
   }
 }
 

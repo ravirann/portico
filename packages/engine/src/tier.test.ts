@@ -27,20 +27,34 @@ test("acts alongside intercept → dom (DOM interaction dominates api)", () => {
   assert.equal(deriveTier(traces), "dom");
 });
 
-test("a self-heal at run time → agent (dominates everything)", () => {
+test("a model-assisted self-heal at run time → agent (dominates everything)", () => {
   const traces = [
     { type: "navigate", status: "ok" as const },
-    { type: "act", status: "healed" as const },
+    { type: "act", status: "healed" as const, healedBy: "model" as const },
     { type: "intercept", status: "ok" as const },
   ];
   assert.equal(deriveTier(traces), "agent");
 });
 
-test("healedFrom set (even if status not 'healed') → agent", () => {
+// ADR-0004: recovery is deterministic-first and runs with no heal model
+// configured, so "healed" alone means an overlay was dismissed / a retry
+// cleared a transient — no model call. The step classifies by its own type.
+test("a deterministic self-heal does NOT escalate → dom (the act's own tier)", () => {
   const traces = [
-    { type: "act", status: "ok" as const, healedFrom: "button:has-text('Schedule')" },
+    { type: "navigate", status: "ok" as const },
+    { type: "act", status: "healed" as const, healedBy: "deterministic" as const },
+    { type: "intercept", status: "ok" as const },
   ];
-  assert.equal(deriveTier(traces), "agent");
+  assert.equal(deriveTier(traces), "dom");
+});
+
+// A healed trace from before healedBy existed carries no flag — without
+// positive evidence of a model call it must not claim the agent tier.
+test("a healed trace without healedBy (pre-flag) → dom, not agent", () => {
+  const traces = [
+    { type: "act", status: "healed" as const },
+  ];
+  assert.equal(deriveTier(traces), "dom");
 });
 
 test("skipped steps don't count toward a tier", () => {

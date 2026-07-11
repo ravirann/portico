@@ -21,8 +21,13 @@ const DOM_INTERACTION = new Set(["act", "extract", "assert", "download", "upload
  * Derive the tier a run effectively used from its step traces —
  * most-capable-machinery-wins, `agent` > `dom` > `api`:
  *
- *  - **agent** — a locator self-healed at run time (a model call happened).
- *  - **dom**   — at least one step interacted with or read the live DOM.
+ *  - **agent** — a MODEL-ASSISTED self-heal happened at run time (the heal
+ *                model picked the dismissal target — `healedBy: "model"`).
+ *                Recovery is deterministic-first and runs with no model
+ *                configured (ADR-0004, recover.ts), so a bare "healed" status
+ *                no longer implies a model call and does NOT escalate here.
+ *  - **dom**   — at least one step interacted with or read the live DOM
+ *                (deterministically-healed steps land here via their own type).
  *  - **api**   — data came purely from navigation + passive `intercept`, with
  *                no DOM interaction (the URMC GetSlots harvest pattern). Cheapest.
  *
@@ -31,14 +36,16 @@ const DOM_INTERACTION = new Set(["act", "extract", "assert", "download", "upload
  * the conservative generic default.
  */
 export function deriveTier(
-  traces: ReadonlyArray<Pick<StepTrace, "type" | "status" | "healedFrom">>,
+  traces: ReadonlyArray<Pick<StepTrace, "type" | "status" | "healedBy">>,
 ): Tier {
   let sawDom = false;
   let sawApi = false;
   for (const t of traces) {
     if (t.status === "skipped") continue;
-    // A runtime heal is a model call — the agent tier, and it dominates.
-    if (t.status === "healed" || t.healedFrom) return "agent";
+    // Only a model-assisted heal is a model call — the agent tier, dominating.
+    // A deterministic heal (or a pre-flag "healed" trace) classifies below by
+    // what the step itself did, like any other executed step.
+    if (t.healedBy === "model") return "agent";
     if (DOM_INTERACTION.has(t.type)) sawDom = true;
     else if (t.type === "intercept") sawApi = true;
   }

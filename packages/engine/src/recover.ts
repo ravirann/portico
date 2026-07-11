@@ -30,6 +30,7 @@ import type { Locator, Page } from "playwright";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { classifyError, PorticoStepError } from "./errors.js";
+import type { HealedBy } from "./types.js";
 
 const PER_CANDIDATE_TIMEOUT_MS = 800;
 
@@ -190,6 +191,12 @@ export interface RecoverResult<T> {
    *  click. Undefined when the retry alone succeeded (a transient failure
    *  cleared on its own) with nothing actually dismissed. */
   dismissed?: string;
+  /** What the successful recovery leaned on. `"model"` only when the heal
+   *  model picked the dismissal target that was clicked before the retry;
+   *  a deterministic dismissal — or a bare retry that succeeded after the
+   *  model was consulted but picked nothing — is `"deterministic"`. Feeds
+   *  StepTrace.healedBy, so tier.ts only counts real model assists as agent. */
+  healedBy: HealedBy;
 }
 
 /**
@@ -214,14 +221,16 @@ export async function attemptWithRecovery<T>(
     if (classifyError(opts.cause).kind === "aborted") throw opts.cause;
   }
 
+  let healedBy: HealedBy = "deterministic";
   let dismissed = await tryDeterministicDismiss(page);
   if (!dismissed && opts.languageModel) {
     dismissed = await tryModelAssistedDismiss(page, opts.languageModel);
+    if (dismissed) healedBy = "model";
   }
 
   try {
     const value = await action();
-    return { value, dismissed };
+    return { value, dismissed, healedBy };
   } catch (retryError) {
     const { kind: retryKind } = classifyError(retryError);
     const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
