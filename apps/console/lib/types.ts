@@ -63,6 +63,9 @@ export interface ConnectorRecord {
   framework?: string;
   baseUrl?: string;
   auth?: string;
+  /** Industry/app-class key (see @portico/flow-spec SectorKey) — used to
+   *  default a stored-flow run's --sector (see app/api/runs/route.ts). */
+  sector?: string;
   variables: Record<string, string>;
   createdAt: string; // ISO
   updatedAt: string; // ISO

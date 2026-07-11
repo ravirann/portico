@@ -260,6 +260,29 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_members_token_hash ON members(token_hash);
     `,
   },
+  {
+    // Reliability: bounded retry/backoff for the run queue, plus a persisted
+    // error taxonomy on steps/runs/queue rows so a failure carries WHY it
+    // failed, not just that it did (see @portico/engine StepErrorKind).
+    // `run_queue.status` additionally accepts 'paused' at the application
+    // layer (a HITL pause recorded via `finishQueued`, distinct from
+    // 'failed') — the column stays an unconstrained TEXT, as it always has,
+    // so no schema change is needed for that. `connectors.sector` lets a
+    // stored flow's run auto-select its SectorProfile (see
+    // @portico/flow-spec) without every caller passing --sector.
+    version: 12,
+    sql: `
+      ALTER TABLE run_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE run_queue ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 2;
+      ALTER TABLE run_queue ADD COLUMN not_before INTEGER;
+      ALTER TABLE run_queue ADD COLUMN last_error_kind TEXT;
+
+      ALTER TABLE run_steps ADD COLUMN error_kind TEXT;
+      ALTER TABLE runs ADD COLUMN failure_kind TEXT;
+
+      ALTER TABLE connectors ADD COLUMN sector TEXT;
+    `,
+  },
 ];
 
 /** Apply every migration that has not yet run. Safe to call on every open. */

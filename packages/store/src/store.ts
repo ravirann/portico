@@ -51,6 +51,58 @@ export function hashMemberToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
+/** Retry decision for a claimed run-queue row that just finished, once the
+ *  caller (the CLI `worker`) knows the child's real outcome. Kept as a pure
+ *  function — no Store/DB access — so the retry policy itself is exhaustively
+ *  unit-testable without spinning up a database. */
+export interface QueueRetryDecisionInput {
+  status: "completed" | "paused" | "failed";
+  /** Classified failure kind (see @portico/engine StepErrorKind); only
+   *  meaningful when status === "failed". */
+  errorKind?: string;
+  /** Attempts made SO FAR (before this outcome), i.e. `RunQueueRecord.attempts`. */
+  attempts: number;
+  maxAttempts: number;
+}
+
+export interface QueueRetryDecision {
+  action: "finish_completed" | "finish_paused" | "retry" | "finish_failed";
+  /** Only set when action === "retry" — pass straight to `requeueWithBackoff`. */
+  backoffMs?: number;
+}
+
+/** Base backoff unit — first retry waits 30s, then 60s, 120s, ... */
+const RETRY_BACKOFF_BASE_MS = 30_000;
+/** Backoff never exceeds 10 minutes, however many attempts have piled up. */
+const RETRY_BACKOFF_CAP_MS = 600_000;
+/** Only these kinds are treated as plausibly transient — worth retrying.
+ *  Everything else (guard/validation/ambiguous/unsupported/aborted/
+ *  egress_blocked/not_found/unknown) will fail identically on a retry, so
+ *  retrying it would just burn attempts and delay a real failure signal. */
+const RETRYABLE_KINDS = new Set(["timeout", "network"]);
+
+/**
+ * Decide what a `worker` should do with a claimed row's real outcome:
+ *   - completed          -> finish_completed
+ *   - paused (HITL)       -> finish_paused (NOT a failure)
+ *   - failed, transient kind, attempts remaining -> retry (with backoff)
+ *   - failed, otherwise   -> finish_failed
+ * Retries ONLY when status === "failed" AND errorKind is "timeout" or
+ * "network" AND attempts + 1 < maxAttempts (i.e. this retry would still be
+ * within budget). backoffMs = 30_000 * 2^attempts, capped at 600_000.
+ */
+export function queueRetryDecision(input: QueueRetryDecisionInput): QueueRetryDecision {
+  if (input.status === "completed") return { action: "finish_completed" };
+  if (input.status === "paused") return { action: "finish_paused" };
+  // status === "failed"
+  const transient = input.errorKind != null && RETRYABLE_KINDS.has(input.errorKind);
+  if (transient && input.attempts + 1 < input.maxAttempts) {
+    const backoffMs = Math.min(RETRY_BACKOFF_BASE_MS * 2 ** input.attempts, RETRY_BACKOFF_CAP_MS);
+    return { action: "retry", backoffMs };
+  }
+  return { action: "finish_failed" };
+}
+
 export interface StoreOptions {
   /** SQLite file path. Defaults to "data/portico.db". */
   dbPath?: string;
@@ -78,6 +130,7 @@ interface RunRow {
   rrweb_ref: string | null;
   created_at: string;
   instance: string | null;
+  failure_kind: string | null;
 }
 
 interface StepRow {
@@ -90,6 +143,7 @@ interface StepRow {
   healed_to: string | null;
   screenshot_ref: string | null;
   duration_ms: number;
+  error_kind: string | null;
 }
 
 interface FlowRow {
@@ -126,6 +180,7 @@ interface ConnectorRow {
   variables_json: string | null;
   created_at: string;
   updated_at: string;
+  sector: string | null;
 }
 
 interface ConfigRow {
@@ -190,6 +245,10 @@ interface RunQueueRow {
   enqueued_at: string;
   started_at: string | null;
   finished_at: string | null;
+  attempts: number;
+  max_attempts: number;
+  not_before: number | null;
+  last_error_kind: string | null;
 }
 
 interface MemberRow {
@@ -232,10 +291,10 @@ export class Store {
         .prepare(
           `INSERT INTO runs
              (id, connector, instance, flow, engine, tier, status, mode,
-              started_at, duration_ms, output_json, failure_json, rrweb_ref, created_at)
+              started_at, duration_ms, output_json, failure_json, failure_kind, rrweb_ref, created_at)
            VALUES
              (@id, @connector, @instance, @flow, @engine, @tier, @status, @mode,
-              @started_at, @duration_ms, @output_json, @failure_json, @rrweb_ref, @created_at)`,
+              @started_at, @duration_ms, @output_json, @failure_json, @failure_kind, @rrweb_ref, @created_at)`,
         )
         .run({
           id: r.id,
@@ -250,6 +309,7 @@ export class Store {
           duration_ms: r.durationMs,
           output_json: r.output ? JSON.stringify(r.output) : null,
           failure_json: r.failure ? JSON.stringify(r.failure) : null,
+          failure_kind: r.failure?.kind ?? null,
           rrweb_ref: null,
           created_at: new Date().toISOString(),
         });
@@ -264,7 +324,7 @@ export class Store {
     status: RunStatus,
     durationMs: number,
     output?: Record<string, unknown>,
-    failure?: { stepIndex: number; reason: string },
+    failure?: { stepIndex: number; reason: string; kind?: string },
     rrwebRef?: string,
   ): void {
     this.db
@@ -274,6 +334,7 @@ export class Store {
                 duration_ms = @duration_ms,
                 output_json = @output_json,
                 failure_json = @failure_json,
+                failure_kind = @failure_kind,
                 rrweb_ref = COALESCE(@rrweb_ref, rrweb_ref)
           WHERE id = @id`,
       )
@@ -283,6 +344,7 @@ export class Store {
         duration_ms: durationMs,
         output_json: output ? JSON.stringify(output) : null,
         failure_json: failure ? JSON.stringify(failure) : null,
+        failure_kind: failure?.kind ?? null,
         rrweb_ref: rrwebRef ?? null,
       });
   }
@@ -296,9 +358,9 @@ export class Store {
   private insertSteps(runId: string, steps: StepView[]): void {
     const stmt = this.db.prepare(
       `INSERT INTO run_steps
-         (run_id, idx, type, label, status, detail, healed_from, healed_to, screenshot_ref, duration_ms)
+         (run_id, idx, type, label, status, detail, healed_from, healed_to, screenshot_ref, duration_ms, error_kind)
        VALUES
-         (@run_id, @idx, @type, @label, @status, @detail, @healed_from, @healed_to, @screenshot_ref, @duration_ms)`,
+         (@run_id, @idx, @type, @label, @status, @detail, @healed_from, @healed_to, @screenshot_ref, @duration_ms, @error_kind)`,
     );
     for (const s of steps) {
       const rec = s as StepRecord;
@@ -313,6 +375,7 @@ export class Store {
         healed_to: rec.healedTo ?? null,
         screenshot_ref: rec.screenshotRef ?? null,
         duration_ms: s.durationMs,
+        error_kind: rec.errorKind ?? null,
       });
     }
   }
@@ -345,6 +408,7 @@ export class Store {
       ...(s.healed_from != null ? { healedFrom: s.healed_from } : {}),
       ...(s.healed_to != null ? { healedTo: s.healed_to } : {}),
       ...(s.screenshot_ref != null ? { screenshotRef: s.screenshot_ref } : {}),
+      ...(s.error_kind != null ? { errorKind: s.error_kind } : {}),
       durationMs: s.duration_ms,
     }));
     const run: RunView = {
@@ -361,6 +425,10 @@ export class Store {
     };
     if (row.output_json) run.output = JSON.parse(row.output_json);
     if (row.failure_json) run.failure = JSON.parse(row.failure_json);
+    // The dedicated column is the source of truth for `kind` (defensive: it
+    // stays authoritative even if an older row's failure_json blob predates
+    // this field, or the two ever drift).
+    if (run.failure && row.failure_kind != null) run.failure.kind = row.failure_kind;
     if (row.rrweb_ref) run.rrwebRef = row.rrweb_ref;
     if (row.instance) run.instance = row.instance;
     return run;
@@ -645,20 +713,23 @@ export class Store {
     framework?: string;
     baseUrl?: string;
     auth?: string;
+    /** Industry/app-class key (see @portico/flow-spec SectorKey). */
+    sector?: string;
     variables?: Record<string, string>;
     createdAt: string;
     updatedAt: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO connectors (id, key, name, framework, base_url, auth, variables_json, created_at, updated_at)
-         VALUES (@id, @key, @name, @framework, @base_url, @auth, @variables_json, @created_at, @updated_at)
+        `INSERT INTO connectors (id, key, name, framework, base_url, auth, sector, variables_json, created_at, updated_at)
+         VALUES (@id, @key, @name, @framework, @base_url, @auth, @sector, @variables_json, @created_at, @updated_at)
          ON CONFLICT(id) DO UPDATE SET
            key            = excluded.key,
            name           = excluded.name,
            framework      = excluded.framework,
            base_url       = excluded.base_url,
            auth           = excluded.auth,
+           sector         = excluded.sector,
            variables_json = excluded.variables_json,
            updated_at     = excluded.updated_at`,
       )
@@ -669,6 +740,7 @@ export class Store {
         framework: c.framework ?? null,
         base_url: c.baseUrl ?? null,
         auth: c.auth ?? null,
+        sector: c.sector ?? null,
         variables_json: JSON.stringify(c.variables ?? {}),
         created_at: c.createdAt,
         updated_at: c.updatedAt,
@@ -707,6 +779,7 @@ export class Store {
     if (row.framework != null) connector.framework = row.framework;
     if (row.base_url != null) connector.baseUrl = row.base_url;
     if (row.auth != null) connector.auth = row.auth;
+    if (row.sector != null) connector.sector = row.sector;
     return connector;
   }
 
@@ -1044,17 +1117,20 @@ export class Store {
 
   // ---- run queue (bounded worker concurrency) ---------------------------
 
-  /** Enqueue a flow run for a `worker` loop to claim and execute later. */
-  enqueueRun(q: { id: string; flowId: string; inputs?: Record<string, string> }): void {
+  /** Enqueue a flow run for a `worker` loop to claim and execute later.
+   *  `maxAttempts` (default 2) bounds how many times `queueRetryDecision`
+   *  will let a transient failure retry before giving up as 'failed'. */
+  enqueueRun(q: { id: string; flowId: string; inputs?: Record<string, string>; maxAttempts?: number }): void {
     this.db
       .prepare(
-        `INSERT INTO run_queue (id, flow_id, inputs_json, status, enqueued_at)
-         VALUES (@id, @flow_id, @inputs_json, 'queued', @enqueued_at)`,
+        `INSERT INTO run_queue (id, flow_id, inputs_json, status, max_attempts, enqueued_at)
+         VALUES (@id, @flow_id, @inputs_json, 'queued', @max_attempts, @enqueued_at)`,
       )
       .run({
         id: q.id,
         flow_id: q.flowId,
         inputs_json: q.inputs ? JSON.stringify(q.inputs) : null,
+        max_attempts: q.maxAttempts ?? 2,
         enqueued_at: new Date().toISOString(),
       });
   }
@@ -1072,8 +1148,12 @@ export class Store {
   claimNextQueued(worker: string): RunQueueRecord | undefined {
     const claim = this.db.transaction((w: string): RunQueueRow | undefined => {
       const row = this.db
-        .prepare("SELECT * FROM run_queue WHERE status = 'queued' ORDER BY enqueued_at ASC, rowid ASC LIMIT 1")
-        .get() as RunQueueRow | undefined;
+        .prepare(
+          `SELECT * FROM run_queue
+             WHERE status = 'queued' AND (not_before IS NULL OR not_before <= @now)
+             ORDER BY enqueued_at ASC, rowid ASC LIMIT 1`,
+        )
+        .get({ now: Date.now() }) as RunQueueRow | undefined;
       if (!row) return undefined;
       const started_at = new Date().toISOString();
       this.db
@@ -1088,15 +1168,24 @@ export class Store {
     return row ? this.hydrateRunQueue(row) : undefined;
   }
 
-  /** Record a claimed row's terminal outcome. Unset fields (runId/error) are left null. */
-  finishQueued(id: string, patch: { status: "completed" | "failed"; runId?: string; error?: string }): void {
+  /**
+   * Record a claimed row's terminal-for-now outcome. 'paused' is a HITL pause
+   * (the run stopped for human input) recorded distinctly from 'failed' (the
+   * run actually errored) — see `queueRetryDecision`. Unset fields
+   * (runId/error/errorKind) are left as they were.
+   */
+  finishQueued(
+    id: string,
+    patch: { status: "completed" | "failed" | "paused"; runId?: string; error?: string; errorKind?: string },
+  ): void {
     this.db
       .prepare(
         `UPDATE run_queue SET
-           status      = @status,
-           run_id      = COALESCE(@run_id, run_id),
-           error       = COALESCE(@error, error),
-           finished_at = @finished_at
+           status          = @status,
+           run_id          = COALESCE(@run_id, run_id),
+           error           = COALESCE(@error, error),
+           last_error_kind = COALESCE(@last_error_kind, last_error_kind),
+           finished_at     = @finished_at
          WHERE id = @id`,
       )
       .run({
@@ -1104,8 +1193,34 @@ export class Store {
         status: patch.status,
         run_id: patch.runId ?? null,
         error: patch.error ?? null,
+        last_error_kind: patch.errorKind ?? null,
         finished_at: new Date().toISOString(),
       });
+  }
+
+  /**
+   * Requeue a claimed row after a transient failure: bump `attempts`, push
+   * `not_before` out by `backoffMs` (so `claimNextQueued` leaves it alone
+   * until the backoff window elapses), flip `status` back to 'queued', and
+   * record the error kind that triggered the retry — all in one transaction,
+   * so a crash mid-update can never leave attempts bumped without the row
+   * actually back in the queue (or vice versa). Pair with `queueRetryDecision`
+   * to decide WHEN a retry is warranted; this method just performs one.
+   */
+  requeueWithBackoff(id: string, patch: { errorKind: string; backoffMs: number }): void {
+    const requeue = this.db.transaction((p: { errorKind: string; backoffMs: number }) => {
+      this.db
+        .prepare(
+          `UPDATE run_queue SET
+             status          = 'queued',
+             attempts        = attempts + 1,
+             not_before      = @not_before,
+             last_error_kind = @last_error_kind
+           WHERE id = @id`,
+        )
+        .run({ id, not_before: Date.now() + p.backoffMs, last_error_kind: p.errorKind });
+    });
+    requeue(patch);
   }
 
   /** Queue rows, newest-enqueued first; optionally filtered by status. */
@@ -1124,6 +1239,8 @@ export class Store {
       flowId: row.flow_id,
       status: row.status as RunQueueStatus,
       enqueuedAt: row.enqueued_at,
+      attempts: row.attempts,
+      maxAttempts: row.max_attempts,
     };
     if (row.inputs_json != null) {
       // Tolerate malformed JSON (never crash a read over diagnostic metadata).
@@ -1138,6 +1255,8 @@ export class Store {
     if (row.worker != null) rec.worker = row.worker;
     if (row.started_at != null) rec.startedAt = row.started_at;
     if (row.finished_at != null) rec.finishedAt = row.finished_at;
+    if (row.not_before != null) rec.notBefore = row.not_before;
+    if (row.last_error_kind != null) rec.lastErrorKind = row.last_error_kind;
     return rec;
   }
 

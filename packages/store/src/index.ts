@@ -12,8 +12,8 @@
  * there is intentionally no update/delete for audit records anywhere.
  */
 
-export { Store, hashMemberToken } from "./store.js";
-export type { StoreOptions } from "./store.js";
+export { Store, hashMemberToken, queueRetryDecision } from "./store.js";
+export type { StoreOptions, QueueRetryDecisionInput, QueueRetryDecision } from "./store.js";
 export { Artifacts } from "./artifacts.js";
 export { base64Cipher, aesGcmCipher, defaultCipher } from "./crypto.js";
 export type { SessionCipher } from "./crypto.js";
@@ -32,6 +32,8 @@ export type {
   RecordingRecord,
   RecordingStatus,
   RunMode,
+  RunQueueRecord,
+  RunQueueStatus,
   RunStatus,
   RunView,
   ValidationRecord,

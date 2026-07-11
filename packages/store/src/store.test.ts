@@ -6,8 +6,8 @@ import { test } from "node:test";
 import BetterSqlite3 from "better-sqlite3";
 
 import * as storeModule from "./index.js";
-import { Store, hashMemberToken } from "./index.js";
-import type { RunView, StepView } from "./index.js";
+import { Store, hashMemberToken, queueRetryDecision } from "./index.js";
+import type { RunView, StepRecord, StepView } from "./index.js";
 
 function freshStore(): { store: Store; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "portico-store-"));
@@ -83,6 +83,30 @@ test("addRunSteps then getRun returns the steps in order", () => {
     assert.equal(got.steps.length, 3);
     assert.deepEqual(got.steps, steps);
     assert.equal(got.steps[1]?.status, "healed");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createRun persists failure.kind to runs.failure_kind and each step's errorKind to run_steps.error_kind", () => {
+  const { store, dir } = freshStore();
+  try {
+    const steps: StepRecord[] = [
+      { index: 0, type: "navigate", status: "ok", durationMs: 10 },
+      { index: 1, type: "act", status: "failed", detail: "boom", durationMs: 5, errorKind: "network" },
+    ];
+    const run = sampleRun("run-kind-1", steps);
+    run.status = "failed";
+    run.failure = { stepIndex: 1, reason: "boom", kind: "network" };
+    store.createRun(run);
+
+    const got = store.getRun("run-kind-1");
+    assert.ok(got);
+    assert.equal(got.status, "failed");
+    assert.equal(got.failure?.kind, "network");
+    assert.equal(got.steps[1]?.errorKind, "network");
+    assert.equal(got.steps[0]?.errorKind, undefined); // a healthy step carries no kind
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -611,6 +635,48 @@ test("connectors: saveConnector upserts by id", () => {
   }
 });
 
+test("connectors: sector round-trips through save/get/list; omitted sector stays unset", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.saveConnector({
+      id: "conn_sector_1",
+      key: "healthcare-portal",
+      name: "Healthcare Portal",
+      sector: "healthcare",
+      createdAt: "2026-07-08T10:00:00.000Z",
+      updatedAt: "2026-07-08T10:00:00.000Z",
+    });
+    store.saveConnector({
+      id: "conn_sector_2",
+      key: "no-sector-portal",
+      name: "No Sector Portal",
+      createdAt: "2026-07-08T10:00:00.000Z",
+      updatedAt: "2026-07-08T10:00:00.000Z",
+    });
+
+    assert.equal(store.getConnector("conn_sector_1")?.sector, "healthcare");
+    assert.equal(store.getConnector("conn_sector_2")?.sector, undefined);
+    assert.equal(store.getConnector("healthcare-portal")?.sector, "healthcare"); // lookup by key too
+
+    const listed = store.listConnectors();
+    assert.equal(listed.find((c) => c.id === "conn_sector_1")?.sector, "healthcare");
+
+    // upsert can change the sector
+    store.saveConnector({
+      id: "conn_sector_1",
+      key: "healthcare-portal",
+      name: "Healthcare Portal",
+      sector: "finance",
+      createdAt: "2026-07-08T10:00:00.000Z",
+      updatedAt: "2026-07-08T11:00:00.000Z",
+    });
+    assert.equal(store.getConnector("conn_sector_1")?.sector, "finance");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("config: plaintext values round-trip via getConfig/getConfigValue", () => {
   const { store, dir } = freshStore();
   try {
@@ -796,6 +862,233 @@ test("run queue: listQueue filters by status and orders newest-enqueued first", 
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("run_queue migration v12: attempts/max_attempts default, not_before/last_error_kind start unset, and the columns really exist", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-mig-1", flowId: "flows/a.yaml" });
+    store.enqueueRun({ id: "q-mig-2", flowId: "flows/b.yaml", maxAttempts: 5 });
+
+    const rows = store.listQueue();
+    const r1 = rows.find((r) => r.id === "q-mig-1")!;
+    const r2 = rows.find((r) => r.id === "q-mig-2")!;
+    assert.equal(r1.attempts, 0);
+    assert.equal(r1.maxAttempts, 2); // default
+    assert.equal(r1.notBefore, undefined);
+    assert.equal(r1.lastErrorKind, undefined);
+    assert.equal(r2.maxAttempts, 5);
+
+    // Confirm the columns are real SQL columns, not just app-shaped defaults.
+    const raw = new BetterSqlite3(join(dir, "portico.db"));
+    try {
+      const runQueueCols = (raw.prepare("PRAGMA table_info(run_queue)").all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      );
+      for (const col of ["attempts", "max_attempts", "not_before", "last_error_kind"]) {
+        assert.ok(runQueueCols.includes(col), `run_queue missing column ${col}`);
+      }
+      const runStepCols = (raw.prepare("PRAGMA table_info(run_steps)").all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      );
+      assert.ok(runStepCols.includes("error_kind"));
+      const runCols = (raw.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name);
+      assert.ok(runCols.includes("failure_kind"));
+      const connectorCols = (raw.prepare("PRAGMA table_info(connectors)").all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      );
+      assert.ok(connectorCols.includes("sector"));
+    } finally {
+      raw.close();
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run queue: claimNextQueued skips a row whose not_before is in the future, and picks it up once past", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-nb-1", flowId: "flows/a.yaml" });
+    store.enqueueRun({ id: "q-nb-2", flowId: "flows/b.yaml" });
+    store.claimNextQueued("worker-1"); // claims q-nb-1 -> running
+    store.claimNextQueued("worker-1"); // claims q-nb-2 -> running
+
+    // Simulate a transient failure on q-nb-1, retried far in the future.
+    store.requeueWithBackoff("q-nb-1", { errorKind: "timeout", backoffMs: 60_000 });
+    const requeued = store.listQueue().find((r) => r.id === "q-nb-1")!;
+    assert.equal(requeued.status, "queued");
+    assert.equal(requeued.attempts, 1);
+    assert.equal(requeued.lastErrorKind, "timeout");
+    assert.ok(requeued.notBefore && requeued.notBefore > Date.now());
+
+    // q-nb-2 finishes normally, so the only 'queued' row left is q-nb-1 — and
+    // it isn't due yet, so nothing is claimable.
+    store.finishQueued("q-nb-2", { status: "completed" });
+    assert.equal(store.claimNextQueued("worker-2"), undefined);
+
+    // Move not_before into the past (simulating elapsed time) and confirm it
+    // becomes claimable again.
+    const raw = new BetterSqlite3(join(dir, "portico.db"));
+    try {
+      raw.prepare("UPDATE run_queue SET not_before = ? WHERE id = ?").run(Date.now() - 1000, "q-nb-1");
+    } finally {
+      raw.close();
+    }
+    const claimed = store.claimNextQueued("worker-2");
+    assert.equal(claimed?.id, "q-nb-1");
+    assert.equal(claimed?.status, "running");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run queue: requeueWithBackoff bumps attempts and status on each call, cumulatively, in one transaction", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-rb-1", flowId: "flows/a.yaml", maxAttempts: 5 });
+    store.claimNextQueued("worker-1");
+
+    store.requeueWithBackoff("q-rb-1", { errorKind: "network", backoffMs: 30_000 });
+    let row = store.listQueue().find((r) => r.id === "q-rb-1")!;
+    assert.equal(row.attempts, 1);
+    assert.equal(row.status, "queued");
+    assert.equal(row.lastErrorKind, "network");
+    const firstNotBefore = row.notBefore!;
+
+    // Backdate not_before (this test is about the transactional bump, not
+    // waiting out real-time backoff) and retry a second time.
+    const raw = new BetterSqlite3(join(dir, "portico.db"));
+    try {
+      raw.prepare("UPDATE run_queue SET not_before = ? WHERE id = ?").run(Date.now() - 1, "q-rb-1");
+    } finally {
+      raw.close();
+    }
+    store.claimNextQueued("worker-2");
+    store.requeueWithBackoff("q-rb-1", { errorKind: "timeout", backoffMs: 60_000 });
+    row = store.listQueue().find((r) => r.id === "q-rb-1")!;
+    assert.equal(row.attempts, 2);
+    assert.equal(row.lastErrorKind, "timeout"); // overwritten by the newer kind
+    assert.ok(row.notBefore! > firstNotBefore);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run queue: finishQueued('paused') is recorded distinctly from 'failed', with its error kind", () => {
+  const { store, dir } = freshStore();
+  try {
+    store.enqueueRun({ id: "q-pause-1", flowId: "flows/a.yaml" });
+    store.enqueueRun({ id: "q-pause-2", flowId: "flows/b.yaml" });
+    store.claimNextQueued("worker-1");
+    store.claimNextQueued("worker-1");
+
+    store.finishQueued("q-pause-1", { status: "paused", runId: "run_p1", errorKind: "guard" });
+    store.finishQueued("q-pause-2", { status: "failed", runId: "run_p2", error: "boom", errorKind: "validation" });
+
+    const rows = store.listQueue();
+    const paused = rows.find((r) => r.id === "q-pause-1")!;
+    const failed = rows.find((r) => r.id === "q-pause-2")!;
+
+    assert.equal(paused.status, "paused");
+    assert.notEqual(paused.status, "failed");
+    assert.equal(paused.lastErrorKind, "guard");
+    assert.ok(paused.finishedAt);
+
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.error, "boom");
+    assert.equal(failed.lastErrorKind, "validation");
+
+    // status filters keep them apart
+    assert.deepEqual(store.listQueue({ status: "paused" }).map((r) => r.id), ["q-pause-1"]);
+    assert.deepEqual(store.listQueue({ status: "failed" }).map((r) => r.id), ["q-pause-2"]);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("queueRetryDecision: full decision matrix", () => {
+  // completed / paused short-circuit regardless of kind/attempts.
+  assert.deepEqual(queueRetryDecision({ status: "completed", attempts: 0, maxAttempts: 2 }), {
+    action: "finish_completed",
+  });
+  assert.deepEqual(
+    queueRetryDecision({ status: "completed", errorKind: "timeout", attempts: 3, maxAttempts: 1 }),
+    { action: "finish_completed" },
+  );
+  assert.deepEqual(queueRetryDecision({ status: "paused", attempts: 0, maxAttempts: 2 }), { action: "finish_paused" });
+  assert.deepEqual(
+    queueRetryDecision({ status: "paused", errorKind: "guard", attempts: 5, maxAttempts: 1 }),
+    { action: "finish_paused" },
+  );
+
+  // failed + retryable kind (timeout/network) + attempts remaining -> retry,
+  // with the documented backoff formula: 30_000 * 2^attempts, capped at 600_000.
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "timeout", attempts: 0, maxAttempts: 2 }),
+    { action: "retry", backoffMs: 30_000 },
+  );
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "network", attempts: 0, maxAttempts: 2 }),
+    { action: "retry", backoffMs: 30_000 },
+  );
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "network", attempts: 2, maxAttempts: 5 }),
+    { action: "retry", backoffMs: 120_000 }, // 30_000 * 2^2
+  );
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "timeout", attempts: 4, maxAttempts: 10 }),
+    { action: "retry", backoffMs: 480_000 }, // 30_000 * 2^4, not yet capped
+  );
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "network", attempts: 5, maxAttempts: 10 }),
+    { action: "retry", backoffMs: 600_000 }, // 30_000 * 2^5 = 960_000, capped
+  );
+
+  // the attempts+1 < maxAttempts edge, precisely at the boundary.
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "timeout", attempts: 1, maxAttempts: 3 }),
+    { action: "retry", backoffMs: 60_000 }, // attempts+1 (2) < maxAttempts (3) -> still retries
+  );
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "timeout", attempts: 2, maxAttempts: 3 }),
+    { action: "finish_failed" }, // attempts+1 (3) < maxAttempts (3) is false -> gives up
+  );
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "timeout", attempts: 1, maxAttempts: 2 }),
+    { action: "finish_failed" }, // same boundary, smaller numbers
+  );
+  assert.deepEqual(
+    queueRetryDecision({ status: "failed", errorKind: "network", attempts: 0, maxAttempts: 1 }),
+    { action: "finish_failed" }, // maxAttempts 1 => never retries
+  );
+
+  // non-transient kinds never retry, however much budget remains.
+  const nonRetryable = [
+    "not_found",
+    "ambiguous",
+    "navigation",
+    "validation",
+    "guard",
+    "aborted",
+    "egress_blocked",
+    "unsupported",
+    "unknown",
+  ];
+  for (const kind of nonRetryable) {
+    assert.deepEqual(
+      queueRetryDecision({ status: "failed", errorKind: kind, attempts: 0, maxAttempts: 5 }),
+      { action: "finish_failed" },
+      `kind "${kind}" must not retry`,
+    );
+  }
+
+  // no errorKind at all -> treated as non-transient.
+  assert.deepEqual(queueRetryDecision({ status: "failed", attempts: 0, maxAttempts: 5 }), { action: "finish_failed" });
 });
 
 test("browser_sessions: pid persists through createBrowserSession + getBrowserSession", () => {

@@ -4,7 +4,7 @@ import { writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { runCli } from "@/lib/actions";
-import { listRuns, readFlow } from "@/lib/store";
+import { listRuns, readFlow, readConnector } from "@/lib/store";
 import { pickLiveSession } from "@/lib/sessions";
 
 export const runtime = "nodejs";
@@ -81,6 +81,20 @@ async function runStoredFlow(flowId: string, inputs: Record<string, string>, liv
 
     const args = ["run", file, "--cdp", picked.cdpEndpoint, "--json"];
     if (flow.connector) args.push("--connector", flow.connector);
+    // Reliability defaults from the connector record: the CLI would derive
+    // these itself from --connector, but passing them explicitly here means
+    // the run's SectorProfile + egress boundary are visible right in the
+    // spawned command line, not just inferred several layers down.
+    const connector = flow.connector ? readConnector(flow.connector) : undefined;
+    if (connector?.sector) args.push("--sector", connector.sector);
+    if (connector?.baseUrl) {
+      try {
+        const host = new URL(connector.baseUrl).host;
+        if (host) args.push("--allowed-domains", host);
+      } catch {
+        /* malformed baseUrl — skip the egress hint, the CLI still derives its own */
+      }
+    }
     if (live) args.push("--live");
     for (const [k, v] of Object.entries(inputs)) args.push("--input", `${k}=${v}`);
 

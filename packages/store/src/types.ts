@@ -30,6 +30,9 @@ export interface StepRecord extends StepView {
   healedFrom?: string;
   healedTo?: string;
   screenshotRef?: string;
+  /** Classified failure kind (see @portico/engine StepErrorKind), set on
+   *  "failed" traces. Persisted to run_steps.error_kind. */
+  errorKind?: string;
 }
 
 /** Matches apps/console/lib/types.ts `RunView`. */
@@ -45,7 +48,9 @@ export interface RunView {
   durationMs: number;
   steps: StepRecord[];
   output?: Record<string, unknown>;
-  failure?: { stepIndex: number; reason: string };
+  /** `kind` (see @portico/engine StepErrorKind) is additionally persisted to
+   *  the dedicated runs.failure_kind column (not just inside failure_json). */
+  failure?: { stepIndex: number; reason: string; kind?: string };
   rrwebRef?: string;
   /** The instance (deployment) this run targeted, e.g. "urmc". `connector` is
    *  the connector KEY; `instance` is the specific deployment within it. */
@@ -143,6 +148,10 @@ export interface ConnectorRecord {
   framework?: string;
   baseUrl?: string;
   auth?: string;
+  /** Industry/app-class key (see @portico/flow-spec SectorKey) — lets a
+   *  stored flow's run auto-select its SectorProfile and lets `portico run`
+   *  default --sector without the caller passing it explicitly. */
+  sector?: string;
   variables: Record<string, string>;
   createdAt: string;
   updatedAt: string;
@@ -206,7 +215,10 @@ export interface ConfigEntry {
   updatedAt: string;
 }
 
-export type RunQueueStatus = "queued" | "running" | "completed" | "failed";
+/** `paused` records a HITL pause (a run that stopped for human input) as its
+ *  own terminal-for-now outcome — distinct from `failed`, which means the run
+ *  actually errored out. */
+export type RunQueueStatus = "queued" | "running" | "completed" | "failed" | "paused";
 
 /**
  * A row in the durable run queue that backs the CLI `worker` loop — a
@@ -226,6 +238,18 @@ export interface RunQueueRecord {
   enqueuedAt: string;
   startedAt?: string;
   finishedAt?: string;
+  /** How many claim attempts have been made so far (bumped by
+   *  `requeueWithBackoff`; starts at 0). */
+  attempts: number;
+  /** Attempts allowed before a transient failure gives up and finishes
+   *  'failed' instead of retrying (see `queueRetryDecision`). Defaults to 2. */
+  maxAttempts: number;
+  /** Epoch ms before which `claimNextQueued` will not pick this row up —
+   *  set by `requeueWithBackoff` after a transient failure. */
+  notBefore?: number;
+  /** The `errorKind` of the most recent failure/retry (see @portico/engine
+   *  StepErrorKind), kept even across a successful retry's overwrite. */
+  lastErrorKind?: string;
 }
 
 export type MemberRole = "viewer" | "operator" | "admin";

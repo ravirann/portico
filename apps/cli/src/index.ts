@@ -25,9 +25,10 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getEngine, compileRecording, evaluateValidation, refineFlow, resolveHealModel, listSessions, sampleInputsFromFlow, deriveTier } from "@portico/engine";
 import type { RunMode, Recording } from "@portico/engine";
 import type { Flow, Target } from "@portico/flow-spec";
+import { listSectors } from "@portico/flow-spec";
 import { defaultSecretProvider, resolveSecrets } from "@portico/vault";
-import { Store, hashMemberToken } from "@portico/store";
-import type { MemberRole } from "@portico/store";
+import { Store, hashMemberToken, queueRetryDecision } from "@portico/store";
+import type { MemberRole, RunQueueRecord } from "@portico/store";
 
 // Repo root, resolved from this file's own location (not process.cwd()) so a
 // `worker` spawning a grandchild `run` process gets a stable cwd regardless of
@@ -70,6 +71,11 @@ interface CliOpts {
   concurrency?: number;
   once: boolean;
   role?: string;
+  maxAttempts?: number;
+  sector?: string;
+  allowedDomains?: string;
+  resumeFrom?: number;
+  resumeOutputFile?: string;
 }
 
 function parseArgs(argv: string[]) {
@@ -117,6 +123,11 @@ function parseArgs(argv: string[]) {
     else if (a === "--concurrency") opts.concurrency = Number(rest[++i]);
     else if (a === "--once") opts.once = true;
     else if (a === "--role") opts.role = rest[++i];
+    else if (a === "--max-attempts") opts.maxAttempts = Number(rest[++i]);
+    else if (a === "--sector") opts.sector = rest[++i];
+    else if (a === "--allowed-domains") opts.allowedDomains = rest[++i];
+    else if (a === "--resume-from") opts.resumeFrom = Number(rest[++i]);
+    else if (a === "--resume-output") opts.resumeOutputFile = rest[++i];
     else if (a === "--input") {
       const [k, ...v] = (rest[++i] ?? "").split("=");
       if (k) opts.inputs[k] = v.join("=");
@@ -332,25 +343,26 @@ async function main() {
   // flow YAML path) verbatim in `flowId`, so the worker can replay it as-is.
 
   if (cmd === "enqueue") {
-    if (!flowPath) { console.error("usage: portico enqueue <flowId> [--input key=value]... [--json]"); process.exit(2); }
+    if (!flowPath) { console.error("usage: portico enqueue <flowId> [--input key=value]... [--max-attempts N] [--json]"); process.exit(2); }
     const store = new Store();
     const id = `q_${Math.random().toString(16).slice(2, 10)}`;
     const inputs = Object.keys(opts.inputs).length ? opts.inputs : undefined;
-    store.enqueueRun({ id, flowId: flowPath, inputs });
+    const maxAttempts = opts.maxAttempts ?? 2;
+    store.enqueueRun({ id, flowId: flowPath, inputs, maxAttempts });
     store.appendAudit({
       ts: new Date().toISOString(), actor: "worker", action: "queue.enqueued",
-      target: flowPath, detail: { id },
+      target: flowPath, detail: { id, maxAttempts },
     });
     store.close();
-    const out = { id, flowId: flowPath, status: "queued" as const };
+    const out = { id, flowId: flowPath, status: "queued" as const, maxAttempts };
     if (opts.json) return emit(out);
-    console.log(`✔ enqueued "${flowPath}" as ${id} (status: queued)`);
+    console.log(`✔ enqueued "${flowPath}" as ${id} (status: queued, max-attempts: ${maxAttempts})`);
     process.exit(0);
   }
 
   if (cmd === "queue") {
     const store = new Store();
-    const status = opts.status as "queued" | "running" | "completed" | "failed" | undefined;
+    const status = opts.status as "queued" | "running" | "completed" | "failed" | "paused" | undefined;
     const limit = opts.limit ?? 50;
     const rows = store.listQueue({ status, limit });
     store.close();
@@ -361,11 +373,13 @@ async function main() {
       console.log("(queue empty)");
     } else {
       console.log(
-        `${"ID".padEnd(12)}  ${"FLOW".padEnd(30)}  ${"STATUS".padEnd(10)}  ${"RUN".padEnd(12)}  ${"ENQUEUED".padEnd(24)}  ERROR`,
+        `${"ID".padEnd(12)}  ${"FLOW".padEnd(24)}  ${"STATUS".padEnd(10)}  ${"ATTEMPTS".padEnd(9)}  ${"NOT_BEFORE".padEnd(24)}  ${"KIND".padEnd(12)}  ${"RUN".padEnd(12)}  ${"ENQUEUED".padEnd(24)}  ERROR`,
       );
       for (const r of rows) {
+        const attempts = `${r.attempts}/${r.maxAttempts}`;
+        const notBefore = r.notBefore ? new Date(r.notBefore).toISOString() : "-";
         console.log(
-          `${r.id.padEnd(12)}  ${r.flowId.slice(0, 30).padEnd(30)}  ${r.status.padEnd(10)}  ${(r.runId ?? "-").padEnd(12)}  ${r.enqueuedAt.padEnd(24)}  ${(r.error ?? "").slice(0, 40)}`,
+          `${r.id.padEnd(12)}  ${r.flowId.slice(0, 24).padEnd(24)}  ${r.status.padEnd(10)}  ${attempts.padEnd(9)}  ${notBefore.padEnd(24)}  ${(r.lastErrorKind ?? "-").padEnd(12)}  ${(r.runId ?? "-").padEnd(12)}  ${r.enqueuedAt.padEnd(24)}  ${(r.error ?? "").slice(0, 40)}`,
         );
       }
     }
@@ -379,25 +393,34 @@ async function main() {
     const log = (...a: unknown[]) => { if (!opts.json) console.log(...a); };
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+    // The shape `run --json` prints on stdout (see the `opts.json` branch at
+    // the bottom of main()) — `id` there IS the run id (createRun's row id),
+    // NOT the queue row id. `status`/`failure.kind` are what drive the retry
+    // decision below.
+    interface ParsedRunJson {
+      id?: string;
+      status?: string;
+      error?: string;
+      failure?: { stepIndex?: number; reason?: string; resumable?: boolean; kind?: string };
+    }
+
     // Best-effort human-readable failure reason, truncated so it fits comfortably
     // in the queue row's TEXT column.
-    function describeFailure(
-      parsed: { status?: string; error?: string; failure?: { reason?: string } } | null,
-      stderr: string,
-      code: number | null,
-    ): string {
+    function describeFailure(parsed: ParsedRunJson | null, stderr: string, code: number | null): string {
       const reason = parsed?.failure?.reason ?? parsed?.error;
       const msg = reason || stderr.trim() || (parsed?.status ? `child reported status "${parsed.status}"` : `child exited with code ${code}`);
       return msg.slice(0, 1000);
     }
 
     // Spawn `run <flowId> --headless --json` for one claimed row, mirroring the
-    // console's runCli spawn pattern (node --import tsx <CLI> ...), and record
-    // the row's terminal outcome once the child exits. Defensive about stdout:
-    // a flow run can leak plain log lines ahead of the final JSON payload, so
-    // scan backward for the LAST line that parses as JSON rather than trusting
-    // the very last line blindly.
-    function runQueuedFlow(row: { id: string; flowId: string; inputs?: Record<string, string> }): Promise<"completed" | "failed"> {
+    // console's runCli spawn pattern (node --import tsx <CLI> ...), parse the
+    // child's EngineRunResult JSON off stdout (not just its exit code — a
+    // paused HITL run and a real failure both may exit non-zero-ish/ambiguous
+    // ways, and only the JSON says which), and record the row's real outcome.
+    // Defensive about stdout: a flow run can leak plain log lines ahead of the
+    // final JSON payload, so scan backward for the LAST line that parses as
+    // JSON rather than trusting the very last line blindly.
+    function runQueuedFlow(row: RunQueueRecord): Promise<"completed" | "paused" | "retry" | "failed"> {
       return new Promise((resolveChild) => {
         const args = ["--import", "tsx", CLI_ENTRY, "run", row.flowId, "--headless", "--json"];
         for (const [k, v] of Object.entries(row.inputs ?? {})) args.push("--input", `${k}=${v}`);
@@ -412,7 +435,7 @@ async function main() {
           if (settled) return;
           settled = true;
 
-          let parsed: { id?: string; runId?: string; status?: string; error?: string; failure?: { reason?: string } } | null = null;
+          let parsed: ParsedRunJson | null = null;
           if (!spawnError) {
             const lines = out.trim().split("\n").filter(Boolean);
             for (let i = lines.length - 1; i >= 0; i--) {
@@ -421,26 +444,70 @@ async function main() {
               try { parsed = JSON.parse(line); break; } catch { /* keep scanning backward */ }
             }
           }
-          const runId = parsed?.runId ?? parsed?.id;
-          const ok = !spawnError && code === 0 && parsed != null && parsed.status !== "failed";
 
-          if (ok) {
+          // Fallback: stdout wasn't parseable JSON (spawn error, crash, or an
+          // unrecognized status) — the exit code alone can't tell us WHY, so
+          // record an unknown-kind failure rather than guessing at a retry.
+          const status = parsed?.status;
+          if (!parsed || (status !== "completed" && status !== "failed" && status !== "paused")) {
+            const runId = parsed?.id;
+            const error = spawnError ? spawnError.message.slice(0, 1000) : describeFailure(parsed, err, code);
+            store.finishQueued(row.id, { status: "failed", runId, error, errorKind: "unknown" });
+            store.appendAudit({
+              ts: new Date().toISOString(), actor: "worker", action: "queue.failed",
+              target: row.flowId, runId, detail: { id: row.id, worker: workerName, error, errorKind: "unknown" },
+            });
+            log(`✗ ${row.id} (${row.flowId}) → failed: ${error}`);
+            resolveChild("failed");
+            return;
+          }
+
+          const runId = parsed.id;
+          const errorKind = parsed.failure?.kind;
+          const decision = queueRetryDecision({
+            status: status as "completed" | "failed" | "paused",
+            errorKind,
+            attempts: row.attempts,
+            maxAttempts: row.maxAttempts,
+          });
+
+          if (decision.action === "finish_completed") {
             store.finishQueued(row.id, { status: "completed", runId });
             store.appendAudit({
               ts: new Date().toISOString(), actor: "worker", action: "queue.completed",
               target: row.flowId, runId, detail: { id: row.id, worker: workerName },
             });
             log(`✔ ${row.id} (${row.flowId}) → completed${runId ? ` (run ${runId})` : ""}`);
+            resolveChild("completed");
+          } else if (decision.action === "finish_paused") {
+            // A HITL pause is NOT a failure — recorded as its own status.
+            store.finishQueued(row.id, { status: "paused", runId, errorKind });
+            store.appendAudit({
+              ts: new Date().toISOString(), actor: "worker", action: "queue.paused",
+              target: row.flowId, runId, detail: { id: row.id, worker: workerName },
+            });
+            log(`⏸ ${row.id} (${row.flowId}) → paused${runId ? ` (run ${runId})` : ""} — needs human input`);
+            resolveChild("paused");
+          } else if (decision.action === "retry") {
+            const error = describeFailure(parsed, err, code);
+            store.requeueWithBackoff(row.id, { errorKind: errorKind ?? "unknown", backoffMs: decision.backoffMs ?? 0 });
+            store.appendAudit({
+              ts: new Date().toISOString(), actor: "worker", action: "queue.retrying",
+              target: row.flowId, runId,
+              detail: { id: row.id, worker: workerName, error, errorKind, backoffMs: decision.backoffMs, attempt: row.attempts + 1 },
+            });
+            log(`↻ ${row.id} (${row.flowId}) → retrying in ${Math.round((decision.backoffMs ?? 0) / 1000)}s (attempt ${row.attempts + 1}/${row.maxAttempts}, ${errorKind}): ${error}`);
+            resolveChild("retry");
           } else {
-            const error = spawnError ? spawnError.message.slice(0, 1000) : describeFailure(parsed, err, code);
-            store.finishQueued(row.id, { status: "failed", runId, error });
+            const error = describeFailure(parsed, err, code);
+            store.finishQueued(row.id, { status: "failed", runId, error, errorKind });
             store.appendAudit({
               ts: new Date().toISOString(), actor: "worker", action: "queue.failed",
-              target: row.flowId, runId, detail: { id: row.id, worker: workerName, error },
+              target: row.flowId, runId, detail: { id: row.id, worker: workerName, error, errorKind },
             });
             log(`✗ ${row.id} (${row.flowId}) → failed: ${error}`);
+            resolveChild("failed");
           }
-          resolveChild(ok ? "completed" : "failed");
         };
 
         child.on("close", (code) => finishOnce(code));
@@ -448,7 +515,7 @@ async function main() {
       });
     }
 
-    let claimed = 0, completed = 0, failed = 0;
+    let claimed = 0, completed = 0, paused = 0, retried = 0, failed = 0;
     const active = new Map<string, Promise<void>>();
 
     for (;;) {
@@ -457,9 +524,12 @@ async function main() {
         const row = store.claimNextQueued(workerName);
         if (!row) break;
         claimed++;
-        log(`▶ claimed ${row.id} (${row.flowId})`);
+        log(`▶ claimed ${row.id} (${row.flowId}) [attempt ${row.attempts + 1}/${row.maxAttempts}]`);
         const p = runQueuedFlow(row).then((outcome) => {
-          if (outcome === "completed") completed++; else failed++;
+          if (outcome === "completed") completed++;
+          else if (outcome === "paused") paused++;
+          else if (outcome === "retry") retried++;
+          else failed++;
           active.delete(row.id);
         });
         active.set(row.id, p);
@@ -467,6 +537,8 @@ async function main() {
 
       if (opts.once) {
         // Testable mode: drain until nothing is queued and nothing is running.
+        // A row requeued with backoff isn't due yet, so it won't re-claim
+        // within this same drain — that's expected (see `queueRetryDecision`).
         if (active.size === 0) break;
         await Promise.race(active.values());
         continue;
@@ -475,9 +547,9 @@ async function main() {
     }
 
     store.close();
-    const summary = { claimed, completed, failed };
+    const summary = { claimed, completed, paused, retried, failed };
     if (opts.json) return emit(summary);
-    console.log(`worker done — claimed ${claimed}, completed ${completed}, failed ${failed}`);
+    console.log(`worker done — claimed ${claimed}, completed ${completed}, paused ${paused}, retried ${retried}, failed ${failed}`);
     process.exit(0);
   }
 
@@ -498,7 +570,7 @@ async function main() {
   }
   if (cmd === "save-connector") {
     if (!opts.key || !opts.name) {
-      console.error("usage: portico save-connector --key <key> --name <name> [--framework F] [--base-url URL] [--auth AUTH]");
+      console.error("usage: portico save-connector --key <key> --name <name> [--framework F] [--base-url URL] [--auth AUTH] [--sector KEY]");
       process.exit(2);
     }
     const store = new Store();
@@ -512,6 +584,7 @@ async function main() {
       framework: opts.framework ?? existing?.framework,
       baseUrl: opts.baseUrl ?? existing?.baseUrl,
       auth: opts.auth ?? existing?.auth,
+      sector: opts.sector ?? existing?.sector,
       variables: existing?.variables,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -1046,12 +1119,13 @@ async function main() {
 
   if ((cmd !== "run" && cmd !== "validate") || !flowPath) {
     console.error(
-      "usage: portico <run <flow.yaml> | validate <flow-id> | confirm <flow-id> | compile <recording.json> | " +
+      "usage: portico <run <flow.yaml> [--sector KEY] [--allowed-domains a,b] [--resume-from N] [--resume-output file.json] | " +
+        "validate <flow-id> | confirm <flow-id> | compile <recording.json> | " +
         "list-flows | get-flow <id> | delete-flow <flowId> [--all-versions] | list-runs | get-run <id> | list-sessions | close-session <id> | " +
-        "list-connectors | get-connector <idOrKey> | save-connector | delete-connector <id> | " +
+        "list-connectors | get-connector <idOrKey> | save-connector [--sector KEY] | delete-connector <id> | " +
         "config-get | config-set | session-start | session-kill <id> | " +
         "record-start --session <id> | record-stop <recId> | get-recording <recId> | list-recordings | " +
-        "enqueue <flowId> [--input k=v]... | queue [--status S] [--limit N] | worker [--concurrency N] [--once] | " +
+        "enqueue <flowId> [--input k=v]... [--max-attempts N] | queue [--status S] [--limit N] | worker [--concurrency N] [--once] | " +
         "member-add --name <n> --role <viewer|operator|admin> | member-list | member-disable <id> | member-enable <id> | auth-check>",
     );
     process.exit(2);
@@ -1089,10 +1163,15 @@ async function main() {
   // --connector when it spawns runs). The runner needs a base URL to establish
   // the app origin before flows that OPEN with localStorage reads / api calls,
   // otherwise those steps execute on about:blank and storage access is denied.
-  if (!baseUrl && connectorKey) {
+  // The same lookup seeds the sector default below, so a stored flow's run
+  // inherits its connector's reliability profile without an explicit --sector.
+  let connectorSector: string | undefined;
+  if (connectorKey && (!baseUrl || !opts.sector)) {
     try {
       const s = new Store();
-      baseUrl = s.getConnector(connectorKey)?.baseUrl ?? "";
+      const c = s.getConnector(connectorKey);
+      if (!baseUrl) baseUrl = c?.baseUrl ?? "";
+      connectorSector = c?.sector;
       s.close();
     } catch {
       /* store unavailable — the runner can still infer an origin from the flow */
@@ -1106,6 +1185,36 @@ async function main() {
     allowed_domains: host ? [host] : [],
     auth: instance.auth ?? "",
   };
+
+  // Sector + egress allow-list: an explicit flag always wins; otherwise fall
+  // back to the connector's stored sector / the target's derived
+  // allowed_domains, so a stored flow inherits the right SectorProfile and
+  // egress boundary without every caller passing them explicitly.
+  const sectorKeys = listSectors() as string[];
+  if (opts.sector && !sectorKeys.includes(opts.sector)) {
+    const msg = `invalid --sector "${opts.sector}" — must be one of: ${sectorKeys.join(", ")}`;
+    if (opts.json) return emit({ error: msg }, 2);
+    console.error(`✗ ${msg}`);
+    process.exit(2);
+  }
+  const sector: string | undefined = opts.sector ?? connectorSector;
+  const allowedDomains: string[] | undefined = opts.allowedDomains
+    ? opts.allowedDomains.split(",").map((d) => d.trim()).filter(Boolean)
+    : target.allowed_domains.length
+      ? target.allowed_domains
+      : undefined;
+
+  let resumeOutputValue: Record<string, unknown> | undefined;
+  if (opts.resumeOutputFile) {
+    try {
+      resumeOutputValue = JSON.parse(readFileSync(opts.resumeOutputFile, "utf8")) as Record<string, unknown>;
+    } catch (e) {
+      const msg = `--resume-output file invalid: ${e instanceof Error ? e.message : e}`;
+      if (opts.json) return emit({ error: msg }, 1);
+      console.error(`✗ ${msg}`);
+      process.exit(1);
+    }
+  }
 
   const secretRefs: Record<string, string> = instance.secrets ?? {};
   const secrets = Object.keys(secretRefs).length
@@ -1127,7 +1236,7 @@ async function main() {
     if (hk) process.env.PORTICO_HEAL_API_KEY = hk;
   } catch { /* config read is best-effort */ }
 
-  const engine = getEngine("libretto");
+  const engine = getEngine("portico");
   const mode: RunMode = opts.live ? "live" : "dry_run";
   const log = (...a: unknown[]) => { if (!opts.json) console.log(...a); };
   log(`▶ running flow "${flow.key}" via ${engine.name} (headless=${opts.headless}, mode=${mode}${opts.profile ? `, profile=${opts.profile}` : ""})`);
@@ -1154,6 +1263,10 @@ async function main() {
     cdpEndpoint: opts.cdp,
     onHuman,
     onStep: (t) => log(`  [${t.index}] ${t.type}${t.label ? ` — ${t.label}` : ""}: ${t.status}${t.detail ? ` (${t.detail})` : ""}`),
+    sector,
+    allowedDomains,
+    resumeFrom: opts.resumeFrom,
+    resumeOutput: resumeOutputValue,
   });
 
   const runId = "run_" + Math.random().toString(16).slice(2, 8);
@@ -1162,6 +1275,7 @@ async function main() {
     index: t.index, type: t.type, label: t.label,
     status: t.status, detail: t.detail,
     healedFrom: t.healedFrom, healedTo: t.healedTo, screenshotRef: t.screenshotRef,
+    errorKind: t.errorKind,
     durationMs: Math.max(0, t.endedAt - t.startedAt),
   }));
 
