@@ -98,9 +98,7 @@ engine and the completed run appears live.
 seam ([ADR-0004](docs/decisions/0004-own-engine.md)), telemetry off for
 self-hosted PHI. Recovery from drift is **deterministic-first**: a scripted
 overlay/popup-dismiss-and-retry step that only calls a model when one is
-configured. Portico composed [Libretto](https://github.com/saffron-health/libretto)
-for this layer through ADR-0001; field notes from that era, kept for history:
-[docs/LIBRETTO-INTEGRATION-NOTES.md](docs/LIBRETTO-INTEGRATION-NOTES.md).
+configured.
 
 ## License
 
